@@ -171,6 +171,14 @@ RUN ./openssl_build.sh
 COPY ./scripts/python310_build.sh .
 RUN ./python310_build.sh
 
+ARG PROXY=""
+ENV PIP_TRUST_HOSTS=${PROXY}
+
+RUN set -e; \
+    if [ "$PIP_TRUST_HOSTS" != "" ]; then \
+        python3 -m pip config set global.trusted-host "$(python3 -m pip config get global.trusted-host) $PIP_TRUST_HOSTS"; \
+    fi
+
 # gProfiler part
 
 WORKDIR /app
