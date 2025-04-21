@@ -15,6 +15,26 @@
 # limitations under the License.
 #
 set -euo pipefail
+set -o xtrace
+
+retry() {
+  local retries="$1"
+  local command="$2"
+
+  echo "→ Running: $command (retries left: $retries)"
+  eval "$command"
+  local exit_code=$?
+
+  if [[ $exit_code -ne 0 && $retries -gt 0 ]]; then
+    echo "⚠️  $command failed with exit code $exit_code, retrying..."
+    retry $((retries - 1)) "$command"
+    exit_code=$?
+  elif [[ $exit_code -ne 0 ]]; then
+    echo "❌ $command failed after retries."
+  fi
+
+  return $exit_code
+}
 
 apt-get update
 apt-get install -y --no-install-recommends \
@@ -52,7 +72,7 @@ ZSTD_VERSION=1.5.2
 curl -L https://github.com/facebook/zstd/releases/download/v$ZSTD_VERSION/zstd-$ZSTD_VERSION.tar.gz -o zstd-$ZSTD_VERSION.tar.gz
 tar -xf zstd-$ZSTD_VERSION.tar.gz
 pushd zstd-$ZSTD_VERSION
-make -j && make install
+retry 3 "make -j" && retry 3 "make install"
 popd
 rm -r zstd-$ZSTD_VERSION zstd-$ZSTD_VERSION.tar.gz
 

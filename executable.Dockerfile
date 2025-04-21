@@ -2,7 +2,8 @@
 
 # these need to be defined before any FROM - otherwise, the ARGs expand to empty strings.
 # see build_x86_64_executable.sh and build_aarch64_executable.sh which define these.
-ARG RUST_BUILDER_VERSION
+ARG PYSPY_RUST_BUILDER_VERSION
+ARG RBSPY_RUST_BUILDER_VERSION
 ARG PERF_BUILDER_UBUNTU
 ARG PHPSPY_BUILDER_UBUNTU
 ARG AP_BUILDER_CENTOS
@@ -15,17 +16,14 @@ ARG DOTNET_BUILDER
 ARG NODE_PACKAGE_BUILDER_MUSL
 ARG NODE_PACKAGE_BUILDER_GLIBC
 
-# pyspy & rbspy builder base
-FROM rust${RUST_BUILDER_VERSION} AS pyspy-rbspy-builder-common
+# py-spy
+FROM rust${PYSPY_RUST_BUILDER_VERSION} AS pyspy-builder
 WORKDIR /tmp
 
 COPY scripts/prepare_machine-unknown-linux-musl.sh .
 COPY scripts/libunwind_build.sh .
 RUN ./prepare_machine-unknown-linux-musl.sh
 
-# py-spy
-FROM pyspy-rbspy-builder-common AS pyspy-builder
-WORKDIR /tmp
 COPY scripts/pyspy_build.sh .
 COPY scripts/pyspy_commit.txt .
 COPY scripts/pyspy_tag.txt .
@@ -33,8 +31,13 @@ RUN ./pyspy_build.sh
 RUN mv "/tmp/py-spy/target/$(uname -m)-unknown-linux-musl/release/py-spy" /tmp/py-spy/py-spy
 
 # rbspy
-FROM pyspy-rbspy-builder-common AS rbspy-builder
+FROM rust${RBSPY_RUST_BUILDER_VERSION} AS rbspy-builder
 WORKDIR /tmp
+
+COPY scripts/prepare_machine-unknown-linux-musl.sh .
+COPY scripts/libunwind_build.sh .
+RUN ./prepare_machine-unknown-linux-musl.sh
+
 COPY scripts/rbspy_build.sh .
 RUN ./rbspy_build.sh
 RUN mv "/tmp/rbspy/target/$(uname -m)-unknown-linux-musl/release/rbspy" /tmp/rbspy/rbspy
@@ -149,23 +152,11 @@ RUN if grep -q "CentOS Linux 8" /etc/os-release ; then \
         ./fix_centos7.sh; \
     fi
 
-# update libmodulemd to fix https://bugzilla.redhat.com/show_bug.cgi?id=2004853
-RUN yum install -y epel-release && \
-    yum install -y libmodulemd && \
-    yum clean all
-
-# python 3.10 installation
+# python 3.10 installation && yum clean all
 WORKDIR /python
-RUN yum install -y \
-    bzip2-devel \
-    libffi-devel \
-    perl-core \
-    zlib-devel \
-    xz-devel \
-    ca-certificates \
-    wget && \
-    yum groupinstall -y "Development Tools" && \
-    yum clean all
+COPY scripts/prepare_centos.sh .
+RUN ./prepare_centos.sh
+
 COPY ./scripts/openssl_build.sh .
 RUN ./openssl_build.sh
 COPY ./scripts/python310_build.sh .

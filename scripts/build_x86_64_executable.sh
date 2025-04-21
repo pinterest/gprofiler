@@ -30,8 +30,10 @@ else
     with_proxy=""
 fi
 
-# pyspy & rbspy, using the same builder for both pyspy and rbspy since they share build dependencies - rust:1.59-alpine3.15
-RUST_BUILDER_VERSION=@sha256:65b63b7d003f7a492cc8e550a4830aaa1f4155b74387549a82985c8efb3d0e88
+# rust:1.86.0-alpine3.21
+PYSPY_RUST_BUILDER_VERSION=@sha256:541a1720c1cedddae9e17b4214075bf57c20bc7b176b4bba6bce3437c44d51ef
+# rust:1.59-alpine3.15
+RBSPY_RUST_BUILDER_VERSION=@sha256:65b63b7d003f7a492cc8e550a4830aaa1f4155b74387549a82985c8efb3d0e88
 # perf - ubuntu:18.04 (for older glibc, to support older kernels)
 UBUNTU_VERSION_1804=@sha256:dca176c9663a7ba4c1f0e710986f5a25e672842963d95b960191e2d9f7185ebe
 # phpspy & pyperf - ubuntu:20.04
@@ -53,13 +55,14 @@ BURN_BUILDER_GOLANG=@sha256:f7d3519759ba6988a2b73b5874b17c5958ac7d0aa48a8b1d84d6
 # bcc & gprofiler - centos:7
 # CentOS 7 image is used to grab an old version of `glibc` during `pyinstaller` bundling.
 # this will allow the executable to run on older versions of the kernel, eventually leading to the executable running on a wider range of machines.
-GPROFILER_BUILDER=@sha256:0f4ec88e21daf75124b8a9e5ca03c37a5e937e0e108a255d890492430789b60e
+GPROFILER_BUILDER=@sha256:be65f488b7764ad3638f236b7b515b3678369a5124c47b8d32916d6487418ea4
 # node-package-builder-glibc - centos/devtoolset-7-toolchain-centos7:latest
 NODE_PACKAGE_BUILDER_GLIBC=centos/devtoolset-7-toolchain-centos7@sha256:24d4c230cb1fe8e68cefe068458f52f69a1915dd6f6c3ad18aa37c2b8fa3e4e1
 
 mkdir -p build/x86_64
 docker buildx build -f executable.Dockerfile --output type=local,dest=build/x86_64/ \
-    --build-arg RUST_BUILDER_VERSION=$RUST_BUILDER_VERSION \
+    --build-arg RBSPY_RUST_BUILDER_VERSION=$RBSPY_RUST_BUILDER_VERSION \
+    --build-arg PYSPY_RUST_BUILDER_VERSION=$PYSPY_RUST_BUILDER_VERSION \
     --build-arg PYPERF_BUILDER_UBUNTU=$UBUNTU_VERSION \
     --build-arg PERF_BUILDER_UBUNTU=$UBUNTU_VERSION_1804 \
     --build-arg PHPSPY_BUILDER_UBUNTU=$UBUNTU_VERSION \
