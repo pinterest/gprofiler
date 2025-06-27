@@ -17,13 +17,14 @@ import json
 import os
 import platform
 import re
+import stat
 import subprocess
 from contextlib import contextmanager
 from logging import LogRecord
 from pathlib import Path
 from threading import Event
 from time import sleep
-from typing import Any, Dict, Iterator, List, Optional, cast
+from typing import Any, Dict, Iterator, List, Optional, Union, cast
 
 from docker import DockerClient
 from docker.errors import ContainerError
@@ -141,6 +142,7 @@ def run_privileged_container(
 def _no_errors(logs: str) -> None:
     # example line: [2021-06-12 10:13:57,528] ERROR: gprofiler: ruby profiling failed
     assert "] ERROR: " not in logs, f"found ERRORs in gProfiler logs!: {logs}"
+    assert "Could not acquire gProfiler's lock" not in logs, f"found lock error in gProfiler logs!: {logs}"
 
 
 def run_gprofiler_in_container(docker_client: DockerClient, image: Image, command: List[str], **kwargs: Any) -> None:
@@ -205,7 +207,17 @@ def assert_ldd_version_container(container: Container, version: str) -> None:
 
 
 def snapshot_pid_profile(profiler: ProfilerInterface, pid: int) -> ProfileData:
-    return profiler.snapshot()[pid]
+    last_snapshot = profiler.snapshot()
+
+    def has_profile() -> bool:
+        nonlocal last_snapshot
+        if pid in last_snapshot:
+            return True
+        last_snapshot = profiler.snapshot()
+        return pid in last_snapshot
+
+    wait_event(timeout=5, stop_event=Event(), condition=has_profile, interval=2.0)
+    return last_snapshot[pid]
 
 
 def snapshot_pid_collapsed(profiler: ProfilerInterface, pid: int) -> StackToSampleCount:
@@ -329,6 +341,40 @@ def _print_process_output(popen: subprocess.Popen) -> None:
     print(f"stderr: {stderr.decode()}")
 
 
+def ensure_all_access_recursive(path: Union[str, Path]) -> None:
+    for root, dirs, files in os.walk(path):
+        for name in dirs + files:
+            full_path = os.path.join(root, name)
+            print(f"Setting permissions for {full_path}")
+            # Set permissions: read/write for user, group, and others
+            os.chmod(
+                full_path,
+                stat.S_IRUSR
+                | stat.S_IXGRP
+                | stat.S_IXUSR
+                | stat.S_IXGRP
+                | stat.S_IWUSR
+                | stat.S_IRGRP  # owner
+                | stat.S_IWGRP
+                | stat.S_IROTH  # group
+                | stat.S_IWOTH,
+            )  # others
+
+    # Also apply to the top-level directory
+    os.chmod(
+        path,
+        stat.S_IRUSR
+        | stat.S_IWUSR
+        | stat.S_IRGRP
+        | stat.S_IWGRP
+        | stat.S_IROTH
+        | stat.S_IWOTH
+        | stat.S_IXGRP
+        | stat.S_IXUSR
+        | stat.S_IXGRP,
+    )
+
+
 @contextmanager
 def _application_process(command_line: List[str], check_app_exited: bool) -> Iterator[subprocess.Popen]:
     # run as non-root to catch permission errors, etc.
@@ -336,9 +382,10 @@ def _application_process(command_line: List[str], check_app_exited: bool) -> Ite
         os.setgid(1000)
         os.setuid(1000)
 
-    popen = subprocess.Popen(
-        command_line, preexec_fn=lower_privs, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd="/tmp"
-    )
+    # This is required in order to make sure that the user has permissions to run what it needs to run in tests...
+    # ensure_all_access_recursive(CONTAINERS_DIRECTORY)
+
+    popen = subprocess.Popen(command_line, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd="/tmp")
     try:
         # wait 2 seconds to ensure it starts
         popen.wait(2)
@@ -421,9 +468,10 @@ def assert_jvm_flags_equal(actual_jvm_flags: Optional[List], expected_jvm_flags:
         expected_flag_value = expected_flag_dict.pop("value")
 
         if expected_flag_value is not None:
-            assert (
-                actual_flag_value == expected_flag_value
-            ), f"{actual_flag_dict|{'value': actual_flag_value}} != {expected_flag_dict|{'value': expected_flag_value}}"
+            assert actual_flag_value == expected_flag_value, (
+                f"{actual_flag_dict | {'value': actual_flag_value}} != "
+                f"{expected_flag_dict | {'value': expected_flag_value}}"
+            )
 
         assert actual_flag_dict == expected_flag_dict
 

@@ -16,10 +16,12 @@
 import glob
 import os
 import resource
+import selectors
+import shutil
 import signal
 from pathlib import Path
 from subprocess import Popen
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union, cast
 
 from granulate_utils.linux.ns import is_running_in_init_pid
 from psutil import NoSuchProcess, Process
@@ -64,7 +66,7 @@ class PythonEbpfProfiler(ProfilerBase):
     _DUMP_TIMEOUT = 5  # seconds
     _POLL_TIMEOUT = 10  # seconds
     _GET_OFFSETS_TIMEOUT = 5  # seconds
-    _STDERR_READ_SIZE = 65536  # bytes read every cycle from stderr
+    _OUTPUT_READ_SIZE = 65536  # bytes read every cycle from stderr
 
     def __init__(
         self,
@@ -78,12 +80,17 @@ class PythonEbpfProfiler(ProfilerBase):
     ):
         super().__init__(frequency, duration, profiler_state)
         self.process: Optional[Popen] = None
+        self.process_selector: Optional[selectors.BaseSelector] = None
         self.output_path = Path(self._profiler_state.storage_dir) / f"pyperf.{random_prefix()}.col"
         self.add_versions = add_versions
         self.user_stacks_pages = user_stacks_pages
         self._kernel_offsets: Dict[str, int] = {}
         self._metadata = python.PythonMetadata(self._profiler_state.stop_event)
         self._verbose = verbose
+        self._pyperf_staticx_tmpdir: Optional[Path] = None
+        if os.environ.get("TMPDIR", None) is not None:
+            # We want to create a new level of hirerachy in our current staticx tempdir.
+            self._pyperf_staticx_tmpdir = Path(os.environ["TMPDIR"]) / ("pyperf_" + random_prefix())
 
     @classmethod
     def _check_output(cls, process: Popen, output_path: Path) -> None:
@@ -106,7 +113,7 @@ class PythonEbpfProfiler(ProfilerBase):
         to verify those conditions stand anyway (and during our tests - we run gProfiler's executable
         in a container, so these steps have to run)
         """
-        # see explanation in https://github.com/Granulate/gprofiler/issues/443#issuecomment-1229515568
+        # see explanation in https://github.com/intel/gprofiler/issues/443#issuecomment-1229515568
         assert is_running_in_init_pid(), "PyPerf must run in init PID NS!"
 
         # increase memlock (Docker defaults to 64k which is not enough for the get_offset programs)
@@ -151,6 +158,14 @@ class PythonEbpfProfiler(ProfilerBase):
             cmd.extend(["-v", "4"])
         return cmd
 
+    def _staticx_cleanup(self) -> None:
+        """
+        We experienced issues with PyPerf's staticx'd directory, so we want to clean it up on termination.
+        """
+        assert not self.is_running(), "_staticx_cleanup is impossible while PyPerf is running"
+        if self._pyperf_staticx_tmpdir is not None and self._pyperf_staticx_tmpdir.exists():
+            shutil.rmtree(self._pyperf_staticx_tmpdir.as_posix())
+
     def test(self) -> None:
         self._ebpf_environment()
 
@@ -168,7 +183,8 @@ class PythonEbpfProfiler(ProfilerBase):
             "--duration",
             "1",
         ]
-        process = start_process(cmd)
+        # pyperf sometimes has a lot of output to stdout and stderr, which makes the process halt until read.
+        process = start_process(cmd, tmpdir=self._pyperf_staticx_tmpdir, pipesize=1024 * 1024)
         try:
             poll_process(process, self._POLL_TIMEOUT, self._profiler_state.stop_event)
         except TimeoutError:
@@ -176,6 +192,8 @@ class PythonEbpfProfiler(ProfilerBase):
             raise
         else:
             self._check_output(process, self.output_path)
+        finally:
+            self._staticx_cleanup()
 
     def start(self) -> None:
         logger.info("Starting profiling of Python processes with PyPerf")
@@ -199,7 +217,7 @@ class PythonEbpfProfiler(ProfilerBase):
         for f in glob.glob(f"{str(self.output_path)}.*"):
             os.unlink(f)
 
-        process = start_process(cmd)
+        process = start_process(cmd, tmpdir=self._pyperf_staticx_tmpdir)
         # wait until the transient data file appears - because once returning from here, PyPerf may
         # be polled via snapshot() and we need it to finish installing its signal handler.
         try:
@@ -210,9 +228,40 @@ class PythonEbpfProfiler(ProfilerBase):
             stdout = process.stdout.read()
             stderr = process.stderr.read()
             logger.error("PyPerf failed to start", stdout=stdout, stderr=stderr)
+            self._staticx_cleanup()
             raise
         else:
             self.process = process
+            self._register_process_selectors()
+
+    def _register_process_selectors(self) -> None:
+        self.process_selector = selectors.DefaultSelector()
+        assert self.process_selector and self.process and self.process.stdout and self.process.stderr  # for mypy
+        self.process_selector.register(self.process.stdout, selectors.EVENT_READ)
+        self.process_selector.register(self.process.stderr, selectors.EVENT_READ)
+
+    def _unregister_process_selectors(self) -> None:
+        assert self.process_selector
+        self.process_selector.close()
+        self.process_selector = None
+
+    def _read_process_standard_outputs(self) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Read the process standard outputs in a non-blocking manner.
+
+        :return: tuple[stdout, stderr]
+        """
+        stdout: Optional[str] = None
+        stderr: Optional[str] = None
+        assert self.process_selector and self.process
+        for key, _ in self.process_selector.select(timeout=0):
+            output = key.fileobj.read1(self._OUTPUT_READ_SIZE)  # type: ignore
+            output = cast(str, output)
+            if key.fileobj is self.process.stdout:
+                stdout = output
+            elif key.fileobj is self.process.stderr:
+                stderr = output
+        return stdout, stderr
 
     def _dump(self) -> Path:
         assert self.is_running()
@@ -224,11 +273,8 @@ class PythonEbpfProfiler(ProfilerBase):
             output = wait_for_file_by_prefix(
                 f"{self.output_path}.", self._DUMP_TIMEOUT, self._profiler_state.stop_event
             )
-            # PyPerf outputs sampling & error counters every interval (after writing the output file), print them.
-            # also, makes sure its output pipe doesn't fill up.
-            # using read1() which performs just a single read() call and doesn't read until EOF
-            # (unlike Popen.communicate())
-            logger.debug("PyPerf dump output", stderr=self.process.stderr.read1(self._STDERR_READ_SIZE))  # type: ignore
+            stdout, stderr = self._read_process_standard_outputs()
+            logger.debug("PyPerf dump output", stdout=stdout, stderr=stderr)
             return output
         except TimeoutError:
             # error flow :(
@@ -257,7 +303,7 @@ class PythonEbpfProfiler(ProfilerBase):
         for pid in parsed:
             try:
                 process = Process(pid)
-                # Because of https://github.com/Granulate/gprofiler/issues/764,
+                # Because of https://github.com/intel/gprofiler/issues/764,
                 # for now we only filter output of pyperf to return only profiles from chosen pids
                 if self._profiler_state.processes_to_profile is not None:
                     if process not in self._profiler_state.processes_to_profile:
@@ -274,15 +320,23 @@ class PythonEbpfProfiler(ProfilerBase):
         return profiles
 
     def _terminate(self) -> Tuple[Optional[int], str, str]:
+        exit_status: Optional[int] = None
+        stdout: Union[str, bytes] = ""
+        stderr: Union[str, bytes] = ""
+
+        self._unregister_process_selectors()
         if self.is_running():
             assert self.process is not None  # for mypy
             self.process.terminate()  # okay to call even if process is already dead
             exit_status, stdout, stderr = reap_process(self.process)
             self.process = None
-            return exit_status, stdout.decode(), stderr.decode()
+
+        stdout = stdout.decode() if isinstance(stdout, bytes) else stdout
+        stderr = stderr.decode() if isinstance(stderr, bytes) else stderr
 
         assert self.process is None  # means we're not running
-        return None, "", ""
+        self._staticx_cleanup()
+        return exit_status, stdout, stderr
 
     def stop(self) -> None:
         exit_status, stdout, stderr = self._terminate()

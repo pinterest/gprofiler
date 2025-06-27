@@ -15,6 +15,7 @@
 #
 
 import logging
+import time
 from threading import Event
 from typing import Dict, cast
 
@@ -65,13 +66,13 @@ def test_perf_fp_dwarf_smart(
 ) -> None:
     if is_aarch64():
         if runtime == "native_fp" and perf_mode == "fp":
-            pytest.xfail("This combination fails on aarch64 https://github.com/Granulate/gprofiler/issues/746")
+            pytest.xfail("This combination fails on aarch64 https://github.com/intel/gprofiler/issues/746")
         if runtime == "native_fp" and perf_mode == "dwarf":
-            pytest.xfail("This combination fails on aarch64 https://github.com/Granulate/gprofiler/issues/746")
+            pytest.xfail("This combination fails on aarch64 https://github.com/intel/gprofiler/issues/746")
         if runtime == "native_dwarf" and perf_mode == "smart":
-            pytest.xfail("This combination fails on aarch64 https://github.com/Granulate/gprofiler/issues/746")
+            pytest.xfail("This combination fails on aarch64 https://github.com/intel/gprofiler/issues/746")
         if runtime == "native_dwarf" and perf_mode == "dwarf":
-            pytest.xfail("This combination fails on aarch64 https://github.com/Granulate/gprofiler/issues/746")
+            pytest.xfail("This combination fails on aarch64 https://github.com/intel/gprofiler/issues/746")
     with system_profiler as profiler:
         process_profile = snapshot_pid_profile(profiler, application_pid)
         process_collapsed = process_profile.stacks
@@ -144,6 +145,7 @@ def test_perf_comm_change(
     I'm not sure it can be done, i.e is this info even kept anywhere).
     """
     with system_profiler as profiler:
+        time.sleep(2)
         # first run - we get the changed name, because the app started before perf began recording.
         _assert_comm_in_profile(profiler, application_pid, False)
 
@@ -170,6 +172,7 @@ def test_perf_thread_comm_is_process_comm(
     starts after perf, the exec comm of the process should be used (see test_perf_comm_change)
     """
     with system_profiler as profiler:
+        time.sleep(2)
         # running perf & script now with --show-task-events would show:
         #   pative 1925947 [010] 987095.272656: PERF_RECORD_COMM: pative:1925904/1925947
         # our perf will prefer to use the exec comm, OR oldest comm available if exec
@@ -268,7 +271,7 @@ def test_perf_restarted_if_killed(
         (["d_[k];e_[k] 1"], 0),
         (["a;b;c;d_[k] 1"], 3),
         # Tests if unknown frames are ignored when calculating avg frame count
-        # https://github.com/Granulate/gprofiler/issues/798
+        # https://github.com/intel/gprofiler/issues/798
         (["[unknown];[unknown];[unknown];a;b;c;d_[k] 1"], 3),
         (["a;b;c;d_[k];e_[k] 1"], 3),
         (["a 1", "a;b 1"], 1.5),

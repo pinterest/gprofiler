@@ -3,7 +3,7 @@ gProfiler combines multiple sampling profilers to produce unified visualization 
 what your CPU is spending time on, displaying stack traces of all processes running on your system
 across native programs<sup id="a1">[1](#perf-native)</sup> (includes Golang), Java and Python runtimes, and kernel routines.
 
-gProfiler can upload its results to the [Granulate Performance Studio](https://profiler.granulate.io/) or to a [self hosted studio](https://github.com/Granulate/gprofiler-performance-studio), which aggregates the results from different instances over different periods of time and can give you a holistic view of what is happening on your entire cluster.
+gProfiler can upload its results to a [self hosted studio](https://localhost:4433) using [gprofiler performance studio]((https://github.com/intel/gprofiler-performance-studio), which aggregates the results from different instances over different periods of time and can give you a holistic view of what is happening on your entire cluster.
 To upload results, you will have to register and generate a token on the website.
 
 gProfiler runs on Linux (on x86_64 and Aarch64; Aarch64 support is not complete yet and not all runtime profilers are supported, see [architecture support](#architecture-support)).
@@ -36,7 +36,7 @@ gProfiler can produce output in two ways:
 
   Use the `--upload-results`/`-u` flag. Pass the `--token` option to specify the token
   provided by Granulate Performance Studio, and the `--service-name` option to specify an identifier
-  for the collected profiles, as will be viewed in the [Granulate Performance Studio](https://profiler.granulate.io/). *Profiles sent from numerous
+  for the collected profiles, as will be viewed in a self hosted studio. *Profiles sent from numerous
   gProfilers using the same service name will be aggregated together.*
 
 Note: both flags can be used simultaneously, in which case gProfiler will create the local files *and* upload
@@ -44,7 +44,7 @@ the results.
 
 ### Network requirements
 
-When `--upload-results` is used, gProfiler will communicate with `https://profiler.granulate.io` and `https://api.granulate.io`. Make sure those domains are accessible for HTTPS access. Additionally, if you download gProfiler from the GitHub releases you'll need `https://github.com`, or if you use the Docker image you'll need the Docker registry accessible (`https://index.docker.io` by default).
+When `--upload-results` is used, gProfiler will communicate with a self hosted studio. Make sure those domains are accessible for HTTPS access. Additionally, if you download gProfiler from the GitHub releases you'll need `https://github.com`, or if you use the Docker image you'll need the Docker registry accessible (`https://index.docker.io` by default).
 
 If you [require an HTTPS proxy](#Using-HTTP-proxies), make sure the proxy has those domains whitelisted.
 
@@ -111,6 +111,36 @@ Make sure you are not passing `-s` to the `-ldflags` during your build - `-s` om
     * `smart` - Run both `fp` and `dwarf`, then choose the result with the highest average of stack frames count, per process.
     * `disabled` - Avoids running `perf` at all. See [perf-less mode](#perf-less-mode).
 
+## Rootless mode
+gProfiler can be run in rootless mode, profiling without root or sudo access with limited functionality by using the `--rootless` argument.
+
+Profiling is limited to perf (not java, python, ruby, etc.), and requires passing `--pids` with a list of processes owned by the current user.
+
+If the default directories for the log file and pid file (e.g., `/var/log or /var/run`) are not writable by the current user, these must be explicitly directed to a writable path with `--log-file {LOG_FILE}` and `--pid-file {PID_FILE}` respectively. If gProfiler was run previously as root or with sudo, it will create the temporary directory `gprofiler_tmp` in the default location (usually `/tmp`) or wherever specified. If gProfiler is run again with `--rootless`, it will fail to run as it will be trying to write to the `gprofiler_tmp` directory which has already been created by `root` user. Delete this root owned directory or redirect to a different (user writable) directory and re-run with `--rootless`.
+
+Some additional configuration may be required to operate without root.
+
+### perf_event_paranoid
+By default `/proc/sys/kernel/perf_event_paranoid` may be configured such that `perf` cannot operate without root. Consider setting to `-1` if `--rootless` indicates permission errors (this is the least secure mode, so refer to [perf-security documentation](https://www.kernel.org/doc/html/latest/admin-guide/perf-security.html for security information)). It may also be necessary to set `perf_event_mlock_kb`.
+* -1: Allow use of (almost) all events by all users
+Ignore mlock limit after `perf_event_mlock_kb` without `CAP_IPC_LOCK`
+* 0: Disallow raw and ftrace function tracepoint access
+* 1: Disallow CPU event access
+* 2: Disallow kernel profiling
+To make the adjusted `perf_event_paranoid` setting permanent, preserve it in `/etc/sysctl.conf` (e.g., `kernel.perf_event_paranoid = {SETTING}`).
+
+### perf_event_mlock_kb
+This controls the size of per-cpu ring buffer not counted against mlock limit. The default value is 512 + 1 page. Depending on the value of `perf_event_paranoid`, it may be necessary to set `perf_event_mlock_kb`.
+
+To make adjustment to `perf_event_mlock_kb` setting permanent preserve it in `/etc/sysctl.conf` (e.g., `kernel.perf_event_mlock_kb = {SETTING}`).
+
+### kptr_restrict
+This toggle indicates whether restrictions are placed on exposing kernel addresses via `/proc` and other interfaces. In order to get better visibility into kernel callstacks in flamegraphs, `/proc/sys/kernel/kptr_restrict` can be set to `0`. For more information refer to [kptr-restrict docs](https://docs.kernel.org/admin-guide/sysctl/kernel.html#kptr-restrict).
+
+`echo 0 | sudo tee /proc/sys/kernel/kptr_restrict`
+
+To make adjustment to `kptr_restrict` setting permanent preserve it in `/etc/sysctl.conf` (e.g., `kernel.kptr_restrict = {SETTING}`).
+
 ## Other options
 
 ### Using HTTP proxies
@@ -149,10 +179,10 @@ This section lists the various execution modes for gProfiler (as a container, as
 ## Running as a Docker container
 Run the following to have gProfiler running continuously, uploading to Granulate Performance Studio:
 ```bash
-docker pull granulate/gprofiler:latest
+docker pull intel/gprofiler:latest
 docker run --name granulate-gprofiler -d --restart=on-failure:10 \
     --pid=host --userns=host --privileged \
-	granulate/gprofiler:latest -cu --token="<TOKEN>" --service-name="<SERVICE NAME>" [options]
+	intel/gprofiler:latest -cu --token="<TOKEN>" --service-name="<SERVICE NAME>" [options]
 ```
 
 ## Running as an executable
@@ -160,7 +190,7 @@ First, check if gProfiler is already running - run `pgrep gprofiler`. You should
 
 Run the following to have gprofiler running continuously, in the background, uploading to Granulate Performance Studio:
 ```bash
-wget https://github.com/Granulate/gprofiler/releases/latest/download/gprofiler_$(uname -m) -O gprofiler
+wget https://github.com/intel/gprofiler/releases/latest/download/gprofiler_$(uname -m) -O gprofiler
 sudo chmod +x gprofiler
 sudo TMPDIR=/proc/self/cwd sh -c "setsid ./gprofiler -cu --token=\"<TOKEN>\" --service-name=\"<SERVICE NAME>\" [options] > /dev/null 2>&1 &"
 sleep 1
@@ -180,7 +210,7 @@ The logs can then be viewed in their default location (`/var/log/gprofiler`).
 You can generate a systemd service configuration that [runs gProfiler as an executable](#running-as-an-executable) by running:
 
 ``` bash
-curl -s https://raw.githubusercontent.com/Granulate/gprofiler/master/deploy/systemd/create_systemd_service.sh | GPROFILER_TOKEN=<TOKEN> GPROFILER_SERVICE=<SERVICE_NAME> bash
+curl -s https://raw.githubusercontent.com/intel/gprofiler/master/deploy/systemd/create_systemd_service.sh | GPROFILER_TOKEN=<TOKEN> GPROFILER_SERVICE=<SERVICE_NAME> bash
 ```
 
 This script generates `granulate-gprofiler.service` in your working directory, and you can go ahead and install it by:
@@ -197,11 +227,6 @@ Additionally, 2 more flags need to be added to gProfiler's commandline: `--disab
 * `--disable-pidns-check` is required because gProfiler won't run in the init PID NS.
 * `--perf-mode=none` is required because gProfiler will not have permissions to run system-wide `perf`, so we will profile only runtime processes, such as Java. See [perf-less mode](#perf-less-mode) for more information.
 
-### Databricks unique service names for job clusters
-By using `--databricks-job-name-as-service-name`, gProfiler will use the Job Clusters' Job Name as service name.
-In case gProfiler successfully managed to extract the Job Name, the service name will be `databricks-job-<JOB_NAME>`.
-By default, this functionality relies on `spark.databricks.clusterUsageTags.clusterAllTags` property
-to extract the Job Name.
 
 In case gProfiler spots this property is redacted, gProfiler will use the
 `spark.databricks.clusterUsageTags.clusterName` property as service name.
@@ -237,7 +262,7 @@ This is done by creating a `Role` that's allowed to use the `privileged` SCC, th
 - Scroll to the bottom of the page, and click `Configure via JSON` \
 ![Configure via JSON button](https://user-images.githubusercontent.com/74833655/132983629-163fdb87-ec9a-4201-b557-e0ae441e2595.png)
 - Replace the JSON contents with the contents of the [gprofiler_task_definition.json](deploy/ecs/gprofiler_task_definition.json) file and **Make sure you change the following values**:
-  - Replace `<TOKEN>` in the command line with your token you got from the [gProfiler Performance Studio](https://profiler.granulate.io/) site.
+  - Replace `<TOKEN>` in the command line with your token you got from a self hosted studio site.
   - Replace `<SERVICE NAME>` in the command line with the service name you wish to use.
 - **Note** - if you wish to see the logs from the gProfiler service, be sure to follow [AWS's guide](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/using_awslogs.html#create_awslogs_loggroups)
   on how to auto-configure logging, or to set it up manually yourself.
@@ -275,10 +300,10 @@ Furthermore, Fargate does not allow using `"pidMode": "host"` in the task defini
 So in order to deploy gProfiler, we need to modify a container definition to include running gProfiler alongside the actual application. This can be done with the following steps:
 1. Modify the `command` & `entryPoint` parameters of your entry in the `containerDefinitions` array. The new command should include downloading of gProfiler & executing it in the background, and `entryPoint` will be `["/bin/bash"]`.
 
-    For example, if your default `command` is `["python", "/path/to/my/app.py"]`, we will now change it to: `["-c", "(wget https://github.com/Granulate/gprofiler/releases/latest/download/gprofiler -O /tmp/gprofiler; chmod +x /tmp/gprofiler; /tmp/gprofiler -cu --token=<TOKEN> --service-name=<SERVICE NAME>) & python /path/to/my/app.py"]`.
+    For example, if your default `command` is `["python", "/path/to/my/app.py"]`, we will now change it to: `["-c", "(wget https://github.com/intel/gprofiler/releases/latest/download/gprofiler -O /tmp/gprofiler; chmod +x /tmp/gprofiler; /tmp/gprofiler -cu --token=<TOKEN> --service-name=<SERVICE NAME>) & python /path/to/my/app.py"]`.
 
     Make sure to:
-    - Replace `<TOKEN>` in the command line with your token you got from the [gProfiler Performance Studio](https://profiler.granulate.io/) site.
+    - Replace `<TOKEN>` in the command line with your token you got from a self hosted studio site.
     - Replace `<SERVICE NAME>` in the command line with the service name you wish to use.
 
     This new command will start the downloading of gProfiler in the background, then run your application. Make sure to JSON-escape any characters in your command line! For example, `"` are replaced with `\"`.
@@ -289,7 +314,7 @@ So in order to deploy gProfiler, we need to modify a container definition to inc
 
     gProfiler and its installation process will send the outputs to your container's stdout & stderr. After verifying that everything works, you can append `> /dev/null 2>&1` to the gProfiler command parenthesis (in this example, before the `& python ...`) to prevent it from spamming your container logs.
 
-    This requires your image to have `wget` installed - you can make sure `wget` is installed, or substitute the `wget` command with `curl -SL https://github.com/Granulate/gprofiler/releases/latest/download/gprofiler --output /tmp/gprofiler`, or any other HTTP-downloader you wish.
+    This requires your image to have `wget` installed - you can make sure `wget` is installed, or substitute the `wget` command with `curl -SL https://github.com/intel/gprofiler/releases/latest/download/gprofiler --output /tmp/gprofiler`, or any other HTTP-downloader you wish.
 2. This step is **required** if you wish to profile a runtime environment that requires `SYS_PTRACE` per the table mentioned above, in the beginning of the Fargate section. If you need to add `SYS_PTRACE` for your runtime environment - currently that's for Python, Ruby and PHP - add `linuxParameters` to the container definition (this goes directly in your entry in `containerDefinitinos`):
    ```
    "linuxParameters": {
@@ -306,7 +331,7 @@ Alternatively, you can download gProfiler in your `Dockerfile` to avoid having t
 ## Running as a docker-compose service
 You can run a gProfiler container with `docker-compose` by using the template file in [docker-compose.yml](deploy/docker-compose/docker-compose.yml).
 Start by replacing the `<TOKEN>` and `<SERVICE NAME>` with values in the `command` section -
-* `<TOKEN>` should be replaced with your personal token from the [gProfiler Performance Studio](https://profiler.granulate.io/) site (in the [Install Service](https://profiler.granulate.io/installation) section)
+* `<TOKEN>` should be replaced with your personal token from a self hosted studio site (in the [Install Service](https://localhost:4433/installation) section)
 * The `<SERVICE NAME>` should be replaced with whatever service name you wish to use
 
 Optionally, you can add more command line arguments to the `command` section. For example, if you wish to use the `py-spy` profiler, you can add `--python-mode pyspy` to the commandline.
@@ -334,14 +359,14 @@ gcloud dataproc clusters create <CLUSTER NAME> \
 --metadata gprofiler-token="$TOKEN",gprofiler-service="$SERVICE",enable-stdout="1" --region <REGION>
 ```
 **Note** - make sure to replace the placeholders with the appropriate values -
-  - Replace `<TOKEN>` in the command line with your token you got from the [gProfiler Performance Studio](https://profiler.granulate.io/installation) site.
+  - Replace `<TOKEN>` in the command line with your token you got from a [self hosted studio](https://localhost:4433/installation) site.
   - Replace `<SERVICE NAME>` in the command line with the service name you wish to use.
   - Replace `<YOUR BUCKET>` with the bucket name you have uploaded the gProfiler initialization action script to.
   - Replace `<CLUSTER NAME>` with the cluster name you wish to use
   - Replace `<REGION>` with the region you wish to use
 
 ### Debugging problems
-If you are experiencing issues with your gProfiler installation (such as no flamegraphs available in the [Performance Studio](https://profiler.granulate.io)
+If you are experiencing issues with your gProfiler installation (such as no flamegraphs available in a self hosted studio)
 after waiting for more than 1 hour) you can look at gProfiler's logs and see if there are any errors. \
 To see gProfiler's logs, you must enable its output by providing `enable-stdout="1"` in the cluster metadata when creating the Dataproc cluster. You can use the example above.
 Wait at least 10 minutes after creating your cluster, and then you can SSH into one of your cluster instances via either Dataproc's web interface or the command line.
@@ -369,7 +394,7 @@ node when the cluster is provisioned. You will need to provide the token and ser
 
    In the steps below, make sure to:
      - Replace `<BUCKET>` with the bucket where `gprofiler_action.sh` was uploaded.
-     - Replace `<TOKEN>` with the token you got from the [gProfiler Performance Studio](https://profiler.granulate.io/installation) site.
+     - Replace `<TOKEN>` with the token you got from a [self hosted studio](https://localhost:4433/installation) site.
      - Replace `<SERVICE>` with the service name you wish to use.
 
    With AWS CLI:
@@ -399,7 +424,7 @@ The playbook defines 2 more variables:
 * `gprofiler_args` - additional arguments to pass to gProfiler, empty by default. You can use it to pass, for example, `'--profiling-frequency 15'` to change the frequency.
 
 ## Running from source
-gProfiler requires Python 3.8+ to run.
+gProfiler requires Python 3.10+ to run.
 
 ```bash
 pip3 install -r requirements.txt
@@ -493,14 +518,33 @@ Additionally, each frame has a suffix which designates the profiler it originate
 | .NET (dotnet-trace)                   | Per dotnet-trace                                                                                                                                                                        | `_[net]`                                                                                                 |
 | Kernel (perf, async-profiler, PyPerf) | Function name                                                                                                                                                                           | `_[k]`                                                                                                   |
 
+# Security Concerns
+
+Consider reviewing Docker security docs described in https://docs.docker.com/engine/security/
+If you're using Docker, it's recommended to enable the following security settings if required by your organization and applicable:
+* Enable AppArmor Profile (https://docs.docker.com/engine/security/apparmor/)
+* Enable SELinux 
+* Update the IP address bindings in the docker-compose file (they default to 0.0.0.0 on all interfaces) to your specific hosts.  
+  * Default port settings in docker-compose are: "8080:80" and "4433:443"
+  * You can bind them to your desired ip by setting them to: "{my_ip}:8080:80" and "{my_ip}:4433:443"
+* Mount the container's root file system as read only
+* Restrict the container from acquiring additional privileges using --no-new-privilege
+* Make sure the Docker commands always make use of the latest version of their images
+
+Be aware that when deployed as a container...
+
+* gProfiler may require privileged mode to operate.  Make sure you understand the security implications by reviewing the [Docker security docs](https://docs.docker.com/engine/security/) 
+* The host PID and user namespace will be shared with gProfiler to allow it to run as root outside the container.  Consider using [rootless mode](#rootless-mode)
+
+
 # Building
 
 Please refer to the [building](./CONTRIBUTING.md#building) section.
 
 # Contribute
 We welcome all feedback and suggestion through Github Issues:
-* [Submit bugs and feature requests](https://github.com/granulate/gprofiler/issues)
-* Upvote [popular feature requests](https://github.com/granulate/gprofiler/issues?q=is%3Aopen+is%3Aissue+label%3Aenhancement+sort%3Areactions-%2B1-desc+)
+* [Submit bugs and feature requests](https://github.com/intel/gprofiler/issues)
+* Upvote [popular feature requests](https://github.com/intel/gprofiler/issues?q=is%3Aopen+is%3Aissue+label%3Aenhancement+sort%3Areactions-%2B1-desc+)
 
 ## Releasing a new version
 1. Update `__version__` in `__init__.py`.

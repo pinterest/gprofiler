@@ -15,7 +15,7 @@ from typing import Any, Dict, Optional, Tuple, cast
 
 import distro
 import psutil
-from granulate_utils.linux.ns import run_in_ns
+from granulate_utils.linux.ns import run_in_ns_wrapper
 
 from gprofiler.log import get_logger_adapter
 from gprofiler.platform import is_linux, is_windows
@@ -48,7 +48,12 @@ def get_libc_version() -> Tuple[str, str]:
 
     try:
         ldd_version = run_process(
-            ["ldd", "--version"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, suppress_log=True, check=False
+            ["ldd", "--version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            suppress_log=True,
+            check=False,
+            pdeathsigger=False,
         ).stdout
     except FileNotFoundError:
         ldd_version = b"ldd not found"
@@ -259,8 +264,7 @@ def get_static_system_info() -> SystemInfo:
         processors=cpu_count,
         cpu_model_name=cpu_model_name,
         cpu_flags=cpu_flags,
-        memory_capacity_mb=round(psutil.virtual_memory().total / 1024 / 1024),  # type: ignore # virtual_memory doesn't
-        # have a return type is types-psutil
+        memory_capacity_mb=round(psutil.virtual_memory().total / 1024 / 1024),
         hostname=hostname,
         system=platform.system(),
         os_name=os_name,
@@ -357,7 +361,7 @@ def _initialize_system_info() -> Any:
         except Exception:
             logger.exception("Failed to get the local IP")
 
-    run_in_ns(["mnt", "uts", "net"], get_infos)
+    run_in_ns_wrapper(["mnt", "uts", "net"], get_infos)
 
     return hostname, distribution, libc_version, mac_address, local_ip
 

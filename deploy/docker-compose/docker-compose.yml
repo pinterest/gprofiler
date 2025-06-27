@@ -1,8 +1,8 @@
-version: "3.9"
+version: "3.10"
 
 services:
   gprofiler:
-    image: granulate/gprofiler:latest
+    image: intel/gprofiler:latest
     restart: always
     container_name: "granulate-gprofiler"
     pid: "host"
