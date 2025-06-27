@@ -46,12 +46,12 @@ setuptools.setup(
     description="Production Profiling, Made Easy",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/Granulate/gprofiler",
+    url="https://github.com/intel/gprofiler",
     classifiers=[
         "Programming Language :: Python :: 3",
     ],
     packages=setuptools.find_packages(),
     include_package_data=True,
     install_requires=list(read_requirements("requirements.txt")),
-    python_requires=">=3.8",
+    python_requires=">=3.10",
 )
