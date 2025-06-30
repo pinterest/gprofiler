@@ -20,21 +20,19 @@ import logging.config
 import logging.handlers
 import os
 import shutil
-import signal
 import sys
 import time
 import traceback
 from pathlib import Path
 from threading import Event
-from types import FrameType, TracebackType
+from types import TracebackType
 from typing import Iterable, List, Optional, Type, cast
 
 import configargparse
 import humanfriendly
-from granulate_utils.linux.ns import is_running_in_init_pid
+from granulate_utils.linux.ns import is_root, is_running_in_init_pid
 from granulate_utils.linux.process import is_process_running
 from granulate_utils.metadata.cloud import get_aws_execution_env
-from granulate_utils.metadata.databricks_client import DBXWebUIEnvWrapper, get_name_from_metadata
 from psutil import NoSuchProcess, Process
 from requests import RequestException, Timeout
 
@@ -50,6 +48,7 @@ from gprofiler.containers_client import ContainerNamesClient
 from gprofiler.diagnostics import log_diagnostics, set_diagnostics
 from gprofiler.exceptions import APIError, NoProfilersEnabledError
 from gprofiler.gprofiler_types import ProcessToProfileData, UserArgs, integers_list, positive_integer
+from gprofiler.hw_metrics import HWMetricsMonitor, HWMetricsMonitorBase, NoopHWMetricsMonitor
 from gprofiler.log import RemoteLogsHandler, initial_root_logger_setup
 from gprofiler.merge import concatenate_from_external_file, concatenate_profiles, merge_profiles
 from gprofiler.metadata import ProfileMetadata
@@ -58,7 +57,7 @@ from gprofiler.metadata.enrichment import EnrichmentOptions
 from gprofiler.metadata.external_metadata import ExternalMetadataStaleError, read_external_metadata
 from gprofiler.metadata.metadata_collector import get_current_metadata, get_static_metadata
 from gprofiler.metadata.system_metadata import get_hostname, get_run_mode, get_static_system_info
-from gprofiler.platform import is_linux, is_windows
+from gprofiler.platform import is_aarch64, is_linux, is_windows
 from gprofiler.profiler_state import ProfilerState
 from gprofiler.profilers.factory import get_profilers
 from gprofiler.profilers.profiler_base import NoopProfiler, ProcessProfilerBase, ProfilerInterface
@@ -71,12 +70,12 @@ from gprofiler.utils import (
     atomically_symlink,
     get_iso8601_format_time,
     grab_gprofiler_mutex,
-    is_root,
     reset_umask,
     resource_path,
     run_process,
+    setup_signals,
 )
-from gprofiler.utils.fs import escape_filename, mkdir_owned_root
+from gprofiler.utils.fs import escape_filename, mkdir_owned_root_wrapper
 from gprofiler.utils.proxy import get_https_proxy
 
 if is_linux():
@@ -99,21 +98,6 @@ DIAGNOSTICS_INTERVAL_S = 15 * 60
 
 UPLOAD_FILE_SUBCOMMAND = "upload-file"
 
-# 1 KeyboardInterrupt raised per this many seconds, no matter how many SIGINTs we get.
-SIGINT_RATELIMIT = 0.5
-
-last_signal_ts: Optional[float] = None
-
-
-def sigint_handler(sig: int, frame: Optional[FrameType]) -> None:
-    global last_signal_ts
-    ts = time.monotonic()
-    # no need for atomicity here: we can't get another SIGINT before this one returns.
-    # https://www.gnu.org/software/libc/manual/html_node/Signals-in-Handler.html#Signals-in-Handler
-    if last_signal_ts is None or ts > last_signal_ts + SIGINT_RATELIMIT:
-        last_signal_ts = ts
-        raise KeyboardInterrupt
-
 
 class GProfiler:
     def __init__(
@@ -122,6 +106,7 @@ class GProfiler:
         output_dir: str,
         flamegraph: bool,
         rotating_output: bool,
+        rootless: bool,
         profiler_api_client: Optional[ProfilerAPIClient],
         collect_metrics: bool,
         collect_metadata: bool,
@@ -132,15 +117,20 @@ class GProfiler:
         duration: int,
         profile_api_version: str,
         profiling_mode: str,
+        collect_hw_metrics: bool,
         processes_to_profile: Optional[List[Process]],
         profile_spawned_processes: bool = True,
         remote_logs_handler: Optional[RemoteLogsHandler] = None,
         controller_process: Optional[Process] = None,
         external_metadata_path: Optional[Path] = None,
+        heartbeat_file_path: Optional[Path] = None,
+        perfspect_path: Optional[Path] = None,
+        perfspect_duration: int = 60,
     ):
         self._output_dir = output_dir
         self._flamegraph = flamegraph
         self._rotating_output = rotating_output
+        self._rootless = rootless
         self._profiler_api_client = profiler_api_client
         self._state = state
         self._remote_logs_handler = remote_logs_handler
@@ -155,6 +145,10 @@ class GProfiler:
         self._controller_process = controller_process
         self._duration = duration
         self._external_metadata_path = external_metadata_path
+        self._heartbeat_file_path = heartbeat_file_path
+        self._collect_hw_metrics = collect_hw_metrics
+        self._perfspect_path = perfspect_path
+        self._perfspect_duration = perfspect_duration
         if self._collect_metadata:
             self._static_metadata = get_static_metadata(self._spawn_time, user_args, self._external_metadata_path)
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
@@ -181,6 +175,16 @@ class GProfiler:
             )
         else:
             self._system_metrics_monitor = NoopSystemMetricsMonitor()
+
+        if self._collect_hw_metrics and self._perfspect_path is not None:
+            logger.info(f"Using perfspect path: {self._perfspect_path}")
+            self._hw_metrics_monitor: HWMetricsMonitorBase = HWMetricsMonitor(
+                self._profiler_state.stop_event,
+                perfspect_path=self._perfspect_path,
+                perfspect_duration=self._perfspect_duration,
+            )
+        else:
+            self._hw_metrics_monitor = NoopHWMetricsMonitor()
 
         if isinstance(self.system_profiler, NoopProfiler) and not self.process_profilers:
             raise NoProfilersEnabledError()
@@ -210,11 +214,7 @@ class GProfiler:
         atomically_symlink(os.path.basename(output_path), last_output)
         # delete if rotating & there was a link target before.
         if self._rotating_output and os.path.basename(prev_output) != last_output_name:
-            # can't use missing_ok=True, available only from 3.8 :/
-            try:
-                prev_output.unlink()
-            except FileNotFoundError:
-                pass
+            prev_output.unlink(missing_ok=True)
 
     def _generate_output_files(
         self,
@@ -272,8 +272,10 @@ class GProfiler:
         return "\n".join(lines)
 
     def start(self) -> None:
+        logger.info("Starting ...")
         self._profiler_state.stop_event.clear()
         self._system_metrics_monitor.start()
+        self._hw_metrics_monitor.start()
 
         for prof in list(self.all_profilers):
             try:
@@ -292,6 +294,7 @@ class GProfiler:
         logger.info("Stopping ...")
         self._profiler_state.stop_event.set()
         self._system_metrics_monitor.stop()
+        self._hw_metrics_monitor.stop()
         for prof in self.all_profilers:
             prof.stop()
 
@@ -331,6 +334,19 @@ class GProfiler:
         )
         metadata.update({"profiling_mode": self._profiler_state.profiling_mode})
         metrics = self._system_metrics_monitor.get_metrics()
+        hwmetrics = self._hw_metrics_monitor.get_hw_metrics()
+        if hwmetrics is None:
+            logger.info("No hw metrics were collected")
+        else:
+            if hwmetrics.metrics_data is None:
+                logger.info("No hw metrics_data were collected")
+            else:
+                logger.info("Collected hw metrics_data")
+
+            if hwmetrics.metrics_html is None:
+                logger.info("No hw metrics_html were collected")
+            else:
+                logger.info("Collected hw metrics_html")
 
         try:
             external_app_metadata = read_external_metadata(self._external_metadata_path).application
@@ -346,6 +362,7 @@ class GProfiler:
                 enrichment_options=self._enrichment_options,
                 metadata=metadata,
                 metrics=metrics,
+                hwmetrics=hwmetrics,
                 external_app_metadata=external_app_metadata,
             )
 
@@ -357,6 +374,7 @@ class GProfiler:
                 enrichment_options=self._enrichment_options,
                 metadata=metadata,
                 metrics=metrics,
+                hwmetrics=hwmetrics,
                 external_app_metadata=external_app_metadata,
             )
 
@@ -394,6 +412,11 @@ class GProfiler:
                 self._state.init_new_cycle()
 
                 snapshot_start = time.monotonic()
+
+                if self._heartbeat_file_path:
+                    # --heart-beat flag
+                    self._heartbeat_file_path.touch(mode=644, exist_ok=True)
+
                 try:
                     self._snapshot()
                 except Exception:
@@ -438,7 +461,7 @@ def _submit_profile_logged(
         logger.exception("Error occurred sending profile to server")
     else:
         logger.info("Successfully uploaded profiling data to the server")
-        return response_dict.get("gpid", "")
+        return cast(str, response_dict.get("gpid", ""))
     return ""
 
 
@@ -487,7 +510,7 @@ def copy_resources(path: Path) -> None:
 def parse_cmd_args() -> configargparse.Namespace:
     parser = configargparse.ArgumentParser(
         description="This is the gProfiler CLI documentation. You can access the general"
-        " documentation at https://github.com/Granulate/gprofiler#readme.",
+        " documentation at https://github.com/intel/gprofiler#readme.",
         auto_env_var_prefix="gprofiler_",
         add_config_file_help=True,
         add_env_var_help=False,
@@ -559,6 +582,15 @@ def parse_cmd_args() -> configargparse.Namespace:
         type=integers_list,
         help="Comma separated list of processes that will be filtered to profile,"
         " given multiple times will append pids to one list",
+    )
+    parser.add_argument(
+        "--rootless",
+        action="store_true",
+        default=False,
+        help="Run without root/sudo with limited functionality"
+        "Profiling is limted to only processes owned by this user that are passed with --pids. Logs and pid file "
+        "may be directed to user owned directory with --log-file and --pid-file respectively. Some additional "
+        "configuration (e.g. kernel.perf_event_paranoid) may be required to operate without root.",
     )
 
     _add_profilers_arguments(parser)
@@ -791,11 +823,7 @@ def parse_cmd_args() -> configargparse.Namespace:
         action="store_true",
         dest="databricks_job_name_as_service_name",
         default=False,
-        help="gProfiler will set service name to Databricks' job name on ephemeral clusters. It'll delay the beginning"
-        " of the profiling due to repeated waiting for Spark's metrics server."
-        ' service name format is: "databricks-job-<JOB-NAME>".'
-        " Note that in any case that the job name is not available due to redaction,"
-        " gProfiler will fallback to use the clusterName property.",
+        help="Deprecated! Removed in version 1.49.0",
     )
 
     parser.add_argument(
@@ -812,6 +840,41 @@ def parse_cmd_args() -> configargparse.Namespace:
         action="store_true",
         help="Log extra verbose information, making the debugging of gProfiler easier",
     )
+
+    parser.add_argument(
+        "--heartbeat-file",
+        type=str,
+        dest="heartbeat_file",
+        default=None,
+        help="Heartbeat file used to indicate gProfiler is functioning."
+        "The file modification indicates the last snapshot time.",
+    )
+
+    if is_linux() and not is_aarch64():
+        hw_metrics_options = parser.add_argument_group("hardware metrics")
+        hw_metrics_options.add_argument(
+            "--enable-hw-metrics-collection",
+            action="store_true",
+            default=False,
+            dest="collect_hw_metrics",
+            help="Enable to collect HW metrics through Perfspect tool which need to be installed separately.",
+        )
+        hw_metrics_options.add_argument(
+            "--perfspect-path",
+            type=str,
+            dest="tool_perfspect_path",
+            default=None,
+            help="Enable HW metrics collection with PerfSpect tool."
+            " Provide path to PerfSpect binary to enable collection.",
+        )
+        hw_metrics_options.add_argument(
+            "--perfspect-duration",
+            action="store",
+            type=positive_integer,
+            dest="tool_perfspect_duration",
+            default=60,
+            help="The default perfspect tool collection time is 60 second.",
+        )
 
     args = parser.parse_args()
 
@@ -892,8 +955,14 @@ def _add_profilers_arguments(parser: configargparse.ArgumentParser) -> None:
 
 
 def verify_preconditions(args: configargparse.Namespace, processes_to_profile: Optional[List[Process]]) -> None:
-    if not is_root():
-        print("Must run gprofiler as root, please re-run.", file=sys.stderr)
+    if not args.rootless and not is_root():
+        print("Not running as root, rerun with --rootless or as root.", file=sys.stderr)
+        sys.exit(1)
+    elif args.rootless and is_root():
+        print(
+            "Conflict, running with --rootless and as root, rerun with --rootless or as root (but not both).",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     if args.pid_ns_check and not is_running_in_init_pid():
@@ -926,17 +995,6 @@ def verify_preconditions(args: configargparse.Namespace, processes_to_profile: O
         if len(processes_to_profile) == 0:
             print("There aren't any alive processes provided via --pid PID list")
             sys.exit(1)
-
-
-def setup_signals() -> None:
-    # When we run under staticx & PyInstaller, both of them forward (some of the) signals to gProfiler.
-    # We catch SIGINTs and ratelimit them, to avoid being interrupted again during the handling of the
-    # first INT.
-    # See my commit message for more information.
-    signal.signal(signal.SIGINT, sigint_handler)
-    # handle SIGTERM in the same manner - gracefully stop gProfiler.
-    # SIGTERM is also forwarded by staticx & PyInstaller, so we need to ratelimit it.
-    signal.signal(signal.SIGTERM, sigint_handler)
 
 
 def log_system_info() -> None:
@@ -1003,6 +1061,9 @@ def warn_about_deprecated_args(args: configargparse.Namespace) -> None:
     if args.collect_spark_metrics:
         logger.warning("--collect-spark-metrics is deprecated and removed in version 1.42.0")
 
+    if args.databricks_job_name_as_service_name:
+        logger.warning("--databricks-job-name-as-service-name is deprecated and removed in version 1.49.0")
+
 
 def main() -> None:
     args = parse_cmd_args()
@@ -1043,19 +1104,6 @@ def main() -> None:
     # assume we run in the root cgroup (when containerized, that's our view)
     usage_logger = CgroupsUsageLogger(logger, "/") if args.log_usage else NoopUsageLogger()
 
-    if args.databricks_job_name_as_service_name:
-        # "databricks" will be the default name in case of failure with --databricks-job-name-as-service-name flag
-        args.service_name = "databricks"
-        dbx_web_ui_wrapper = DBXWebUIEnvWrapper(logger)
-        dbx_metadata = dbx_web_ui_wrapper.all_props_dict
-        if dbx_metadata is not None:
-            service_suffix = get_name_from_metadata(dbx_metadata)
-            if service_suffix is not None:
-                args.service_name = f"databricks-{service_suffix}"
-
-        if remote_logs_handler is not None:
-            remote_logs_handler.update_service_name(args.service_name)
-
     try:
         logger.info(
             "Running gProfiler", version=__version__, commandline=" ".join(sys.argv[1:]), arguments=args.__dict__
@@ -1082,6 +1130,17 @@ def main() -> None:
                 logger.error(f"External metadata file {args.external_metadata} does not exist!")
                 sys.exit(1)
 
+        heartbeat_file_path: Optional[Path] = None
+        if args.heartbeat_file is not None:
+            heartbeat_file_path = Path(args.heartbeat_file)
+
+        perfspect_path: Optional[Path] = None
+        if hasattr(args, "tool_perfspect_path") and args.tool_perfspect_path is not None:
+            perfspect_path = Path(args.tool_perfspect_path)
+            if not perfspect_path.is_file():
+                logger.error(f"PerfSpect tool {args.tool_perfspect_path} does not exist!")
+                sys.exit(1)
+
         try:
             log_system_info()
         except Exception:
@@ -1097,7 +1156,7 @@ def main() -> None:
                 )
                 sys.exit(1)
 
-        mkdir_owned_root(TEMPORARY_STORAGE_PATH)
+        mkdir_owned_root_wrapper(TEMPORARY_STORAGE_PATH)
 
         try:
             client_kwargs = {}
@@ -1149,6 +1208,7 @@ def main() -> None:
             output_dir=args.output_dir,
             flamegraph=args.flamegraph,
             rotating_output=args.rotating_output,
+            rootless=args.rootless,
             profiler_api_client=profiler_api_client,
             collect_metrics=args.collect_metrics,
             collect_metadata=args.collect_metadata,
@@ -1159,11 +1219,15 @@ def main() -> None:
             duration=args.duration,
             profile_api_version=args.profile_api_version,
             profiling_mode=args.profiling_mode,
+            collect_hw_metrics=args.collect_hw_metrics,
             profile_spawned_processes=args.profile_spawned_processes,
             remote_logs_handler=remote_logs_handler,
             controller_process=controller_process,
             processes_to_profile=processes_to_profile,
             external_metadata_path=external_metadata_path,
+            heartbeat_file_path=heartbeat_file_path,
+            perfspect_path=args.tool_perfspect_path,
+            perfspect_duration=args.tool_perfspect_duration,
         )
         logger.info("gProfiler initialized and ready to start profiling")
         if args.continuous:

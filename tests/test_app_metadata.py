@@ -36,19 +36,19 @@ from tests.utils import assert_jvm_flags_equal, is_aarch64, load_metadata, run_g
             "pyperf",
             None,
             {
-                "exe": "/usr/local/bin/python3.6",
+                "exe": "/usr/local/bin/python3.10",
                 "execfn": "/usr/local/bin/python",
                 "libpython_elfid": (
-                    "buildid:64b7f8a37ff81f574936de12c263aade340ed3db"
+                    "buildid:08d0c231d1b51904dda230c29f9a277879d8a966"
                     if is_aarch64()
-                    else "buildid:0ef3fce0ef90d8f40ad9236793d30081001ee898"
+                    else "buildid:a0fbcb3dd3173cad741cc59461b2e04faf617731"
                 ),
                 "exe_elfid": (
-                    "buildid:d627b889c0ac0642ea715651ebb7436ce1ee7444"
+                    "buildid:023e54c69bdf16e6ae2ae008bf7831ecc6696e4b"
                     if is_aarch64()
-                    else "buildid:a04b9016e15a247fbc21c91260c13e17a458ed33"
+                    else "buildid:a5c0d6959bf2750616ee9ba872c689aba508ab4f"
                 ),
-                "python_version": "Python 3.6.15",
+                "python_version": "Python 3.10.17",
                 "sys_maxunicode": None,
                 "arch": platform.machine(),
             },
@@ -85,15 +85,15 @@ from tests.utils import assert_jvm_flags_equal, is_aarch64, load_metadata, run_g
             "ap",
             None,
             {
-                "exe": "/usr/local/openjdk-8/bin/java",
-                "execfn": "/usr/local/openjdk-8/bin/java",
-                "java_version": 'openjdk version "1.8.0_322"\n'
-                "OpenJDK Runtime Environment (build 1.8.0_322-b06)\n"
-                "OpenJDK 64-Bit Server VM (build 25.322-b06, mixed mode)",
+                "exe": "/opt/java/openjdk/bin/java",
+                "execfn": "/opt/java/openjdk/bin/java",
+                "java_version": 'openjdk version "1.8.0_442"\n'
+                "OpenJDK Runtime Environment (Temurin)(build 1.8.0_442-b06)\n"
+                "OpenJDK 64-Bit Server VM (Temurin)(build 25.442-b06, mixed mode)",
                 "libjvm_elfid": (
-                    "buildid:33a1021cade63f16e30726be4111f20c34444764"
+                    "sha1:365c41ba70ca9ca7350e8ea01d36149aa59be1fd"
                     if is_aarch64()
-                    else "buildid:622795512a2c037aec4d7ca6da05527dae86e460"
+                    else "sha1:98f27ec5da9c28d36a110cac36669f3cf4a8d9d1"
                 ),
                 "arch": platform.machine(),
                 "jvm_flags": [
@@ -243,9 +243,9 @@ def test_app_metadata(
     application_executable: str,
 ) -> None:
     if runtime == "dotnet":
-        pytest.xfail("Dotnet-trace doesn't work with alpine: https://github.com/Granulate/gprofiler/issues/795")
+        pytest.xfail("Dotnet-trace doesn't work with alpine: https://github.com/intel/gprofiler/issues/795")
     if profiler_type == "pyperf" and is_aarch64():
-        pytest.xfail("PyPerf doesn't run on Aarch64 - https://github.com/Granulate/gprofiler/issues/499")
+        pytest.xfail("PyPerf doesn't run on Aarch64 - https://github.com/intel/gprofiler/issues/499")
     run_gprofiler_in_container_for_one_session(
         docker_client, gprofiler_docker_image, output_directory, output_collapsed, runtime_specific_args, profiler_flags
     )
