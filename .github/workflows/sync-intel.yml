@@ -22,7 +22,7 @@ jobs:
       - name: Create or Update sync branch
         run: |
           git checkout -B intel-sync
-          git merge --no-ff intel/main || true
+          git merge --no-ff intel/master || true
 
       - name: Push sync branch
         env:
@@ -38,5 +38,5 @@ jobs:
           title: 'Sync from upstream Intel gprofiler'
           body: |
             Automated weekly sync from Intel's gprofiler repository.
-          base: main
+          base: master
 
