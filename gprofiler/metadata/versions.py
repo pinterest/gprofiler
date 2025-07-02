@@ -16,7 +16,7 @@
 from subprocess import CompletedProcess
 from threading import Event
 
-from granulate_utils.linux.ns import get_process_nspid, run_in_ns
+from granulate_utils.linux.ns import get_process_nspid, run_in_ns_wrapper
 from psutil import NoSuchProcess, Process
 
 from gprofiler.utils import run_process
@@ -35,10 +35,12 @@ def get_exe_version(
     exe_path = f"/proc/{get_process_nspid(process.pid)}/exe"
 
     def _run_get_version() -> "CompletedProcess[bytes]":
-        return run_process([exe_path, version_arg], stop_event=stop_event, timeout=get_version_timeout)
+        return run_process(
+            [exe_path, version_arg], stop_event=stop_event, timeout=get_version_timeout, pdeathsigger=False
+        )
 
     try:
-        cp = run_in_ns(["pid", "mnt"], _run_get_version, process.pid)
+        cp = run_in_ns_wrapper(["pid", "mnt"], _run_get_version, process.pid)
     except FileNotFoundError as e:
         if not process.is_running():
             raise NoSuchProcess(process.pid)
