@@ -20,11 +20,15 @@ import os
 import socket
 import threading
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, TYPE_CHECKING
 
 import configargparse
 import requests
 from psutil import Process
+
+# Use TYPE_CHECKING to avoid circular imports
+if TYPE_CHECKING:
+    from gprofiler.main import GProfiler
 
 from gprofiler.client import ProfilerAPIClient
 from gprofiler.containers_client import ContainerNamesClient
