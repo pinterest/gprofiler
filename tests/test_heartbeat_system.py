@@ -6,6 +6,9 @@ This script demonstrates:
 1. Agent sending heartbeat to backend
 2. Backend responding with start/stop commands
 3. Agent acting on commands with idempotency
+4. Command completion acknowledgments
+
+Supports both mock mode (default) and live mode with real backend.
 """
 
 import json
@@ -13,6 +16,8 @@ import requests
 import time
 from datetime import datetime
 from typing import Dict, Any, Optional
+import unittest.mock
+import sys
 
 # Configuration
 BACKEND_URL = "http://localhost:8000"  # Adjust based on your setup
@@ -20,8 +25,11 @@ SERVICE_NAME = "test-service"
 HOSTNAME = "test-host"
 IP_ADDRESS = "127.0.0.1"
 
-class TestHeartbeatClient:
-    """Test client to simulate agent heartbeat behavior"""
+# Check if we should run in mock mode (no real backend)
+MOCK_MODE = "--live" not in sys.argv  # Default to mock mode unless --live specified
+
+class HeartbeatClient:
+    """Client to simulate agent heartbeat behavior"""
     
     def __init__(self, backend_url: str, service_name: str, hostname: str, ip_address: str):
         self.backend_url = backend_url.rstrip('/')
@@ -85,20 +93,56 @@ class TestHeartbeatClient:
             print(f"❌ Heartbeat error: {e}")
             return None
     
+    def send_command_completion(self, command_id: str, status: str, execution_time: int = 0, 
+                               error_message: str = None, results_path: str = None) -> bool:
+        """Send command completion status to backend"""
+        completion_data = {
+            "command_id": command_id,
+            "hostname": self.hostname,
+            "status": status,
+            "execution_time": execution_time,
+            "error_message": error_message,
+            "results_path": results_path
+        }
+        
+        try:
+            response = requests.post(
+                f"{self.backend_url}/api/metrics/command_completion",
+                json=completion_data,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                print(f"✅ Command completion sent successfully for {command_id} with status: {status}")
+                return True
+            else:
+                print(f"❌ Failed to send command completion: {response.status_code} - {response.text}")
+                return False
+                
+        except Exception as e:
+            print(f"❌ Error sending command completion: {e}")
+            return False
+
     def simulate_profiling_action(self, command_type: str, command_id: str):
         """Simulate profiling action (start/stop)"""
         if command_type == "start":
             print(f"🚀 Starting profiler for command {command_id}")
             # Simulate profiling work
             time.sleep(2)
-            print(f"✅ Profiler started successfully")
+            print(f"✅ Profiler completed successfully")
+            # Send completion acknowledgment
+            self.send_command_completion(command_id, "completed", execution_time=2)
         elif command_type == "stop":
             print(f"🛑 Stopping profiler for command {command_id}")
             # Simulate stopping
             time.sleep(1)
             print(f"✅ Profiler stopped successfully")
+            # Send completion acknowledgment
+            self.send_command_completion(command_id, "completed", execution_time=1)
         else:
             print(f"⚠️  Unknown command type: {command_type}")
+            # Send failure acknowledgment
+            self.send_command_completion(command_id, "failed", error_message=f"Unknown command type: {command_type}")
 
 def create_test_profiling_request(backend_url: str, service_name: str, command_type: str = "start") -> bool:
     """Create a test profiling request"""
@@ -133,13 +177,105 @@ def create_test_profiling_request(backend_url: str, service_name: str, command_t
         print(f"❌ Error creating profiling request: {e}")
         return False
 
-def main():
-    """Main test function"""
-    print("🧪 Testing Heartbeat-Based Profiling Control System")
-    print("=" * 60)
+def create_mock_responses():
+    """Create mock responses for testing without a real backend"""
+    mock_state = {
+        "pending_commands": [],
+        "completed_commands": [],
+        "heartbeat_count": 0
+    }
+    
+    def mock_heartbeat_post(url, json=None, timeout=None):
+        """Mock heartbeat endpoint"""
+        mock_state["heartbeat_count"] += 1
+        
+        # Mock response object
+        response = unittest.mock.Mock()
+        response.status_code = 200
+        
+        # Check if there are pending commands
+        if mock_state["pending_commands"]:
+            command = mock_state["pending_commands"].pop(0)
+            response.json.return_value = {
+                "message": "Heartbeat received",
+                "command_id": command["command_id"],
+                "profiling_command": command["profiling_command"]
+            }
+        else:
+            response.json.return_value = {
+                "message": "Heartbeat received, no pending commands"
+            }
+        
+        return response
+    
+    def mock_profile_request_post(url, json=None, timeout=None):
+        """Mock profile request endpoint"""
+        # Generate unique IDs based on total requests made
+        total_requests = len(mock_state["completed_commands"]) + len(mock_state["pending_commands"]) + 1
+        command_id = f"cmd_{total_requests}"
+        request_id = f"req_{total_requests}"
+        
+        # Add command to pending queue
+        mock_state["pending_commands"].append({
+            "command_id": command_id,
+            "profiling_command": {
+                "command_type": json.get("command_type", "start"),
+                "combined_config": {
+                    "duration": json.get("duration", 60),
+                    "frequency": json.get("frequency", 11),
+                    "profiling_mode": json.get("profiling_mode", "cpu")
+                }
+            }
+        })
+        
+        response = unittest.mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {
+            "message": f"Profiling request created",
+            "request_id": request_id,
+            "command_id": command_id
+        }
+        
+        return response
+    
+    def mock_command_completion_post(url, json=None, timeout=None):
+        """Mock command completion endpoint"""
+        mock_state["completed_commands"].append({
+            "command_id": json.get("command_id"),
+            "status": json.get("status"),
+            "execution_time": json.get("execution_time")
+        })
+        
+        response = unittest.mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {
+            "message": "Command completion received"
+        }
+        
+        return response
+    
+    def mock_post(url, json=None, timeout=None):
+        """Route mock requests to appropriate handlers"""
+        if "/heartbeat" in url:
+            return mock_heartbeat_post(url, json, timeout)
+        elif "/profile_request" in url:
+            return mock_profile_request_post(url, json, timeout)
+        elif "/command_completion" in url:
+            return mock_command_completion_post(url, json, timeout)
+        else:
+            # Unknown endpoint
+            response = unittest.mock.Mock()
+            response.status_code = 404
+            response.text = "Not found"
+            return response
+    
+    return mock_post, mock_state
+
+def run_tests():
+    """Run the actual test logic"""
     
     # Initialize test client
-    client = TestHeartbeatClient(BACKEND_URL, SERVICE_NAME, HOSTNAME, IP_ADDRESS)
+    client = HeartbeatClient(BACKEND_URL, SERVICE_NAME, HOSTNAME, IP_ADDRESS)
     
     # Test 1: Send initial heartbeat (should have no commands)
     print("\n1️⃣  Test: Initial heartbeat (no commands expected)")
@@ -148,7 +284,7 @@ def main():
     # Test 2: Create a START profiling request
     print("\n2️⃣  Test: Create START profiling request")
     if create_test_profiling_request(BACKEND_URL, SERVICE_NAME, "start"):
-        time.sleep(1)  # Give backend time to process
+        time.sleep(0.1)  # Give backend time to process
         
         # Send heartbeat to receive the command
         print("\n   📡 Sending heartbeat to receive command...")
@@ -166,7 +302,7 @@ def main():
     # Test 3: Create a STOP profiling request
     print("\n3️⃣  Test: Create STOP profiling request")
     if create_test_profiling_request(BACKEND_URL, SERVICE_NAME, "stop"):
-        time.sleep(1)  # Give backend time to process
+        time.sleep(0.1)  # Give backend time to process
         
         # Send heartbeat to receive the stop command
         print("\n   📡 Sending heartbeat to receive stop command...")
@@ -180,13 +316,43 @@ def main():
     for i in range(3):
         print(f"\n   Heartbeat {i+1}/3:")
         client.send_heartbeat()
-        time.sleep(1)
+        time.sleep(0.1)
     
     print("\n✅ Test completed!")
     print("\nTest Summary:")
     print(f"   - Executed commands: {len(client.executed_commands)}")
     print(f"   - Last command ID: {client.last_command_id}")
     print(f"   - Commands executed: {list(client.executed_commands)}")
+
+def main():
+    """Main test function"""
+    print("🧪 Testing Heartbeat-Based Profiling Control System")
+    
+    if MOCK_MODE:
+        print("🎭 Running in MOCK MODE (no real backend required)")
+        print("   Use --live flag to test against real backend on localhost:8000")
+        mock_post, mock_state = create_mock_responses()
+        
+        # Patch requests.post for mock mode
+        with unittest.mock.patch('requests.post', side_effect=mock_post):
+            print("=" * 60)
+            run_tests()
+            
+        # Print mock state summary
+        print(f"\n📊 Mock Backend State:")
+        print(f"   - Total heartbeats: {mock_state['heartbeat_count']}")
+        print(f"   - Pending commands: {len(mock_state['pending_commands'])}")
+        print(f"   - Completed commands: {len(mock_state['completed_commands'])}")
+        
+        if mock_state['completed_commands']:
+            print("   - Command completions:")
+            for cmd in mock_state['completed_commands']:
+                print(f"     * {cmd['command_id']}: {cmd['status']} ({cmd['execution_time']}s)")
+        
+    else:
+        print("🌐 Running in LIVE MODE (requires backend on localhost:8000)")
+        print("=" * 60)
+        run_tests()
 
 if __name__ == "__main__":
     main()
