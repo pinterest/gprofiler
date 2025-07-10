@@ -15,21 +15,26 @@
 #
 import concurrent.futures
 import datetime
+import json
 import logging
 import logging.config
 import logging.handlers
 import os
 import shutil
+import socket
 import sys
+import threading
 import time
 import traceback
 from pathlib import Path
 from threading import Event
 from types import TracebackType
-from typing import Iterable, List, Optional, Type, cast
+from typing import Iterable, List, Optional, Type, cast, Dict, Any
 
 import configargparse
 import humanfriendly
+import requests
+import requests
 from granulate_utils.linux.ns import is_root, is_running_in_init_pid
 from granulate_utils.linux.process import is_process_running
 from granulate_utils.metadata.cloud import get_aws_execution_env
@@ -77,6 +82,7 @@ from gprofiler.utils import (
 )
 from gprofiler.utils.fs import escape_filename, mkdir_owned_root_wrapper
 from gprofiler.utils.proxy import get_https_proxy
+from gprofiler.heartbeat import HeartbeatClient, DynamicGProfilerManager
 
 if is_linux():
     from gprofiler.utils.linux import disable_core_files
@@ -850,6 +856,22 @@ def parse_cmd_args() -> configargparse.Namespace:
         "The file modification indicates the last snapshot time.",
     )
 
+    parser.add_argument(
+        "--enable-heartbeat-server",
+        action="store_true",
+        dest="enable_heartbeat_server",
+        default=False,
+        help="Enable heartbeat communication with server for dynamic profiling commands",
+    )
+
+    parser.add_argument(
+        "--heartbeat-interval",
+        type=positive_integer,
+        dest="heartbeat_interval",
+        default=30,
+        help="Interval in seconds for sending heartbeats to server (default: %(default)s)",
+    )
+
     if is_linux() and not is_aarch64():
         hw_metrics_options = parser.add_argument_group("hardware metrics")
         hw_metrics_options.add_argument(
@@ -924,6 +946,16 @@ def parse_cmd_args() -> configargparse.Namespace:
 
     if args.profile_spawned_processes and args.pids_to_profile is not None:
         parser.error("--pids is not allowed when profiling spawned processes")
+
+    if args.enable_heartbeat_server:
+        if not args.upload_results:
+            parser.error("--enable-heartbeat-server requires --upload-results to be enabled")
+        if not args.server_token:
+            parser.error("--enable-heartbeat-server requires --token to be provided")
+        if not args.service_name:
+            parser.error("--enable-heartbeat-server requires --service-name to be provided")
+        if args.continuous:
+            parser.error("--enable-heartbeat-server cannot be used with --continuous mode")
 
     return args
 
@@ -1230,10 +1262,38 @@ def main() -> None:
             perfspect_duration=getattr(args, "tool_perfspect_duration", None),
         )
         logger.info("gProfiler initialized and ready to start profiling")
-        if args.continuous:
-            gprofiler.run_continuous()
+        
+        # Check if heartbeat server mode is enabled
+        if args.enable_heartbeat_server:
+            if not args.upload_results:
+                logger.error("Heartbeat server mode requires --upload-results to be enabled")
+                sys.exit(1)
+            
+            # Create heartbeat client
+            heartbeat_client = HeartbeatClient(
+                api_server=args.api_server,
+                service_name=args.service_name,
+                server_token=args.server_token,
+                verify=args.verify
+            )
+            
+            # Create dynamic profiler manager
+            manager = DynamicGProfilerManager(args, heartbeat_client)
+            manager.heartbeat_interval = args.heartbeat_interval
+            
+            try:
+                logger.info("Starting heartbeat mode - waiting for server commands...")
+                manager.start_heartbeat_loop()
+            except KeyboardInterrupt:
+                logger.info("Received interrupt signal, stopping heartbeat mode...")
+            finally:
+                manager.stop()
         else:
-            gprofiler.run_single()
+            # Normal profiling mode
+            if args.continuous:
+                gprofiler.run_continuous()
+            else:
+                gprofiler.run_single()
 
     except KeyboardInterrupt:
         pass
