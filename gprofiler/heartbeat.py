@@ -121,6 +121,50 @@ class HeartbeatClient:
             logger.error(f"Failed to send heartbeat: {e}")
             return None
     
+    def send_command_completion(self, command_id: str, status: str, execution_time: Optional[int] = None, 
+                               error_message: Optional[str] = None, results_path: Optional[str] = None) -> bool:
+        """
+        Send command completion status to the server.
+        
+        Args:
+            command_id: The ID of the completed command
+            status: 'completed' or 'failed'
+            execution_time: Duration of execution in seconds
+            error_message: Error message if status is 'failed'
+            results_path: Path to profiling results if available
+            
+        Returns:
+            bool: True if completion was successfully reported, False otherwise
+        """
+        try:
+            completion_data = {
+                "command_id": command_id,
+                "hostname": self.hostname,
+                "status": status,
+                "execution_time": execution_time,
+                "error_message": error_message,
+                "results_path": results_path
+            }
+            
+            url = f"{self.api_server}/api/metrics/command_completion"
+            response = self.session.post(
+                url,
+                json=completion_data,
+                verify=self.verify,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                logger.info(f"Successfully reported command completion for {command_id} with status: {status}")
+                return True
+            else:
+                logger.error(f"Failed to report command completion for {command_id}. Status: {response.status_code}, Response: {response.text}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Failed to send command completion for {command_id}: {e}")
+            return False
+
     def _load_executed_command_ids(self):
         """Load previously executed command IDs from file for persistence across restarts"""
         try:
@@ -217,13 +261,30 @@ class DynamicGProfilerManager:
                         # Stop current profiler without starting a new one
                         logger.info("Stopping profiler due to stop command")
                         self._stop_current_profiler()
+                        # Report completion for stop command
+                        self.heartbeat_client.send_command_completion(
+                            command_id=command_id,
+                            status="completed",
+                            execution_time=0,
+                            error_message=None,
+                            results_path=None
+                        )
                     elif command_type == "start":
                         # Stop current profiler if running, then start new one
                         logger.info("Starting new profiler due to start command")
                         self._stop_current_profiler()
                         self._start_new_profiler(profiling_command, command_id)
+                        # Note: command completion will be reported by _run_profiler when profiling finishes
                     else:
                         logger.warning(f"Unknown command type: {command_type}")
+                        # Report completion for unknown command type
+                        self.heartbeat_client.send_command_completion(
+                            command_id=command_id,
+                            status="failed",
+                            execution_time=0,
+                            error_message=f"Unknown command type: {command_type}",
+                            results_path=None
+                        )
                 
                 
                 # Wait for next heartbeat
@@ -270,6 +331,14 @@ class DynamicGProfilerManager:
             
         except Exception as e:
             logger.error(f"Failed to start new profiler: {e}", exc_info=True)
+            # Report failure to the server
+            self.heartbeat_client.send_command_completion(
+                command_id=command_id,
+                status="failed",
+                execution_time=0,
+                error_message=str(e),
+                results_path=None
+            )
     
     def _create_profiler_args(self, profiling_command: Dict[str, Any]) -> configargparse.Namespace:
         """Create modified args based on profiling command"""
@@ -374,15 +443,43 @@ class DynamicGProfilerManager:
         if gprofiler is None:
             return
             
+        start_time = datetime.datetime.now()
+        status = "failed"
+        error_message = None
+        results_path = None
+        
         try:
             logger.info(f"Running profiler for {duration} seconds (command ID: {command_id})...")
             gprofiler.run_single()
+            status = "completed"
             logger.info(f"Profiler run completed successfully for command ID: {command_id}")
+            
+            # Try to get results path if available
+            if hasattr(gprofiler, 'output_dir') and gprofiler.output_dir:
+                results_path = str(gprofiler.output_dir)
+                
         except Exception as e:
+            status = "failed"
+            error_message = str(e)
             logger.error(f"Profiler run failed for command ID {command_id}: {e}", exc_info=True)
-            # Keep command ID in executed set even if failed, to avoid retries
-            # You might want to implement a retry mechanism or failure tracking here
+            
         finally:
+            # Calculate execution time
+            end_time = datetime.datetime.now()
+            execution_time = int((end_time - start_time).total_seconds())
+            
+            # Report command completion to the server
+            try:
+                self.heartbeat_client.send_command_completion(
+                    command_id=command_id,
+                    status=status,
+                    execution_time=execution_time,
+                    error_message=error_message,
+                    results_path=results_path
+                )
+            except Exception as e:
+                logger.error(f"Failed to report command completion for {command_id}: {e}")
+            
             # Clear the current profiler reference
             if self.current_gprofiler == gprofiler:
                 self.current_gprofiler = None

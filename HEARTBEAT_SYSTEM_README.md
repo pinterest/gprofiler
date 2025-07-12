@@ -164,6 +164,7 @@ curl -X POST http://localhost:8000/api/metrics/profile_request \
 
 ### Agent - Run in Heartbeat Mode
 
+**Basic heartbeat mode:**
 ```bash
 python gprofiler/main.py \
   --enable-heartbeat-server \
@@ -174,6 +175,28 @@ python gprofiler/main.py \
   --heartbeat-interval 30 \
   --output-dir /tmp/profiles \
   --verbose
+```
+
+**Production deployment with all optimizations:**
+```bash
+# Set environment variables first
+export GPROFILER_TOKEN="K3VJlXsW4pdBWTfBaY8CheKENB5OUwcFmBodQvm-7es"
+export GPROFILER_SERVICE="your-service-name"  
+export GPROFILER_SERVER="http://10.1.145.15:9092"
+
+# Production command (can also source /opt/gprofiler/envs.sh for variables)
+/opt/gprofiler/gprofiler \
+  -u \
+  --token=$GPROFILER_TOKEN \
+  --service-name=$GPROFILER_SERVICE \
+  --server-host $GPROFILER_SERVER \
+  --dont-send-logs \
+  --server-upload-timeout 10 \
+  -c \
+  --disable-metrics-collection \
+  --java-safemode= \
+  -d 60 \
+  --java-no-version-check
 ```
 
 ## Implementation Details
@@ -303,12 +326,134 @@ python gprofiler/main.py \
 - Monitor backend API logs
 - Use test scripts to isolate issues
 
-## Contributing
+## Building and Running gProfiler Locally
 
-When contributing to this system:
+### Prerequisites
+- Linux system (x86_64 or Aarch64)
+- Python 3.10+ for source builds
+- Docker for containerized builds
+- 16GB+ RAM for full builds
+- Root access for profiling operations
 
-1. **Test thoroughly** with both backend and agent components
-2. **Maintain backward compatibility** with existing agent deployments  
-3. **Document API changes** and update examples
-4. **Add tests** for new functionality
-5. **Follow error handling patterns** established in the codebase
+### Build Options
+
+#### 1. Build Executable (Recommended)
+
+```bash
+cd /home/prashantpatel/code/pinterest-opensource/gprofiler
+
+# Full build (takes 20-30 minutes, builds all profilers from source)
+./scripts/build_x86_64_executable.sh
+
+# Fast build (for development, skips some optimizations)
+./scripts/build_x86_64_executable.sh --fast
+```
+
+The executable will be created at `build/x86_64/gprofiler`.
+
+#### 2. Build Docker Image
+
+```bash
+./scripts/build_x86_64_container.sh -t gprofiler
+```
+
+#### 3. Run from Source (Development)
+
+```bash
+# Install dependencies
+pip3 install -r requirements.txt
+
+# Copy required resources
+./scripts/copy_resources_from_image.sh
+
+# Run directly from source (requires root)
+sudo python3 -m gprofiler [options]
+```
+
+### Running Locally
+
+#### Basic Local Profiling
+
+```bash
+# Make executable and run basic profiling
+chmod +x build/x86_64/gprofiler
+sudo ./build/x86_64/gprofiler -o /tmp/gprofiler-output -d 30
+```
+
+#### Production-Style Local Run
+
+```bash
+# Set environment variables
+export GPROFILER_TOKEN="K3VJlXsW4pdBWTfBaY8CheKENB5OUwcFmBodQvm-7es"
+export GPROFILER_SERVICE="your-service-name"
+export GPROFILER_SERVER="http://10.1.145.15:9092"
+
+# Run with production flags
+sudo ./build/x86_64/gprofiler \
+  -u \
+  --token=$GPROFILER_TOKEN \
+  --service-name=$GPROFILER_SERVICE \
+  --server-host $GPROFILER_SERVER \
+  --dont-send-logs \
+  --server-upload-timeout 10 \
+  -c \
+  --disable-metrics-collection \
+  --java-safemode= \
+  -d 60 \
+  --java-no-version-check
+```
+
+#### Local Heartbeat Mode Testing
+
+```bash
+# Run agent in heartbeat mode for testing
+sudo ./build/x86_64/gprofiler \
+  --enable-heartbeat-server \
+  --upload-results \
+  --token=$GPROFILER_TOKEN \
+  --service-name=$GPROFILER_SERVICE \
+  --api-server $GPROFILER_SERVER \
+  --heartbeat-interval 30 \
+  --output-dir /tmp/profiles \
+  --dont-send-logs \
+  --server-upload-timeout 10 \
+  --disable-metrics-collection \
+  --java-safemode= \
+  --java-no-version-check \
+  --verbose
+```
+
+### Command Line Options Explained
+
+```bash
+-u, --upload-results              # Upload results to Performance Studio
+--token=$GPROFILER_TOKEN          # Authentication token
+--service-name=$GPROFILER_SERVICE # Service identifier  
+--server-host $GPROFILER_SERVER   # Performance Studio backend URL
+--dont-send-logs                  # Disable log transmission
+--server-upload-timeout 10        # Upload timeout (seconds)
+-c, --continuous                  # Continuous profiling mode
+--disable-metrics-collection      # Disable system metrics collection
+--java-safemode=                  # Disable Java safe mode (empty value)
+-d 60                            # Profiling duration (seconds)
+--java-no-version-check          # Skip Java version check
+--enable-heartbeat-server         # Enable heartbeat communication
+--heartbeat-interval 30           # Heartbeat frequency (seconds)
+--api-server URL                  # Heartbeat API server URL
+-o, --output-dir PATH            # Local output directory
+--verbose                        # Enable verbose logging
+```
+
+### Development Workflow
+
+1. **Build**: `./scripts/build_x86_64_executable.sh --fast`
+2. **Test locally**: `sudo ./build/x86_64/gprofiler -o /tmp/results -d 30`
+3. **View results**: Open `/tmp/results/last_flamegraph.html` in browser
+4. **Test heartbeat**: Run with `--enable-heartbeat-server` flag
+
+### Troubleshooting Local Builds
+
+- **Build fails**: Ensure 16GB+ RAM available
+- **Permission errors**: Run profiling commands with `sudo`
+- **Docker issues**: Ensure Docker daemon is running
+- **Missing dependencies**: Install build requirements with package manager
