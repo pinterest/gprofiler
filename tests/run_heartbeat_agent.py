@@ -32,7 +32,7 @@ def run_gprofiler_heartbeat_mode():
     os.makedirs(config["output_dir"], exist_ok=True)
     
     # Build the command
-    gprofiler_path = Path(__file__).parent / "gprofiler" / "gprofiler" / "main.py"
+    gprofiler_path = Path(__file__).parent.parent / "gprofiler" / "main.py"
     
     cmd = [
         sys.executable,
