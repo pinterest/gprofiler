@@ -180,9 +180,9 @@ python gprofiler/main.py \
 **Production deployment with all optimizations:**
 ```bash
 # Set environment variables first
-export GPROFILER_TOKEN="K3VJlXsW4pdBWTfBaY8CheKENB5OUwcFmBodQvm-7es"
+export GPROFILER_TOKEN="my_token"
 export GPROFILER_SERVICE="your-service-name"  
-export GPROFILER_SERVER="http://10.1.145.15:9092"
+export GPROFILER_SERVER="http://localhost:8080"
 
 # Production command (can also source /opt/gprofiler/envs.sh for variables)
 /opt/gprofiler/gprofiler \
@@ -340,7 +340,7 @@ export GPROFILER_SERVER="http://10.1.145.15:9092"
 #### 1. Build Executable (Recommended)
 
 ```bash
-cd /home/prashantpatel/code/pinterest-opensource/gprofiler
+cd gprofiler
 
 # Full build (takes 20-30 minutes, builds all profilers from source)
 ./scripts/build_x86_64_executable.sh
@@ -384,9 +384,9 @@ sudo ./build/x86_64/gprofiler -o /tmp/gprofiler-output -d 30
 
 ```bash
 # Set environment variables
-export GPROFILER_TOKEN="K3VJlXsW4pdBWTfBaY8CheKENB5OUwcFmBodQvm-7es"
+export GPROFILER_TOKEN="my_token"
 export GPROFILER_SERVICE="your-service-name"
-export GPROFILER_SERVER="http://10.1.145.15:9092"
+export GPROFILER_SERVER="http://localhost:8080"
 
 # Run with production flags
 sudo ./build/x86_64/gprofiler \

@@ -867,9 +867,9 @@ Next steps:
 sudo nano /opt/gprofiler/envs.sh
 
 # Add your settings:
-export GPROFILER_TOKEN="K3VJlXsW4pdBWTfBaY8CheKENB5OUwcFmBodQvm-7es"
+export GPROFILER_TOKEN="my_token"
 export GPROFILER_SERVICE="web-production"  
-export GPROFILER_SERVER="http://10.1.145.15:9092"
+export GPROFILER_SERVER="http://localhost:8080"
 ```
 
 ### Step 2: Start Service
@@ -1208,9 +1208,9 @@ Regardless of deployment method, the actual runtime behavior is identical becaus
 
 ```bash
 # Authentication & Endpoint
-GPROFILER_TOKEN="K3VJlXsW4pdBWTfBaY8CheKENB5OUwcFmBodQvm-7es"
+GPROFILER_TOKEN="my_token"
 GPROFILER_SERVICE="web-production"  
-GPROFILER_SERVER="http://10.1.145.15:9092"
+GPROFILER_SERVER="http://localhost:8080"
 
 # Profiling Behavior  
 GPROFILER_DURATION="60"                    # Profiling duration in seconds
