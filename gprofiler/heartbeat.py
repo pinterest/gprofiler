@@ -39,7 +39,7 @@ from gprofiler.metadata.system_metadata import get_hostname
 from gprofiler.profiler_state import ProfilerState
 from gprofiler.profilers.factory import get_profilers
 from gprofiler.profilers.profiler_base import NoopProfiler
-from gprofiler.state import State, init_state
+from gprofiler.state import State, init_state, get_state
 from gprofiler.system_metrics import NoopSystemMetricsMonitor, SystemMetricsMonitor, SystemMetricsMonitorBase
 from gprofiler.usage_loggers import NoopUsageLogger
 from gprofiler.utils import TEMPORARY_STORAGE_PATH
@@ -375,7 +375,7 @@ class DynamicGProfilerManager:
         from gprofiler.main import GProfiler, pids_to_processes
             
         processes_to_profile = pids_to_processes(args)
-        state = init_state()
+        state = get_state()
         
         # Create profiler API client
         profiler_api_client = None
@@ -387,6 +387,7 @@ class DynamicGProfilerManager:
                 curlify_requests=getattr(args, 'curlify_requests', False),
                 hostname=get_hostname(),
                 verify=args.verify,
+                upload_timeout=getattr(args, 'server-upload-timeout', 120)  # Default to 120 seconds
             )
         
         enrichment_options = EnrichmentOptions(
