@@ -1191,9 +1191,6 @@ def main() -> None:
         mkdir_owned_root_wrapper(TEMPORARY_STORAGE_PATH)
 
         try:
-            client_kwargs = {}
-            if "server_upload_timeout" in args:
-                client_kwargs["upload_timeout"] = args.server_upload_timeout
             profiler_api_client = (
                 ProfilerAPIClient(
                     token=args.server_token,
@@ -1202,7 +1199,7 @@ def main() -> None:
                     curlify_requests=args.curlify_requests,
                     hostname=get_hostname(),
                     verify=args.verify,
-                    **client_kwargs,
+                    upload_timeout=args.server_upload_timeout,
                 )
                 if args.upload_results
                 else None
