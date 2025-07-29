@@ -306,6 +306,7 @@ class DynamicGProfilerManager:
                 self.current_gprofiler = None
         
         if self.current_thread and self.current_thread.is_alive():
+            # No need to actively kill the thread, the self.current_gprofiler.stop() already handles it using events
             logger.info("Waiting for profiler thread to finish...")
             self.current_thread.join(timeout=10)
             self.current_thread = None
@@ -322,7 +323,7 @@ class DynamicGProfilerManager:
             # Start profiler in a separate thread
             self.current_thread = threading.Thread(
                 target=self._run_profiler,
-                args=(self.current_gprofiler, profiling_command.get("duration", 60), command_id),
+                args=(self.current_gprofiler, new_args.continuous, getattr(new_args, "duration", 60), command_id),
                 daemon=True
             )
             self.current_thread.start()
@@ -361,8 +362,8 @@ class DynamicGProfilerManager:
         if "pids" in combined_config and combined_config["pids"]:
             new_args.pids_to_profile = combined_config["pids"]
         
-        # Set continuous mode to False for on-demand profiling
-        new_args.continuous = False
+        # Set continuous mode to False by default
+        new_args.continuous = combined_config.get("continuous", False)
         
         return new_args
     
@@ -439,8 +440,8 @@ class DynamicGProfilerManager:
             perfspect_duration=getattr(args, "tool_perfspect_duration", 60),
         )
     
-    def _run_profiler(self, gprofiler: 'GProfiler', duration: int, command_id: str):
-        """Run the profiler for the specified duration"""
+    def _run_profiler(self, gprofiler: 'GProfiler', continuous: bool, duration: int, command_id: str):
+        """Run the profiler with specified args"""
         if gprofiler is None:
             return
             
@@ -450,19 +451,35 @@ class DynamicGProfilerManager:
         results_path = None
         
         try:
-            logger.info(f"Running profiler for {duration} seconds (command ID: {command_id})...")
-            gprofiler.run_single()
-            status = "completed"
-            logger.info(f"Profiler run completed successfully for command ID: {command_id}")
+            if continuous:
+                logger.info(f"Running continuous profiler for command ID: {command_id}")
+                gprofiler.run_continuous()
+            else:
+                logger.info(f"Running profiler for {duration} seconds (command ID: {command_id})...")
+                gprofiler.run_single()
+
+            # After run completes, check if it was stopped or completed
+            if gprofiler._profiler_state.stop_event.is_set():
+                logger.info(f"Profiler run was stopped before completion for command ID: {command_id}")
+                status = "stopped"
+            else:
+                logger.info(f"Profiler run completed successfully for command ID: {command_id}")
+                status = "completed"
             
             # Try to get results path if available
             if hasattr(gprofiler, 'output_dir') and gprofiler.output_dir:
                 results_path = str(gprofiler.output_dir)
                 
         except Exception as e:
-            status = "failed"
-            error_message = str(e)
-            logger.error(f"Profiler run failed for command ID {command_id}: {e}", exc_info=True)
+            # Internal exceptions can occur during profiling stop
+            # Only consider a failure if it was not due to a stop event
+            if not gprofiler._profiler_state.stop_event.is_set():
+                status = "failed"
+                error_message = str(e)
+                logger.error(f"Profiler run failed for command ID {command_id}: {e}", exc_info=True)
+            else:
+                status = "stopped"
+                logger.info(f"Profiler run was stopped before completion for command ID: {command_id}")
             
         finally:
             # Calculate execution time
