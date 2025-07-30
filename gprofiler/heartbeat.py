@@ -314,6 +314,9 @@ class DynamicGProfilerManager:
     def _start_new_profiler(self, profiling_command: Dict[str, Any], command_id: str):
         """Start a new profiler with the given configuration"""
         try:
+            # Import here to avoid circular imports
+            from gprofiler.main import DEFAULT_PROFILING_DURATION
+            
             # Create modified args for the new profiler
             new_args = self._create_profiler_args(profiling_command)
             
@@ -323,7 +326,12 @@ class DynamicGProfilerManager:
             # Start profiler in a separate thread
             self.current_thread = threading.Thread(
                 target=self._run_profiler,
-                args=(self.current_gprofiler, new_args.continuous, getattr(new_args, "duration", 60), command_id),
+                args=(
+                    self.current_gprofiler,
+                    new_args.continuous,
+                    getattr(new_args, "duration", DEFAULT_PROFILING_DURATION),
+                    command_id,
+                ),
                 daemon=True
             )
             self.current_thread.start()
