@@ -281,10 +281,10 @@ class DynamicGProfilerManager:
                         try:
                             self.heartbeat_client.send_command_completion(
                                 command_id=command_id,
-                                status=status,
-                                execution_time=execution_time,
-                                error_message=error_message,
-                                results_path=results_path
+                                status="completed",
+                                execution_time=0,
+                                error_message=None,
+                                results_path=None
                             )
                         except Exception as e:
                             logger.error(f"Failed to report command completion for {command_id}: {e}")
