@@ -20,6 +20,7 @@ import logging
 import logging.config
 import logging.handlers
 import os
+import re
 import shutil
 import socket
 import sys
@@ -33,7 +34,6 @@ from typing import Iterable, List, Optional, Type, cast, Dict, Any
 
 import configargparse
 import humanfriendly
-import requests
 import requests
 from granulate_utils.linux.ns import is_root, is_running_in_init_pid
 from granulate_utils.linux.process import is_process_running
@@ -55,6 +55,8 @@ from gprofiler.exceptions import APIError, NoProfilersEnabledError
 from gprofiler.gprofiler_types import ProcessToProfileData, UserArgs, integers_list, positive_integer
 from gprofiler.hw_metrics import HWMetricsMonitor, HWMetricsMonitorBase, NoopHWMetricsMonitor
 from gprofiler.log import RemoteLogsHandler, initial_root_logger_setup
+from gprofiler.memory_manager import MemoryManager
+import psutil
 from gprofiler.merge import concatenate_from_external_file, concatenate_profiles, merge_profiles
 from gprofiler.metadata import ProfileMetadata
 from gprofiler.metadata.application_identifiers import ApplicationIdentifiers
@@ -157,12 +159,17 @@ class GProfiler:
         self._perfspect_duration = perfspect_duration
         if self._collect_metadata:
             self._static_metadata = get_static_metadata(self._spawn_time, user_args, self._external_metadata_path)
-        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
+        
+        # Minimize thread pool size for memory efficiency - snapshots taking >120s suggest I/O bottlenecks
+        # When profiling is slow, fewer threads = less memory overhead + less contention
+        # grpcio 1.71.2 + minimal threads helps control memory usage
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
         # TODO: we actually need 2 types of temporary directories.
         # 1. accessible by everyone - for profilers that run code in target processes, like async-profiler
         # 2. accessible only by us.
         # the latter can be root only. the former can not. we should do this separation so we don't expose
         # files unnecessarily.
+        # Create container client normally - we'll use periodic refresh to manage grpcio memory
         container_names_client = ContainerNamesClient() if self._enrichment_options.container_names else None
         self._profiler_state = ProfilerState(
             stop_event=Event(),
@@ -191,6 +198,11 @@ class GProfiler:
             )
         else:
             self._hw_metrics_monitor = NoopHWMetricsMonitor()
+
+        # Initialize minimal memory manager for subprocess cleanup
+        self._memory_management_enabled = user_args.get("memory_management_enabled")
+        self._memory_cleanup_threshold_mb = user_args.get("memory_cleanup_threshold_mb")
+        self._memory_manager = MemoryManager()
 
         if isinstance(self.system_profiler, NoopProfiler) and not self.process_profilers:
             raise NoProfilersEnabledError()
@@ -304,7 +316,7 @@ class GProfiler:
         for prof in self.all_profilers:
             prof.stop()
 
-    def _snapshot(self) -> None:
+    def _snapshot(self) -> None:           
         local_start_time = datetime.datetime.utcnow()
         monotonic_start_time = time.monotonic()
         process_profilers_futures = []
@@ -319,7 +331,9 @@ class GProfiler:
         for future in concurrent.futures.as_completed(process_profilers_futures):
             # if either of these fail - log it, and continue.
             try:
-                process_profiles.update(future.result())
+                result = future.result()
+                process_profiles.update(result)
+                    
             except Exception:
                 future_name = future.name  # type: ignore # hack, add the profiler's name to the Future object
                 logger.exception(f"{future_name} profiling failed")
@@ -327,7 +341,7 @@ class GProfiler:
         local_end_time = local_start_time + datetime.timedelta(seconds=(time.monotonic() - monotonic_start_time))
 
         try:
-            system_result = system_future.result()
+            system_result = system_future.result()                          
         except Exception:
             logger.critical(
                 "Running perf failed; consider running gProfiler with '--perf-mode disabled' to avoid using perf",
@@ -383,7 +397,6 @@ class GProfiler:
                 hwmetrics=hwmetrics,
                 external_app_metadata=external_app_metadata,
             )
-
         if self._output_dir:
             self._generate_output_files(merged_result, local_start_time, local_end_time)
 
@@ -398,9 +411,9 @@ class GProfiler:
                 metrics,
                 self._gpid,
             )
-
+        
         if time.monotonic() - self._last_diagnostics > DIAGNOSTICS_INTERVAL_S:
-            self._last_diagnostics = time.monotonic()
+            self._last_diagnostics = time.monotonic()        
             log_diagnostics()
 
     def run_single(self) -> None:
@@ -423,11 +436,34 @@ class GProfiler:
                     # --heart-beat flag
                     self._heartbeat_file_path.touch(mode=644, exist_ok=True)
 
+                 # Monitor memory at start of snapshot to detect accumulation patterns
+                try:
+                    process = Process(os.getpid())
+                    start_memory_mb = process.memory_info().rss / (1024 * 1024)
+                    logger.info(f"Snapshot starting with memory usage: {start_memory_mb:.1f}MB")
+                except Exception:
+                    start_memory_mb = 0
+
                 try:
                     self._snapshot()
                 except Exception:
                     logger.exception("Profiling run failed!")
                 self._usage_logger.log_cycle()
+
+                # Calculate snapshot duration and remaining wait time
+                snapshot_duration = time.monotonic() - snapshot_start
+                remaining_wait = max(self._duration - snapshot_duration, 0)
+                
+                # Log timings to understand potential delays in snapshot duration
+                logger.debug(f"Snapshot timing: duration={snapshot_duration:.1f}s, configured={self._duration}s, wait={remaining_wait:.1f}s")
+
+                # COMPREHENSIVE CLEANUP AFTER SNAPSHOT 
+                logger.debug("Starting comprehensive post-snapshot cleanup...")
+
+                # Single comprehensive cleanup call that handles everything
+                self.maybe_cleanup_subprocesses()
+                
+                logger.debug("Comprehensive post-snapshot cleanup completed")
 
                 # wait for one duration
                 self._profiler_state.stop_event.wait(max(self._duration - (time.monotonic() - snapshot_start), 0))
@@ -437,6 +473,15 @@ class GProfiler:
                     break
 
             self._state.set_cycle_id(None)
+
+    def maybe_cleanup_subprocesses(self):
+        """Clean up subprocess objects if memory management is enabled and memory usage exceeds threshold (default 50MB)."""
+        if not self._memory_management_enabled:
+            return
+        process = psutil.Process()
+        memory_mb = process.memory_info().rss / (1024 * 1024)
+        if memory_mb > self._memory_cleanup_threshold_mb:
+            self._memory_manager._cleanup_subprocess_objects()
 
 
 def _submit_profile_logged(
@@ -643,6 +688,22 @@ def parse_cmd_args() -> configargparse.Namespace:
         default=False,
         help="Log CPU & memory usage of gProfiler on each profiling iteration."
         " Currently works only if gProfiler runs as a container",
+    )
+
+    # Memory management options
+    memory_options = parser.add_argument_group("memory management")
+    memory_options.add_argument(
+        "--enable-memory-management",
+        action="store_false",
+        dest="memory_management_enabled",
+        default=True,
+        help="Disable centralized memory management and cleanup (default: enabled)"
+    )
+    memory_options.add_argument(
+        "--memory-cleanup-threshold-mb",
+        type=positive_integer,
+        default=50,
+        help="Memory usage threshold in MB to trigger cleanup (default: %(default)s)"
     )
 
     parser.add_argument(
