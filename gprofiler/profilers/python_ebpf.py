@@ -77,8 +77,9 @@ class PythonEbpfProfiler(ProfilerBase):
         add_versions: bool,
         user_stacks_pages: Optional[int] = None,
         verbose: bool,
+        min_duration: int = 10,
     ):
-        super().__init__(frequency, duration, profiler_state)
+        super().__init__(frequency, duration, profiler_state, min_duration)
         self.process: Optional[Popen] = None
         self.process_selector: Optional[selectors.BaseSelector] = None
         self.output_path = Path(self._profiler_state.storage_dir) / f"pyperf.{random_prefix()}.col"
@@ -91,6 +92,27 @@ class PythonEbpfProfiler(ProfilerBase):
         if os.environ.get("TMPDIR", None) is not None:
             # We want to create a new level of hirerachy in our current staticx tempdir.
             self._pyperf_staticx_tmpdir = Path(os.environ["TMPDIR"]) / ("pyperf_" + random_prefix())
+
+    @staticmethod
+    def _has_deleted_libraries(pid: int) -> bool:
+        """Check if a process has deleted libraries that may cause profiling issues."""
+        try:
+            with open(f"/proc/{pid}/maps", "r") as f:
+                maps_content = f.read()
+                # Look for any deleted libraries that could cause ELF symbol iteration failures
+                return "(deleted)" in maps_content
+        except (OSError, IOError):
+            # Process might have exited or access denied
+            return False
+
+    @staticmethod
+    def _should_skip_process_for_pyperf(pid: int) -> bool:
+        """Determine if a process should be skipped for PyPerf profiling."""
+        # Skip processes with deleted libraries (common in containerized/temp environments)
+        if PythonEbpfProfiler._has_deleted_libraries(pid):
+            logger.debug(f"Skipping process {pid} - has deleted libraries that may cause profiling failures")
+            return True
+        return False
 
     @classmethod
     def _check_output(cls, process: Popen, output_path: Path) -> None:
@@ -256,7 +278,9 @@ class PythonEbpfProfiler(ProfilerBase):
         assert self.process_selector and self.process
         for key, _ in self.process_selector.select(timeout=0):
             output = key.fileobj.read1(self._OUTPUT_READ_SIZE)  # type: ignore
-            output = cast(str, output)
+            # Properly convert bytes to string if needed
+            if isinstance(output, bytes):
+                output = output.decode('utf-8', errors='replace')
             if key.fileobj is self.process.stdout:
                 stdout = output
             elif key.fileobj is self.process.stderr:
@@ -274,6 +298,19 @@ class PythonEbpfProfiler(ProfilerBase):
                 f"{self.output_path}.", self._DUMP_TIMEOUT, self._profiler_state.stop_event
             )
             stdout, stderr = self._read_process_standard_outputs()
+            
+            # Check for deleted library errors in stderr and handle gracefully
+            if stderr:
+                # Ensure stderr is a string
+                stderr_str = stderr.decode('utf-8', errors='replace') if isinstance(stderr, bytes) else stderr
+                if "Failed to iterate over ELF symbols" in stderr_str and "(deleted)" in stderr_str:
+                    # Count how many processes were affected by deleted libraries
+                    deleted_lib_errors = stderr_str.count("Setup new python failed")
+                    
+                    if deleted_lib_errors > 0:
+                        logger.info(f"PyPerf skipped {deleted_lib_errors} processes with deleted libraries - "
+                                  f"this is normal for temporary/containerized environments")
+            
             logger.debug("PyPerf dump output", stdout=stdout, stderr=stderr)
             return output
         except TimeoutError:
@@ -285,6 +322,16 @@ class PythonEbpfProfiler(ProfilerBase):
             assert isinstance(process.args, list) and all(
                 isinstance(s, str) for s in process.args
             ), process.args  # mypy
+            
+            # Check if the error is related to deleted libraries before raising
+            if stderr:
+                # Ensure stderr is a string (it should already be from _terminate, but be safe)
+                stderr_str = stderr.decode('utf-8', errors='replace') if isinstance(stderr, bytes) else stderr
+                if "Failed to iterate over ELF symbols" in stderr_str and "(deleted)" in stderr_str:
+                    deleted_lib_count = stderr_str.count("Setup new python failed")
+                    logger.info(f"PyPerf failed due to {deleted_lib_count} processes with deleted libraries - "
+                              f"this is expected in containerized/temporary environments and doesn't indicate a real error")
+            
             raise PythonEbpfError(exit_status, process.args, stdout, stderr)
 
     def snapshot(self) -> ProcessToProfileData:

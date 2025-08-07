@@ -20,6 +20,7 @@ import os
 import re
 import secrets
 import signal
+import time
 from enum import Enum
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -1007,9 +1008,10 @@ class JavaProfiler(SpawningProcessProfilerBase):
         java_full_hserr: bool,
         java_include_method_modifiers: bool,
         java_line_numbers: str,
+        min_duration: int = 10,
     ):
         assert java_mode == "ap", "Java profiler should not be initialized, wrong java_mode value given"
-        super().__init__(frequency, duration, profiler_state)
+        super().__init__(frequency, duration, profiler_state, min_duration)
         # Alloc interval is passed in frequency in allocation profiling (in bytes, as async-profiler expects)
         self._interval = (
             frequency_to_ap_interval(frequency) if self._profiler_state.profiling_mode == "cpu" else frequency
@@ -1102,6 +1104,8 @@ class JavaProfiler(SpawningProcessProfilerBase):
 
     def _profiling_skipped_profile(self, reason: str, comm: str) -> ProfileData:
         return ProfileData(self._profiling_error_stack("skipped", reason, comm), None, None, None)
+
+
 
     def _is_jvm_type_supported(self, java_version_cmd_output: str) -> bool:
         return all(exclusion not in java_version_cmd_output for exclusion in self.JDK_EXCLUSIONS)
@@ -1233,6 +1237,10 @@ class JavaProfiler(SpawningProcessProfilerBase):
         return False
 
     def _profile_process(self, process: Process, duration: int, spawned: bool) -> ProfileData:
+        # Simple approach: use shorter duration for very young processes
+        estimated_duration = self._estimate_process_duration(process)
+        actual_duration = min(duration, estimated_duration)
+        
         comm = process_comm(process)
         exe = process_exe(process)
         java_version_output: Optional[str] = get_java_version_logged(process, self._profiler_state.stop_event)
@@ -1264,6 +1272,11 @@ class JavaProfiler(SpawningProcessProfilerBase):
             self._profiled_pids.add(process.pid)
 
         logger.info(f"Profiling{' spawned' if spawned else ''} process {process.pid} with async-profiler")
+        
+        if actual_duration != duration:
+            process_age = self._get_process_age(process)
+            logger.debug(f"Adjusted async-profiler duration: {actual_duration}s (original: {duration}s) for young process {process.pid} (age: {process_age:.1f}s)")
+        
         container_name = self._profiler_state.get_container_name(process.pid)
         app_metadata = self._metadata.get_metadata(process)
         appid = application_identifiers.get_java_app_id(process, self._collect_spark_app_name)
@@ -1286,7 +1299,7 @@ class JavaProfiler(SpawningProcessProfilerBase):
             self._include_method_modifiers,
             self._java_line_numbers,
         ) as ap_proc:
-            stackcollapse = self._profile_ap_process(ap_proc, comm, duration)
+            stackcollapse = self._profile_ap_process(ap_proc, comm, actual_duration)
 
         return ProfileData(stackcollapse, appid, app_metadata, container_name)
 
