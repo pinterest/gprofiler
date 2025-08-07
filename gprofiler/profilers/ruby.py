@@ -39,6 +39,11 @@ from gprofiler.utils.process import is_process_running, process_comm, search_pro
 
 logger = get_logger_adapter(__name__)
 
+# Ruby profiler error detection constants
+_NO_SUCH_FILE_ERROR = "No such file or directory"
+_DROPPED_TRACES_MARKER = "dropped"
+_NO_SAMPLES_ERROR = "no profile samples were collected"
+
 
 class RubyMetadata(ApplicationMetadata):
     _RUBY_VERSION_TIMEOUT = 3
@@ -91,7 +96,17 @@ class RbSpyProfiler(SpawningProcessProfilerBase):
         assert ruby_mode == "rbspy", "Ruby profiler should not be initialized, wrong ruby_mode value given"
         self._metadata = RubyMetadata(self._profiler_state.stop_event)
 
-
+    def _is_process_exit_during_profiling_error(self, stderr: str) -> bool:
+        """Check if error indicates process exited during profiling."""
+        return _NO_SUCH_FILE_ERROR in stderr and _DROPPED_TRACES_MARKER in stderr.lower()
+    
+    def _is_no_samples_collected_error(self, stderr: str) -> bool:
+        """Check if error indicates no samples were collected."""
+        return _NO_SAMPLES_ERROR in stderr.lower()
+    
+    def _count_dropped_traces(self, stderr: str) -> int:
+        """Count number of dropped traces from rbspy stderr."""
+        return stderr.count(_NO_SUCH_FILE_ERROR)
 
     def _make_command(self, pid: int, output_path: str, duration: int) -> List[str]:
         return [
@@ -114,19 +129,14 @@ class RbSpyProfiler(SpawningProcessProfilerBase):
         ]
 
     def _profile_process(self, process: Process, duration: int, spawned: bool) -> ProfileData:
-        # Simple approach: use shorter duration for very young processes
-        estimated_duration = self._estimate_process_duration(process)
-        actual_duration = min(duration, estimated_duration)
+        # Use full duration since young processes are now skipped entirely in _should_skip_process
+        actual_duration = duration
         
         logger.info(
             f"Profiling{' spawned' if spawned else ''} process {process.pid} with rbspy",
             cmdline=" ".join(process.cmdline()),
             no_extra_to_server=True,
         )
-        
-        if actual_duration != duration:
-            process_age = self._get_process_age(process)
-            logger.debug(f"Adjusted rbspy duration: {actual_duration}s (original: {duration}s) for young process {process.pid} (age: {process_age:.1f}s)")
         
         comm = process_comm(process)
         container_name = self._profiler_state.get_container_name(process.pid)
@@ -156,14 +166,15 @@ class RbSpyProfiler(SpawningProcessProfilerBase):
                 # Enhanced error handling for rbspy-specific issues
                 stderr_str = e.stderr if isinstance(e.stderr, str) else ""
                 
-                if "No such file or directory" in stderr_str and "dropped" in stderr_str.lower():
-                    logger.debug(f"Process {process.pid} likely exited during profiling, rbspy dropped stack traces")
+                if self._is_process_exit_during_profiling_error(stderr_str):
+                    dropped_count = self._count_dropped_traces(stderr_str)
+                    logger.info(f"Process {process.pid} exited during profiling, rbspy dropped {dropped_count} stack traces - this is normal for dynamic processes")
                     return ProfileData(
                         self._profiling_error_stack("info", "process exited during profiling", comm),
                         appid, app_metadata, container_name
                     )
-                elif "no profile samples were collected" in stderr_str.lower():
-                    logger.debug(f"No samples collected for process {process.pid}, likely too short-lived")
+                elif self._is_no_samples_collected_error(stderr_str):
+                    logger.info(f"No samples collected for process {process.pid}, likely too short-lived")
                     return ProfileData(
                         self._profiling_error_stack("info", "no samples collected, process too short-lived", comm),
                         appid, app_metadata, container_name
@@ -181,4 +192,17 @@ class RbSpyProfiler(SpawningProcessProfilerBase):
         return pgrep_maps(self.DETECTED_RUBY_PROCESSES_REGEX)
 
     def _should_profile_process(self, process: Process) -> bool:
-        return search_proc_maps(process, self.DETECTED_RUBY_PROCESSES_REGEX) is not None
+        return search_proc_maps(process, self.DETECTED_RUBY_PROCESSES_REGEX) is not None and not self._should_skip_process(process)
+    
+    def _should_skip_process(self, process: Process) -> bool:
+        # Skip short-lived processes - if a process is younger than min_duration,
+        # it's likely to exit before profiling completes
+        try:
+            process_age = self._get_process_age(process)
+            if process_age < self._min_duration:
+                logger.debug(f"Skipping young Ruby process {process.pid} (age: {process_age:.1f}s < min_duration: {self._min_duration}s)")
+                return True
+        except Exception as e:
+            logger.debug(f"Could not determine age for Ruby process {process.pid}: {e}")
+        
+        return False

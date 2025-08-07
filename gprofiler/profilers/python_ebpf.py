@@ -67,6 +67,12 @@ class PythonEbpfProfiler(ProfilerBase):
     _POLL_TIMEOUT = 10  # seconds
     _GET_OFFSETS_TIMEOUT = 5  # seconds
     _OUTPUT_READ_SIZE = 65536  # bytes read every cycle from stderr
+    
+    # Error detection constants
+    _DELETED_LIBRARY_ERROR_PATTERN = "Failed to iterate over ELF symbols"
+    _DELETED_FILE_MARKER = "(deleted)"
+    _PYTHON_SETUP_FAILURE = "Setup new python failed"
+    _TEMPORARY_FILE_PATTERNS = ["runfiles_", ".tmp/", "build_", "temp_"]  # Generic temporary file patterns
 
     def __init__(
         self,
@@ -92,27 +98,6 @@ class PythonEbpfProfiler(ProfilerBase):
         if os.environ.get("TMPDIR", None) is not None:
             # We want to create a new level of hirerachy in our current staticx tempdir.
             self._pyperf_staticx_tmpdir = Path(os.environ["TMPDIR"]) / ("pyperf_" + random_prefix())
-
-    @staticmethod
-    def _has_deleted_libraries(pid: int) -> bool:
-        """Check if a process has deleted libraries that may cause profiling issues."""
-        try:
-            with open(f"/proc/{pid}/maps", "r") as f:
-                maps_content = f.read()
-                # Look for any deleted libraries that could cause ELF symbol iteration failures
-                return "(deleted)" in maps_content
-        except (OSError, IOError):
-            # Process might have exited or access denied
-            return False
-
-    @staticmethod
-    def _should_skip_process_for_pyperf(pid: int) -> bool:
-        """Determine if a process should be skipped for PyPerf profiling."""
-        # Skip processes with deleted libraries (common in containerized/temp environments)
-        if PythonEbpfProfiler._has_deleted_libraries(pid):
-            logger.debug(f"Skipping process {pid} - has deleted libraries that may cause profiling failures")
-            return True
-        return False
 
     @classmethod
     def _check_output(cls, process: Popen, output_path: Path) -> None:
@@ -287,6 +272,33 @@ class PythonEbpfProfiler(ProfilerBase):
                 stderr = output
         return stdout, stderr
 
+    def _is_deleted_library_error(self, stderr_str: str) -> bool:
+        """Check if stderr contains deleted library errors."""
+        return (self._DELETED_LIBRARY_ERROR_PATTERN in stderr_str and 
+                self._DELETED_FILE_MARKER in stderr_str)
+
+    def _is_temporary_file_error(self, stderr_str: str) -> bool:
+        """Check if stderr contains temporary file system errors."""
+        return (self._PYTHON_SETUP_FAILURE in stderr_str and 
+                any(pattern in stderr_str for pattern in self._TEMPORARY_FILE_PATTERNS))
+
+    def _process_pyperf_stderr(self, stderr_str: str, stdout: bytes) -> None:
+        """Process PyPerf stderr output and log appropriately."""
+        # Check for deleted library errors and handle gracefully
+        if self._is_deleted_library_error(stderr_str):
+            deleted_lib_errors = stderr_str.count(self._PYTHON_SETUP_FAILURE)
+            if deleted_lib_errors > 0:
+                logger.info(f"PyPerf skipped {deleted_lib_errors} processes with deleted libraries - "
+                          f"this is normal for temporary/containerized environments")
+        
+        # Filter verbose debug output for temporary file systems
+        if self._is_temporary_file_error(stderr_str):
+            error_count = stderr_str.count(self._PYTHON_SETUP_FAILURE)
+            logger.debug(f"PyPerf dump output (filtered {error_count} temporary file errors)", 
+                        stdout=stdout, stderr="<temporary file errors filtered>")
+        else:
+            logger.debug("PyPerf dump output", stdout=stdout, stderr=stderr_str)
+
     def _dump(self) -> Path:
         assert self.is_running()
         assert self.process is not None  # for mypy
@@ -299,19 +311,12 @@ class PythonEbpfProfiler(ProfilerBase):
             )
             stdout, stderr = self._read_process_standard_outputs()
             
-            # Check for deleted library errors in stderr and handle gracefully
+            # Handle stderr processing using helper methods
             if stderr:
-                # Ensure stderr is a string
                 stderr_str = stderr.decode('utf-8', errors='replace') if isinstance(stderr, bytes) else stderr
-                if "Failed to iterate over ELF symbols" in stderr_str and "(deleted)" in stderr_str:
-                    # Count how many processes were affected by deleted libraries
-                    deleted_lib_errors = stderr_str.count("Setup new python failed")
-                    
-                    if deleted_lib_errors > 0:
-                        logger.info(f"PyPerf skipped {deleted_lib_errors} processes with deleted libraries - "
-                                  f"this is normal for temporary/containerized environments")
-            
-            logger.debug("PyPerf dump output", stdout=stdout, stderr=stderr)
+                self._process_pyperf_stderr(stderr_str, stdout)
+            else:
+                logger.debug("PyPerf dump output", stdout=stdout, stderr="")
             return output
         except TimeoutError:
             # error flow :(
@@ -325,10 +330,9 @@ class PythonEbpfProfiler(ProfilerBase):
             
             # Check if the error is related to deleted libraries before raising
             if stderr:
-                # Ensure stderr is a string (it should already be from _terminate, but be safe)
                 stderr_str = stderr.decode('utf-8', errors='replace') if isinstance(stderr, bytes) else stderr
-                if "Failed to iterate over ELF symbols" in stderr_str and "(deleted)" in stderr_str:
-                    deleted_lib_count = stderr_str.count("Setup new python failed")
+                if self._is_deleted_library_error(stderr_str):
+                    deleted_lib_count = stderr_str.count(self._PYTHON_SETUP_FAILURE)
                     logger.info(f"PyPerf failed due to {deleted_lib_count} processes with deleted libraries - "
                               f"this is expected in containerized/temporary environments and doesn't indicate a real error")
             

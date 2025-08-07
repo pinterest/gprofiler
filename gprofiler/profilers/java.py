@@ -1237,9 +1237,8 @@ class JavaProfiler(SpawningProcessProfilerBase):
         return False
 
     def _profile_process(self, process: Process, duration: int, spawned: bool) -> ProfileData:
-        # Simple approach: use shorter duration for very young processes
-        estimated_duration = self._estimate_process_duration(process)
-        actual_duration = min(duration, estimated_duration)
+        # Use full duration since young processes are now skipped entirely in _should_skip_process
+        actual_duration = duration
         
         comm = process_comm(process)
         exe = process_exe(process)
@@ -1401,7 +1400,20 @@ class JavaProfiler(SpawningProcessProfilerBase):
         return pgrep_maps(DETECTED_JAVA_PROCESSES_REGEX)
 
     def _should_profile_process(self, process: Process) -> bool:
-        return search_proc_maps(process, DETECTED_JAVA_PROCESSES_REGEX) is not None
+        return search_proc_maps(process, DETECTED_JAVA_PROCESSES_REGEX) is not None and not self._should_skip_process(process)
+    
+    def _should_skip_process(self, process: Process) -> bool:
+        # Skip short-lived processes - if a process is younger than min_duration,
+        # it's likely to exit before profiling completes
+        try:
+            process_age = self._get_process_age(process)
+            if process_age < self._min_duration:
+                logger.debug(f"Skipping young Java process {process.pid} (age: {process_age:.1f}s < min_duration: {self._min_duration}s)")
+                return True
+        except Exception as e:
+            logger.debug(f"Could not determine age for Java process {process.pid}: {e}")
+        
+        return False
 
     def start(self) -> None:
         super().start()
