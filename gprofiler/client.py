@@ -17,6 +17,7 @@ import datetime
 import gzip
 import json
 from io import BytesIO
+import time
 from typing import IO, TYPE_CHECKING, Any, Dict, List, Optional, Tuple, cast
 
 import requests
