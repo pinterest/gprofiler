@@ -83,6 +83,9 @@ def discover_appropriate_perf_event(
     :return: `perf record` extra arguments to use (e.g. `["-e", "cpu-clock"]`)
     """
 
+    segfault_count = 0
+    total_events = len(SupportedPerfEvent)
+    
     for event in SupportedPerfEvent:
         perf_script_output = None
 
@@ -107,16 +110,36 @@ def discover_appropriate_perf_event(
             if len(parsed_perf_script) > 0:
                 # `perf script` isn't empty, we'll use this event.
                 return event
-        except Exception:  # pylint: disable=broad-except
-            logger.warning(
-                "Failed to collect samples for perf event",
-                exc_info=True,
-                perf_event=event.name,
-                perf_script_output=perf_script_output,
-            )
+        except Exception as e:  # pylint: disable=broad-except
+            # Check if this was a segfault in perf script, log it appropriately
+            exc_name = type(e).__name__
+            
+            # Check if this looks like a segfault-related error 
+            if "CalledProcessError" in exc_name and hasattr(e, 'returncode') and getattr(e, 'returncode', 0) < 0:
+                segfault_count += 1
+                logger.warning(
+                    f"Perf event {event.name} failed with signal {-getattr(e, 'returncode', 0)}, "
+                    f"likely segfault. This is known to happen on some GPU machines.",
+                    perf_event=event.name,
+                )
+            else:
+                logger.warning(
+                    f"Failed to collect samples for perf event ({exc_name})",
+                    exc_info=True,
+                    perf_event=event.name,
+                    perf_script_output=perf_script_output,
+                )
         finally:
             perf_process.stop()
 
+    # If all events failed due to segfaults, provide a specific error message
+    if segfault_count == total_events:
+        logger.critical(
+            f"All perf events failed with segfaults ({segfault_count}/{total_events}). "
+            f"This is a known issue on some GPU machines. "
+            f"Consider running with '--perf-mode disabled' to avoid using perf."
+        )
+    
     raise PerfNoSupportedEvent
 
 
