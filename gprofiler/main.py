@@ -30,10 +30,11 @@ import traceback
 from pathlib import Path
 from threading import Event
 from types import TracebackType
-from typing import Iterable, List, Optional, Type, cast, Dict, Any
+from typing import Any, Dict, Iterable, List, Optional, Type, cast
 
 import configargparse
 import humanfriendly
+import psutil
 import requests
 from granulate_utils.linux.ns import is_root, is_running_in_init_pid
 from granulate_utils.linux.process import is_process_running
@@ -53,10 +54,10 @@ from gprofiler.containers_client import ContainerNamesClient
 from gprofiler.diagnostics import log_diagnostics, set_diagnostics
 from gprofiler.exceptions import APIError, NoProfilersEnabledError
 from gprofiler.gprofiler_types import ProcessToProfileData, UserArgs, integers_list, positive_integer
+from gprofiler.heartbeat import DynamicGProfilerManager, HeartbeatClient
 from gprofiler.hw_metrics import HWMetricsMonitor, HWMetricsMonitorBase, NoopHWMetricsMonitor
 from gprofiler.log import RemoteLogsHandler, initial_root_logger_setup
 from gprofiler.memory_manager import MemoryManager
-import psutil
 from gprofiler.merge import concatenate_from_external_file, concatenate_profiles, merge_profiles
 from gprofiler.metadata import ProfileMetadata
 from gprofiler.metadata.application_identifiers import ApplicationIdentifiers
@@ -84,7 +85,6 @@ from gprofiler.utils import (
 )
 from gprofiler.utils.fs import escape_filename, mkdir_owned_root_wrapper
 from gprofiler.utils.proxy import get_https_proxy
-from gprofiler.heartbeat import HeartbeatClient, DynamicGProfilerManager
 
 if is_linux():
     from gprofiler.utils.linux import disable_core_files
@@ -159,10 +159,9 @@ class GProfiler:
         self._perfspect_duration = perfspect_duration
         if self._collect_metadata:
             self._static_metadata = get_static_metadata(self._spawn_time, user_args, self._external_metadata_path)
-        
+
         # Minimize thread pool size for memory efficiency - snapshots taking >120s suggest I/O bottlenecks
         # When profiling is slow, fewer threads = less memory overhead + less contention
-        # grpcio 1.71.2 + minimal threads helps control memory usage
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
         # TODO: we actually need 2 types of temporary directories.
         # 1. accessible by everyone - for profilers that run code in target processes, like async-profiler
@@ -333,7 +332,6 @@ class GProfiler:
             try:
                 result = future.result()
                 process_profiles.update(result)
-                    
             except Exception:
                 future_name = future.name  # type: ignore # hack, add the profiler's name to the Future object
                 logger.exception(f"{future_name} profiling failed")
@@ -411,7 +409,6 @@ class GProfiler:
                 metrics,
                 self._gpid,
             )
-        
         if time.monotonic() - self._last_diagnostics > DIAGNOSTICS_INTERVAL_S:
             self._last_diagnostics = time.monotonic()        
             log_diagnostics()
@@ -436,7 +433,7 @@ class GProfiler:
                     # --heart-beat flag
                     self._heartbeat_file_path.touch(mode=644, exist_ok=True)
 
-                 # Monitor memory at start of snapshot to detect accumulation patterns
+                # Monitor memory at start of snapshot to detect accumulation patterns
                 try:
                     process = Process(os.getpid())
                     start_memory_mb = process.memory_info().rss / (1024 * 1024)
@@ -453,16 +450,17 @@ class GProfiler:
                 # Calculate snapshot duration and remaining wait time
                 snapshot_duration = time.monotonic() - snapshot_start
                 remaining_wait = max(self._duration - snapshot_duration, 0)
-                
-                # Log timings to understand potential delays in snapshot duration
-                logger.debug(f"Snapshot timing: duration={snapshot_duration:.1f}s, configured={self._duration}s, wait={remaining_wait:.1f}s")
 
-                # COMPREHENSIVE CLEANUP AFTER SNAPSHOT 
+                # Log timings to understand potential delays in snapshot duration
+                logger.debug(
+                    f"Snapshot timing: duration={snapshot_duration:.1f}s, configured={self._duration}s, wait={remaining_wait:.1f}s"
+                )
+
+                # COMPREHENSIVE CLEANUP AFTER SNAPSHOT
                 logger.debug("Starting comprehensive post-snapshot cleanup...")
 
                 # Single comprehensive cleanup call that handles everything
                 self.maybe_cleanup_subprocesses()
-                
                 logger.debug("Comprehensive post-snapshot cleanup completed")
 
                 # wait for one duration
@@ -704,13 +702,13 @@ def parse_cmd_args() -> configargparse.Namespace:
         action="store_false",
         dest="memory_management_enabled",
         default=True,
-        help="Disable centralized memory management and cleanup (default: enabled)"
+        help="Disable centralized memory management and cleanup (default: enabled)",
     )
     memory_options.add_argument(
         "--memory-cleanup-threshold-mb",
         type=positive_integer,
         default=50,
-        help="Memory usage threshold in MB to trigger cleanup (default: %(default)s)"
+        help="Memory usage threshold in MB to trigger cleanup (default: %(default)s)",
     )
 
     parser.add_argument(
@@ -1327,25 +1325,25 @@ def main() -> None:
             perfspect_duration=getattr(args, "tool_perfspect_duration", None),
         )
         logger.info("gProfiler initialized and ready to start profiling")
-        
+
         # Check if heartbeat server mode is enabled
         if args.enable_heartbeat_server:
             if not args.upload_results:
                 logger.error("Heartbeat server mode requires --upload-results to be enabled")
                 sys.exit(1)
-            
+
             # Create heartbeat client
             heartbeat_client = HeartbeatClient(
                 api_server=args.api_server,
                 service_name=args.service_name,
                 server_token=args.server_token,
-                verify=args.verify
+                verify=args.verify,
             )
-            
+
             # Create dynamic profiler manager
             manager = DynamicGProfilerManager(args, heartbeat_client)
             manager.heartbeat_interval = args.heartbeat_interval
-            
+
             try:
                 logger.info("Starting heartbeat mode - waiting for server commands...")
                 manager.start_heartbeat_loop()

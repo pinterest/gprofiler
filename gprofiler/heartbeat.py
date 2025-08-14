@@ -261,6 +261,7 @@ class DynamicGProfilerManager:
                         # Stop current profiler without starting a new one
                         logger.info("Stopping profiler due to stop command")
                         self._stop_current_profiler()
+                        # TODO: important comment to make sure profiler has stopped successful to avoid leak 
                         # Report completion for stop command
                         self.heartbeat_client.send_command_completion(
                             command_id=command_id,
@@ -272,9 +273,21 @@ class DynamicGProfilerManager:
                     elif command_type == "start":
                         # Stop current profiler if running, then start new one
                         logger.info("Starting new profiler due to start command")
+                        # TODO: important comment to make sure profiler has stopped successful to avoid leak 
                         self._stop_current_profiler()
                         self._start_new_profiler(profiling_command, command_id)
-                        # Note: command completion will be reported by _run_profiler when profiling finishes
+                        # Note: command completion still needs since it will wait for successful profiling 
+                        # Report command completion to the server
+                        try:
+                            self.heartbeat_client.send_command_completion(
+                                command_id=command_id,
+                                status="completed",
+                                execution_time=0,
+                                error_message=None,
+                                results_path=None
+                            )
+                        except Exception as e:
+                            logger.error(f"Failed to report command completion for {command_id}: {e}")
                     else:
                         logger.warning(f"Unknown command type: {command_type}")
                         # Report completion for unknown command type
@@ -301,11 +314,13 @@ class DynamicGProfilerManager:
             try:
                 self.current_gprofiler.stop()
             except Exception as e:
+                # TODO: This is a huge leak, report it  
                 logger.error(f"Error stopping gProfiler: {e}")
             finally:
                 self.current_gprofiler = None
         
         if self.current_thread and self.current_thread.is_alive():
+            # No need to actively kill the thread, the self.current_gprofiler.stop() already handles it using events
             logger.info("Waiting for profiler thread to finish...")
             self.current_thread.join(timeout=10)
             self.current_thread = None
@@ -313,6 +328,9 @@ class DynamicGProfilerManager:
     def _start_new_profiler(self, profiling_command: Dict[str, Any], command_id: str):
         """Start a new profiler with the given configuration"""
         try:
+            # Import here to avoid circular imports
+            from gprofiler.main import DEFAULT_PROFILING_DURATION
+            
             # Create modified args for the new profiler
             new_args = self._create_profiler_args(profiling_command)
             
@@ -322,7 +340,12 @@ class DynamicGProfilerManager:
             # Start profiler in a separate thread
             self.current_thread = threading.Thread(
                 target=self._run_profiler,
-                args=(self.current_gprofiler, profiling_command.get("duration", 60), command_id),
+                args=(
+                    self.current_gprofiler,
+                    new_args.continuous,
+                    getattr(new_args, "duration", DEFAULT_PROFILING_DURATION),
+                    command_id,
+                ),
                 daemon=True
             )
             self.current_thread.start()
@@ -361,8 +384,8 @@ class DynamicGProfilerManager:
         if "pids" in combined_config and combined_config["pids"]:
             new_args.pids_to_profile = combined_config["pids"]
         
-        # Set continuous mode to False for on-demand profiling
-        new_args.continuous = False
+        # Set continuous mode to False by default
+        new_args.continuous = combined_config.get("continuous", False)
         
         return new_args
     
@@ -439,47 +462,46 @@ class DynamicGProfilerManager:
             perfspect_duration=getattr(args, "tool_perfspect_duration", 60),
         )
     
-    def _run_profiler(self, gprofiler: 'GProfiler', duration: int, command_id: str):
-        """Run the profiler for the specified duration"""
+    def _run_profiler(self, gprofiler: 'GProfiler', continuous: bool, duration: int, command_id: str):
+        """Run the profiler with specified args"""
         if gprofiler is None:
             return
             
         start_time = datetime.datetime.now()
-        status = "failed"
         error_message = None
         results_path = None
         
         try:
-            logger.info(f"Running profiler for {duration} seconds (command ID: {command_id})...")
-            gprofiler.run_single()
-            status = "completed"
-            logger.info(f"Profiler run completed successfully for command ID: {command_id}")
+            if continuous:
+                logger.info(f"Running continuous profiler for command ID: {command_id}")
+                gprofiler.run_continuous()
+            else:
+                logger.info(f"Running profiler for {duration} seconds (command ID: {command_id})...")
+                gprofiler.run_single()
+
+            # After run completes, check if it was stopped or completed
+            if gprofiler._profiler_state.stop_event.is_set():
+                logger.info(f"Profiler run was stopped before completion for command ID: {command_id}")
+            else:
+                logger.info(f"Profiler run completed successfully for command ID: {command_id}")
             
             # Try to get results path if available
             if hasattr(gprofiler, 'output_dir') and gprofiler.output_dir:
                 results_path = str(gprofiler.output_dir)
                 
         except Exception as e:
-            status = "failed"
-            error_message = str(e)
-            logger.error(f"Profiler run failed for command ID {command_id}: {e}", exc_info=True)
+            # Internal exceptions can occur during profiling stop
+            # Only consider a failure if it was not due to a stop event
+            if not gprofiler._profiler_state.stop_event.is_set():
+                error_message = str(e)
+                logger.error(f"Profiler run failed for command ID {command_id}: {e}", exc_info=True)
+            else:
+                logger.info(f"Profiler run was stopped before completion for command ID: {command_id}")
             
         finally:
             # Calculate execution time
             end_time = datetime.datetime.now()
             execution_time = int((end_time - start_time).total_seconds())
-            
-            # Report command completion to the server
-            try:
-                self.heartbeat_client.send_command_completion(
-                    command_id=command_id,
-                    status=status,
-                    execution_time=execution_time,
-                    error_message=error_message,
-                    results_path=results_path
-                )
-            except Exception as e:
-                logger.error(f"Failed to report command completion for {command_id}: {e}")
             
             # Clear the current profiler reference
             if self.current_gprofiler == gprofiler:

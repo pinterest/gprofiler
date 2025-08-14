@@ -526,29 +526,27 @@ def is_profiler_disabled(profile_mode: str) -> bool:
 
 def cleanup_completed_processes() -> dict:
     """Clean up completed processes from the global _processes list.
-    
+
     This function removes subprocess.Popen objects that have already terminated
     from the global _processes list and properly cleans up their resources.
-    
+
     Returns:
         dict: Statistics about the cleanup operation
     """
     global _processes
-    
     if not _processes:
         return {
             "total_processes": 0,
             "completed_processes": 0,
             "running_processes": 0,
             "processes_cleaned": 0,
-            "resources_freed": 0
+            "resources_freed": 0,
         }
-    
+
     # Count processes by state before cleanup
     running_count = 0
     completed_count = 0
     resources_freed = 0
-    
     # Separate running and completed processes
     running_processes = []
     for process in _processes:
@@ -568,7 +566,6 @@ def cleanup_completed_processes() -> dict:
                 if process.stdin and not process.stdin.closed:
                     process.stdin.close()
                     resources_freed += 1
-                
                 # Call communicate() to ensure process is fully reaped
                 # This is safe because we already know the process is done (poll() returned non-None)
                 try:
@@ -580,39 +577,31 @@ def cleanup_completed_processes() -> dict:
             except Exception as e:
                 logger.debug(f"Error cleaning up process {process.pid}: {e}")
                 # Continue cleanup even if one process fails
-    
     # Replace the global list with only running processes
     original_count = len(_processes)
     _processes = running_processes
     cleaned_count = original_count - len(_processes)
-    
     return {
         "total_processes": original_count,
         "completed_processes": completed_count,
         "running_processes": running_count,
         "processes_cleaned": cleaned_count,
-        "resources_freed": resources_freed
+        "resources_freed": resources_freed,
     }
 
 
 def get_process_stats() -> dict:
     """Get detailed statistics about tracked processes.
-    
     Returns:
         dict: Detailed information about all tracked processes
     """
     if not _processes:
-        return {
-            "total_processes": 0,
-            "running_processes": 0,
-            "completed_processes": 0,
-            "process_details": []
-        }
-    
+        return {"total_processes": 0, "running_processes": 0, "completed_processes": 0, "process_details": []}
+
     running_count = 0
     completed_count = 0
     process_details = []
-    
+
     for i, process in enumerate(_processes):
         is_running = process.poll() is None
         if is_running:
@@ -621,27 +610,22 @@ def get_process_stats() -> dict:
         else:
             completed_count += 1
             status = f"exit-{process.returncode}"
-        
         # Extract command for analysis
         cmd = process.args
         if isinstance(cmd, list):
             cmd_str = " ".join(cmd)
         else:
             cmd_str = str(cmd)
-        
-        process_details.append({
-            "index": i,
-            "pid": process.pid,
-            "command": cmd_str,
-            "status": status,
-            "is_running": is_running
-        })
-    
+
+        process_details.append(
+            {"index": i, "pid": process.pid, "command": cmd_str, "status": status, "is_running": is_running}
+        )
+
     return {
         "total_processes": len(_processes),
         "running_processes": running_count,
         "completed_processes": completed_count,
-        "process_details": process_details
+        "process_details": process_details,
     }
 
 
