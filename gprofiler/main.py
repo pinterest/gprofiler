@@ -168,7 +168,6 @@ class GProfiler:
         # 2. accessible only by us.
         # the latter can be root only. the former can not. we should do this separation so we don't expose
         # files unnecessarily.
-        # Create container client normally - we'll use periodic refresh to manage grpcio memory
         container_names_client = ContainerNamesClient() if self._enrichment_options.container_names else None
         self._profiler_state = ProfilerState(
             stop_event=Event(),
@@ -315,7 +314,7 @@ class GProfiler:
         for prof in self.all_profilers:
             prof.stop()
 
-    def _snapshot(self) -> None:           
+    def _snapshot(self) -> None:   
         local_start_time = datetime.datetime.utcnow()
         monotonic_start_time = time.monotonic()
         process_profilers_futures = []
@@ -339,7 +338,7 @@ class GProfiler:
         local_end_time = local_start_time + datetime.timedelta(seconds=(time.monotonic() - monotonic_start_time))
 
         try:
-            system_result = system_future.result()                          
+            system_result = system_future.result()            
         except Exception:
             logger.critical(
                 "Running perf failed; consider running gProfiler with '--perf-mode disabled' to avoid using perf",
@@ -410,7 +409,7 @@ class GProfiler:
                 self._gpid,
             )
         if time.monotonic() - self._last_diagnostics > DIAGNOSTICS_INTERVAL_S:
-            self._last_diagnostics = time.monotonic()        
+            self._last_diagnostics = time.monotonic()
             log_diagnostics()
 
     def run_single(self) -> None:

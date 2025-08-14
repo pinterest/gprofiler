@@ -1105,8 +1105,6 @@ class JavaProfiler(SpawningProcessProfilerBase):
     def _profiling_skipped_profile(self, reason: str, comm: str) -> ProfileData:
         return ProfileData(self._profiling_error_stack("skipped", reason, comm), None, None, None)
 
-
-
     def _is_jvm_type_supported(self, java_version_cmd_output: str) -> bool:
         return all(exclusion not in java_version_cmd_output for exclusion in self.JDK_EXCLUSIONS)
 

@@ -389,6 +389,7 @@ class PythonProfiler(ProfilerInterface):
         python_pyperf_user_stacks_pages: Optional[int],
         python_pyperf_verbose: bool,
         python_pyspy_process: List[int],
+        min_duration: int = 10,
     ):
         if python_mode == "py-spy":
             python_mode = "pyspy"
@@ -408,6 +409,7 @@ class PythonProfiler(ProfilerInterface):
                 python_add_versions,
                 python_pyperf_user_stacks_pages,
                 python_pyperf_verbose,
+                min_duration,
             )
         else:
             self._ebpf_profiler = None
@@ -419,6 +421,7 @@ class PythonProfiler(ProfilerInterface):
                 profiler_state,
                 add_versions=python_add_versions,
                 python_pyspy_process=python_pyspy_process,
+                min_duration=min_duration,
             )
         else:
             self._pyspy_profiler = None
@@ -433,6 +436,7 @@ class PythonProfiler(ProfilerInterface):
             add_versions: bool,
             user_stacks_pages: Optional[int],
             verbose: bool,
+            min_duration: int,
         ) -> Optional[PythonEbpfProfiler]:
             try:
                 profiler = PythonEbpfProfiler(
@@ -442,6 +446,7 @@ class PythonProfiler(ProfilerInterface):
                     add_versions=add_versions,
                     user_stacks_pages=user_stacks_pages,
                     verbose=verbose,
+                    min_duration=min_duration,
                 )
                 profiler.test()
                 return profiler
