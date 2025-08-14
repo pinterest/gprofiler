@@ -8,6 +8,7 @@ from typing import List, Optional
 
 from psutil import Process
 
+from gprofiler.exceptions import CalledProcessError
 from gprofiler.log import get_logger_adapter
 from gprofiler.utils import (
     reap_process,
@@ -189,11 +190,35 @@ class PerfProcess:
                 perf_data.unlink()
                 perf_data = inject_data
 
-            perf_script_proc = run_process(
-                [perf_path(), "script", "-F", "+pid", "-i", str(perf_data)],
-                suppress_log=True,
-            )
-            return perf_script_proc.stdout.decode("utf8")
+            try:
+                perf_script_proc = run_process(
+                    [perf_path(), "script", "-F", "+pid", "-i", str(perf_data)],
+                    suppress_log=True,
+                )
+                return perf_script_proc.stdout.decode("utf8")
+            except CalledProcessError as e:
+                # Handle segfaults in perf script, particularly common on GPU machines
+                if e.returncode and e.returncode < 0:
+                    # Negative return code indicates death by signal
+                    try:
+                        signal_num = -e.returncode
+                        signal_name = signal.Signals(signal_num).name
+                        logger.warning(
+                            f"{self._log_name} script died with signal {signal_name} ({signal_num}), "
+                            f"returning empty output. This is known to happen on some GPU machines.",
+                            perf_data_size=perf_data.stat().st_size if perf_data.exists() else 0,
+                        )
+                    except ValueError:
+                        logger.warning(
+                            f"{self._log_name} script died with unknown signal {signal_num}, "
+                            f"returning empty output. This is known to happen on some GPU machines.",
+                            perf_data_size=perf_data.stat().st_size if perf_data.exists() else 0,
+                        )
+                    # Return empty output instead of crashing
+                    return ""
+                else:
+                    # Re-raise other errors that aren't signal-related
+                    raise
         finally:
             perf_data.unlink()
             if self._inject_jit:
