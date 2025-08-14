@@ -16,11 +16,13 @@
 import os
 import re
 import signal
+import time
 from collections import Counter, defaultdict
 from pathlib import Path
 from subprocess import CompletedProcess
 from typing import Any, Dict, List, Match, Optional, cast
 
+import psutil
 from granulate_utils.linux.elf import get_elf_id
 from granulate_utils.linux.ns import get_process_nspid, run_in_ns_wrapper
 from granulate_utils.linux.process import (
@@ -188,8 +190,9 @@ class PySpyProfiler(SpawningProcessProfilerBase):
         *,
         add_versions: bool,
         python_pyspy_process: List[int],
+        min_duration: int = 10,
     ):
-        super().__init__(frequency, duration, profiler_state)
+        super().__init__(frequency, duration, profiler_state, min_duration)
         self.add_versions = add_versions
         self._metadata = PythonMetadata(self._profiler_state.stop_event)
         self._python_pyspy_process = python_pyspy_process
@@ -216,12 +219,23 @@ class PySpyProfiler(SpawningProcessProfilerBase):
             command += ["--gil"]
         return command
 
+
+
     def _profile_process(self, process: Process, duration: int, spawned: bool) -> ProfileData:
+        # Simple approach: use shorter duration for very young processes
+        estimated_duration = self._estimate_process_duration(process)
+        actual_duration = min(duration, estimated_duration)
+        
         logger.info(
             f"Profiling{' spawned' if spawned else ''} process {process.pid} with py-spy",
             cmdline=process.cmdline(),
             no_extra_to_server=True,
         )
+        
+        if actual_duration != duration:
+            process_age = self._get_process_age(process)
+            logger.debug(f"Adjusted py-spy duration: {actual_duration}s (original: {duration}s) for young process {process.pid} (age: {process_age:.1f}s)")
+        
         container_name = self._profiler_state.get_container_name(process.pid)
         appid = application_identifiers.get_python_app_id(process)
         app_metadata = self._metadata.get_metadata(process)
@@ -231,9 +245,9 @@ class PySpyProfiler(SpawningProcessProfilerBase):
         with removed_path(local_output_path):
             try:
                 run_process(
-                    self._make_command(process.pid, local_output_path, duration),
+                    self._make_command(process.pid, local_output_path, actual_duration),
                     stop_event=self._profiler_state.stop_event,
-                    timeout=duration + self._EXTRA_TIMEOUT,
+                    timeout=actual_duration + self._EXTRA_TIMEOUT,
                     kill_signal=signal.SIGTERM if is_windows() else signal.SIGKILL,
                 )
             except ProcessStoppedException:
@@ -375,6 +389,7 @@ class PythonProfiler(ProfilerInterface):
         python_pyperf_user_stacks_pages: Optional[int],
         python_pyperf_verbose: bool,
         python_pyspy_process: List[int],
+        min_duration: int = 10,
     ):
         if python_mode == "py-spy":
             python_mode = "pyspy"
@@ -394,6 +409,7 @@ class PythonProfiler(ProfilerInterface):
                 python_add_versions,
                 python_pyperf_user_stacks_pages,
                 python_pyperf_verbose,
+                min_duration,
             )
         else:
             self._ebpf_profiler = None
@@ -405,6 +421,7 @@ class PythonProfiler(ProfilerInterface):
                 profiler_state,
                 add_versions=python_add_versions,
                 python_pyspy_process=python_pyspy_process,
+                min_duration=min_duration,
             )
         else:
             self._pyspy_profiler = None
@@ -419,6 +436,7 @@ class PythonProfiler(ProfilerInterface):
             add_versions: bool,
             user_stacks_pages: Optional[int],
             verbose: bool,
+            min_duration: int,
         ) -> Optional[PythonEbpfProfiler]:
             try:
                 profiler = PythonEbpfProfiler(
@@ -428,6 +446,7 @@ class PythonProfiler(ProfilerInterface):
                     add_versions=add_versions,
                     user_stacks_pages=user_stacks_pages,
                     verbose=verbose,
+                    min_duration=min_duration,
                 )
                 profiler.test()
                 return profiler

@@ -534,7 +534,6 @@ def cleanup_completed_processes() -> dict:
         dict: Statistics about the cleanup operation
     """
     global _processes
-
     if not _processes:
         return {
             "total_processes": 0,
@@ -548,7 +547,6 @@ def cleanup_completed_processes() -> dict:
     running_count = 0
     completed_count = 0
     resources_freed = 0
-
     # Separate running and completed processes
     running_processes = []
     for process in _processes:
@@ -568,7 +566,6 @@ def cleanup_completed_processes() -> dict:
                 if process.stdin and not process.stdin.closed:
                     process.stdin.close()
                     resources_freed += 1
-
                 # Call communicate() to ensure process is fully reaped
                 # This is safe because we already know the process is done (poll() returned non-None)
                 try:
@@ -580,12 +577,10 @@ def cleanup_completed_processes() -> dict:
             except Exception as e:
                 logger.debug(f"Error cleaning up process {process.pid}: {e}")
                 # Continue cleanup even if one process fails
-
     # Replace the global list with only running processes
     original_count = len(_processes)
     _processes = running_processes
     cleaned_count = original_count - len(_processes)
-
     return {
         "total_processes": original_count,
         "completed_processes": completed_count,
@@ -597,7 +592,6 @@ def cleanup_completed_processes() -> dict:
 
 def get_process_stats() -> dict:
     """Get detailed statistics about tracked processes.
-
     Returns:
         dict: Detailed information about all tracked processes
     """
@@ -616,7 +610,6 @@ def get_process_stats() -> dict:
         else:
             completed_count += 1
             status = f"exit-{process.returncode}"
-
         # Extract command for analysis
         cmd = process.args
         if isinstance(cmd, list):

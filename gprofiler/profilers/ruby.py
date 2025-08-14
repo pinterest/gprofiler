@@ -17,14 +17,15 @@
 import functools
 import os
 import signal
+import time
 from pathlib import Path
 from typing import Any, Dict, List
 
 from granulate_utils.linux.elf import get_elf_id
 from granulate_utils.linux.process import get_mapped_dso_elf_id, is_process_basename_matching
-from psutil import Process
+from psutil import Process, NoSuchProcess, ZombieProcess
 
-from gprofiler.exceptions import ProcessStoppedException, StopEventSetException
+from gprofiler.exceptions import CalledProcessError, ProcessStoppedException, StopEventSetException
 from gprofiler.gprofiler_types import ProfileData
 from gprofiler.log import get_logger_adapter
 from gprofiler.metadata import application_identifiers
@@ -34,7 +35,7 @@ from gprofiler.profilers.profiler_base import SpawningProcessProfilerBase
 from gprofiler.profilers.registry import register_profiler
 from gprofiler.utils import pgrep_maps, random_prefix, removed_path, resource_path, run_process
 from gprofiler.utils.collapsed_format import parse_one_collapsed_file
-from gprofiler.utils.process import process_comm, search_proc_maps
+from gprofiler.utils.process import is_process_running, process_comm, search_proc_maps
 
 logger = get_logger_adapter(__name__)
 
@@ -84,10 +85,13 @@ class RbSpyProfiler(SpawningProcessProfilerBase):
         duration: int,
         profiler_state: ProfilerState,
         ruby_mode: str,
+        min_duration: int = 10,
     ):
-        super().__init__(frequency, duration, profiler_state)
+        super().__init__(frequency, duration, profiler_state, min_duration)
         assert ruby_mode == "rbspy", "Ruby profiler should not be initialized, wrong ruby_mode value given"
         self._metadata = RubyMetadata(self._profiler_state.stop_event)
+
+
 
     def _make_command(self, pid: int, output_path: str, duration: int) -> List[str]:
         return [
@@ -98,7 +102,7 @@ class RbSpyProfiler(SpawningProcessProfilerBase):
             str(self._frequency),
             "-d",
             str(duration),
-            "--nonblocking",  # Don’t pause the ruby process when collecting stack samples.
+            "--nonblocking",  # Don't pause the ruby process when collecting stack samples.
             "--oncpu",  # only record when CPU is active
             "--format=collapsed",
             "--file",
@@ -110,11 +114,20 @@ class RbSpyProfiler(SpawningProcessProfilerBase):
         ]
 
     def _profile_process(self, process: Process, duration: int, spawned: bool) -> ProfileData:
+        # Simple approach: use shorter duration for very young processes
+        estimated_duration = self._estimate_process_duration(process)
+        actual_duration = min(duration, estimated_duration)
+        
         logger.info(
             f"Profiling{' spawned' if spawned else ''} process {process.pid} with rbspy",
             cmdline=" ".join(process.cmdline()),
             no_extra_to_server=True,
         )
+        
+        if actual_duration != duration:
+            process_age = self._get_process_age(process)
+            logger.debug(f"Adjusted rbspy duration: {actual_duration}s (original: {duration}s) for young process {process.pid} (age: {process_age:.1f}s)")
+        
         comm = process_comm(process)
         container_name = self._profiler_state.get_container_name(process.pid)
         app_metadata = self._metadata.get_metadata(process)
@@ -123,14 +136,41 @@ class RbSpyProfiler(SpawningProcessProfilerBase):
         local_output_path = os.path.join(self._profiler_state.storage_dir, f"rbspy.{random_prefix()}.{process.pid}.col")
         with removed_path(local_output_path):
             try:
+                # Check if process is still alive before starting rbspy
+                if not is_process_running(process):
+                    logger.debug(f"Process {process.pid} exited before rbspy could start")
+                    return ProfileData(
+                        self._profiling_error_stack("warning", "process exited before profiling", comm),
+                        appid, app_metadata, container_name
+                    )
+                
                 run_process(
-                    self._make_command(process.pid, local_output_path, duration),
+                    self._make_command(process.pid, local_output_path, actual_duration),
                     stop_event=self._profiler_state.stop_event,
-                    timeout=duration + self._EXTRA_TIMEOUT,
+                    timeout=actual_duration + self._EXTRA_TIMEOUT,
                     kill_signal=signal.SIGKILL,
                 )
             except ProcessStoppedException:
                 raise StopEventSetException
+            except CalledProcessError as e:
+                # Enhanced error handling for rbspy-specific issues
+                stderr_str = e.stderr if isinstance(e.stderr, str) else ""
+                
+                if "No such file or directory" in stderr_str and "dropped" in stderr_str.lower():
+                    logger.debug(f"Process {process.pid} likely exited during profiling, rbspy dropped stack traces")
+                    return ProfileData(
+                        self._profiling_error_stack("info", "process exited during profiling", comm),
+                        appid, app_metadata, container_name
+                    )
+                elif "no profile samples were collected" in stderr_str.lower():
+                    logger.debug(f"No samples collected for process {process.pid}, likely too short-lived")
+                    return ProfileData(
+                        self._profiling_error_stack("info", "no samples collected, process too short-lived", comm),
+                        appid, app_metadata, container_name
+                    )
+                
+                # Re-raise for other errors
+                raise
 
             logger.info(f"Finished profiling process {process.pid} with rbspy")
             return ProfileData(

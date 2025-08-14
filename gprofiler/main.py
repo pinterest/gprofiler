@@ -314,7 +314,7 @@ class GProfiler:
         for prof in self.all_profilers:
             prof.stop()
 
-    def _snapshot(self) -> None:
+    def _snapshot(self) -> None:   
         local_start_time = datetime.datetime.utcnow()
         monotonic_start_time = time.monotonic()
         process_profilers_futures = []
@@ -331,7 +331,6 @@ class GProfiler:
             try:
                 result = future.result()
                 process_profiles.update(result)
-
             except Exception:
                 future_name = future.name  # type: ignore # hack, add the profiler's name to the Future object
                 logger.exception(f"{future_name} profiling failed")
@@ -339,7 +338,7 @@ class GProfiler:
         local_end_time = local_start_time + datetime.timedelta(seconds=(time.monotonic() - monotonic_start_time))
 
         try:
-            system_result = system_future.result()
+            system_result = system_future.result()            
         except Exception:
             logger.critical(
                 "Running perf failed; consider running gProfiler with '--perf-mode disabled' to avoid using perf",
@@ -461,7 +460,6 @@ class GProfiler:
 
                 # Single comprehensive cleanup call that handles everything
                 self.maybe_cleanup_subprocesses()
-
                 logger.debug("Comprehensive post-snapshot cleanup completed")
 
                 # wait for one duration
@@ -585,6 +583,13 @@ def parse_cmd_args() -> configargparse.Namespace:
         dest="duration",
         default=DEFAULT_PROFILING_DURATION,
         help="Profiler duration per session in seconds (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--min-profiling-duration",
+        type=positive_integer,
+        dest="min_duration",
+        default=10,
+        help="Minimum profiling duration for young processes in seconds (default: %(default)s)",
     )
     parser.add_argument(
         "--insert-dso-name",

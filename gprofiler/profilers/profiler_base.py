@@ -88,6 +88,7 @@ class ProfilerBase(ProfilerInterface):
         frequency: int,
         duration: int,
         profiler_state: ProfilerState,
+        min_duration: int = 10,
     ):
         self._frequency = limit_frequency(
             self.MAX_FREQUENCY, frequency, self.__class__.__name__, logger, profiler_state.profiling_mode
@@ -98,6 +99,7 @@ class ProfilerBase(ProfilerInterface):
                 "raise the duration in order to use this profiler"
             )
         self._duration = duration
+        self._min_duration = min_duration
         self._profiler_state = profiler_state
 
         if profiler_state.profiling_mode == "allocation":
@@ -179,6 +181,31 @@ class ProcessProfilerBase(ProfilerBase):
         # do here in that case :/
         return ProfilingErrorStack(what, reason, comm)
 
+    def _get_process_age(self, process: Process) -> float:
+        """Get the age of a process in seconds."""
+        try:
+            return time.time() - process.create_time()
+        except (NoSuchProcess, ZombieProcess):
+            return 0.0
+            
+    def _estimate_process_duration(self, process: Process) -> int:
+        """
+        Simple duration estimation: use shorter duration for very young processes.
+        """
+        try:
+            process_age = self._get_process_age(process)
+            
+            # Very young processes (< 5 seconds) get minimal profiling duration
+            # This catches most short-lived tools without complex heuristics
+            if process_age < 5.0:
+                return self._min_duration  # configurable minimum duration for very young processes
+            
+            # Processes running longer get full duration
+            return self._duration
+            
+        except Exception:
+            return self._duration  # Conservative fallback
+
     def snapshot(self) -> ProcessToProfileData:
         processes_to_profile = self._select_processes_to_profile()
         logger.debug(f"{self.__class__.__name__}: selected {len(processes_to_profile)} processes to profile")
@@ -220,8 +247,9 @@ class SpawningProcessProfilerBase(ProcessProfilerBase):
         frequency: int,
         duration: int,
         profiler_state: ProfilerState,
+        min_duration: int = 10,
     ):
-        super().__init__(frequency, duration, profiler_state)
+        super().__init__(frequency, duration, profiler_state, min_duration)
         self._submit_lock = Lock()
         self._threads: Optional[ThreadPoolExecutor] = None
         self._start_ts: Optional[float] = None
