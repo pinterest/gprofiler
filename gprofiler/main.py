@@ -1019,9 +1019,7 @@ def parse_cmd_args() -> configargparse.Namespace:
             parser.error("--enable-heartbeat-server requires --token to be provided")
         if not args.service_name:
             parser.error("--enable-heartbeat-server requires --service-name to be provided")
-        if args.continuous:
-            parser.error("--enable-heartbeat-server cannot be used with --continuous mode")
-
+ 
     return args
 
 
