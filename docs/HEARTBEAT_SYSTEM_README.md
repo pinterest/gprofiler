@@ -412,7 +412,8 @@ sudo ./build/x86_64/gprofiler \
   --upload-results \
   --token=$GPROFILER_TOKEN \
   --service-name=$GPROFILER_SERVICE \
-  --api-server $GPROFILER_SERVER \
+  --api-server=$GPROFILER_SERVER \
+  --server-host=$GPROFILER_SERVER \
   --heartbeat-interval 30 \
   --output-dir /tmp/profiles \
   --dont-send-logs \
