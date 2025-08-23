@@ -248,9 +248,14 @@ class PythonEbpfProfiler(ProfilerBase):
         self.process_selector.register(self.process.stderr, selectors.EVENT_READ)
 
     def _unregister_process_selectors(self) -> None:
-        assert self.process_selector
-        self.process_selector.close()
-        self.process_selector = None
+        if self.process_selector is not None:
+            try:
+                self.process_selector.close()
+            except (OSError, ValueError) as e:
+                # Selector might already be closed by cleanup process
+                logger.debug(f"Selector close failed (likely already closed): {e}")
+            finally:
+                self.process_selector = None
 
     def _read_process_standard_outputs(self) -> Tuple[Optional[str], Optional[str]]:
         """
