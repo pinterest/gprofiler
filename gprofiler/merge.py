@@ -258,8 +258,7 @@ def merge_profiles(
 
         process_perf = perf_pid_to_profiles.get(pid)
         if process_perf is None:
-            # no samples collected by perf for this process, so those collected by the runtime profiler
-            # are dropped.
+            # no samples collected by perf for this process - preserve runtime profiler samples as-is
             perf_samples_count = 0
         else:
             perf_samples_count = sum(process_perf.stacks.values())
@@ -270,11 +269,12 @@ def merge_profiles(
         if process_perf is not None and perf_samples_count > 0 and ProfilingErrorStack.is_error_stack(profile.stacks):
             # runtime profiler returned an error stack; extend it with perf profiler stacks for the pid
             profile.stacks = ProfilingErrorStack.attach_error_to_stacks(process_perf.stacks, profile.stacks)
-        else:
+        elif perf_samples_count > 0:
             # do the scaling by the ratio of samples: samples we received from perf for this process,
             # divided by samples we received from the runtime profiler of this process.
             ratio = perf_samples_count / profile_samples_count
             profile.stacks = scale_sample_counts(profile.stacks, ratio)
+        # else: perf_samples_count == 0, so preserve runtime profiler stacks unscaled
 
         if process_perf is not None:
             if profile.container_name in [None, ""]:
