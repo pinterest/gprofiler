@@ -323,6 +323,8 @@ class DynamicGProfilerManager:
                     command_id = command_response["command_id"]
                     command_type = profiling_command.get("command_type", "start")
                     
+                    logger.info(f"Received profiling command: {profiling_command}")
+                    
                     # Check for idempotency - skip if command already executed
                     if command_id in self.heartbeat_client.executed_command_ids:
                         logger.info(f"Command ID {command_id} already executed, skipping...")
@@ -336,7 +338,8 @@ class DynamicGProfilerManager:
                     
                     if command_type == "stop":
                         # Stop current profiler without starting a new one
-                        logger.info("Stopping profiler due to stop command")
+                        logger.info(f"RECEIVED STOP COMMAND for command ID: {command_id}")
+                        logger.info(f"STOP command details: {profiling_command}")
                         self._stop_current_profiler()
                         # TODO: important comment to make sure profiler has stopped successful to avoid leak 
                         # Report completion for stop command
@@ -387,9 +390,10 @@ class DynamicGProfilerManager:
     def _stop_current_profiler(self):
         """Stop the currently running profiler"""
         if self.current_gprofiler:
-            logger.info("Stopping current gProfiler instance...")
+            logger.info("STOPPING current gProfiler instance...")
             try:
-                self.current_gprofiler.stop()
+                self.current_gprofiler.stop()  # This sets the stop_event!
+                logger.info("Successfully called gprofiler.stop()")
             except Exception as e:
                 # TODO: This is a huge leak, report it  
                 logger.error(f"Error stopping gProfiler: {e}")
@@ -461,7 +465,7 @@ class DynamicGProfilerManager:
         if "pids" in combined_config and combined_config["pids"]:
             new_args.pids_to_profile = combined_config["pids"]
         
-        # Set continuous mode to False by default
+        # Set continuous mode
         new_args.continuous = combined_config.get("continuous", False)
         
         return new_args
