@@ -88,7 +88,7 @@ class HeartbeatClient:
     
     def send_heartbeat(
         self,
-        available_pids: Optional[List[int]] = None
+        available_pids: Optional[Dict[str, List[int]]] = None
     ) -> Optional[Dict[str, Any]]:
         """Send heartbeat to server and return any profiling commands"""
         try:
@@ -240,9 +240,9 @@ class DynamicGProfilerManager:
         self.stop_event = threading.Event()
         self.heartbeat_interval = 30  # seconds
     
-    def scan_available_pids(self) -> List[int]:
-        """Scan the host for all available PIDs across all supported languages"""
-        all_pids = []
+    def scan_available_pids(self) -> Dict[str, List[int]]:
+        """Scan the host for all available PIDs organized by language/profiler type"""
+        available_pids = {}
         
         try:
             # Import regex patterns from granulate_utils
@@ -274,27 +274,29 @@ class DynamicGProfilerManager:
                     
                     pids = [p.pid for p in processes]
                     
+                    # Only include languages that have running processes
                     if pids:
-                        all_pids.extend(pids)
-                        logger.debug(f"Found {len(pids)} {language} processes: {pids}")
+                        available_pids[language] = sorted(pids)
+                        logger.debug(f"Found {len(pids)} {language} processes")
                     
                 except Exception as e:
                     # Don't let individual profiler errors break the entire scan
                     logger.debug(f"Error scanning {language} processes: {e}")
                     continue
             
-            # Remove duplicates and sort for consistent output
-            all_pids = sorted(list(set(all_pids)))
-            
-            if all_pids:
-                logger.debug(f"Total available PIDs found: {len(all_pids)} processes: {all_pids}")
+            if available_pids:
+                total_pids = sum(len(pids) for pids in available_pids.values())
+                logger.debug(
+                    f"Total available PIDs found: {total_pids} processes across "
+                    f"{len(available_pids)} languages"
+                )
             else:
                 logger.debug("No available PIDs found for any supported languages")
             
         except Exception as e:
             logger.debug(f"Error scanning available PIDs: {e}")
         
-        return all_pids
+        return available_pids
     
     def start_heartbeat_loop(self):
         """Start the main heartbeat loop"""
@@ -302,10 +304,14 @@ class DynamicGProfilerManager:
         
         while not self.stop_event.is_set():
             try:
-                # Scan all available PIDs
+                # Scan all available PIDs by language
                 available_pids = self.scan_available_pids()
                 if available_pids:
-                    logger.debug(f"Sending heartbeat with {len(available_pids)} available PIDs: {available_pids}")
+                    total_pids = sum(len(pids) for pids in available_pids.values())
+                    logger.debug(
+                        f"Sending heartbeat with {total_pids} PIDs across "
+                        f"{len(available_pids)} languages"
+                    )
                 
                 # Send heartbeat and check for commands
                 command_response = self.heartbeat_client.send_heartbeat(
