@@ -248,9 +248,14 @@ class PythonEbpfProfiler(ProfilerBase):
         self.process_selector.register(self.process.stderr, selectors.EVENT_READ)
 
     def _unregister_process_selectors(self) -> None:
-        assert self.process_selector
-        self.process_selector.close()
-        self.process_selector = None
+        if self.process_selector is not None:
+            try:
+                self.process_selector.close()
+            except (OSError, ValueError) as e:
+                # Selector might already be closed by cleanup process
+                logger.debug(f"Selector close failed (likely already closed): {e}")
+            finally:
+                self.process_selector = None
 
     def _read_process_standard_outputs(self) -> Tuple[Optional[str], Optional[str]]:
         """
@@ -379,7 +384,27 @@ class PythonEbpfProfiler(ProfilerBase):
         if self.is_running():
             assert self.process is not None  # for mypy
             self.process.terminate()  # okay to call even if process is already dead
-            exit_status, stdout, stderr = reap_process(self.process)
+            
+            try:
+                exit_status, stdout, stderr = reap_process(self.process)
+            except AttributeError as e:
+                # Check if this is the specific case where cleanup_completed_processes() has already
+                # processed our process and closed its pipes, corrupting the internal state for communicate()
+                pipes_already_closed = (
+                    (self.process.stdout and self.process.stdout.closed) or
+                    (self.process.stderr and self.process.stderr.closed)
+                )
+                if pipes_already_closed:
+                    # This happens when cleanup_completed_processes() has already processed 
+                    # our process and closed its pipes. This is actually okay - the process
+                    # cleanup has already been handled by the global cleanup mechanism.
+                    logger.debug("PyPerf process was already cleaned up by global subprocess cleanup - this is expected")
+                    exit_status = self.process.poll()  # Get final exit status if available
+                    # stdout/stderr remain empty as they were already processed
+                else:
+                    # Re-raise if it's a different AttributeError
+                    raise
+            
             self.process = None
 
         stdout = stdout.decode() if isinstance(stdout, bytes) else stdout

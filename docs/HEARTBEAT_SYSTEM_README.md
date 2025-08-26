@@ -92,9 +92,19 @@ POST /api/metrics/heartbeat
   "hostname": "worker-01",
   "service_name": "my-service",
   "last_command_id": "cmd-uuid",
+  "available_pids" : [java:{}, python:{}],
+  "namespaces" : [{namespace: kube_system, pods : [{pod_name: gprofiler, containers : {{pid:123, name: metrics-exporter},{pid:123, name: metrics-exporter}},{pod_name: webapp, containers : {{pid:123, name: metrics-exporter},{pid:123, name: metrics-exporter}}]}],
   "status": "active",
   "timestamp": "2025-01-08T11:00:00Z"
 }
+"containers" -> "host" Table -> {container_name, array_of_hosts}
+"pod" -> "host" Table -> {pod_name, array_of_hosts}
+"namespace" -> "host" Table -> {namespace, array_of_hosts}
+
+1. add k8s namespace hierarchy info as part of heartbeat 
+2. save k8s information in hostheartbeats table and create de-normalized table for containersToHosts, podsToHost and namespaceToHosts, 
+3. perform profiling : support profiling request by namespaces, pods and containers ( 5 )
+4. test e2e ( 3 )
 ```
 
 **Response:**
@@ -107,7 +117,8 @@ POST /api/metrics/heartbeat
     "combined_config": {
       "duration": 60,
       "frequency": 11,
-      "profiling_mode": "cpu"
+      "profiling_mode": "cpu",
+      "pids": "" 
     }
   },
   "command_id": "cmd-uuid"
@@ -146,6 +157,9 @@ curl -X POST http://localhost:8000/api/metrics/profile_request \
     "frequency": 11,
     "profiling_mode": "cpu",
     "target_hostnames": ["web-01", "web-02"]
+    "containers" : [],
+    "pods" : [],
+    "namespaces" : [],
   }'
 ```
 

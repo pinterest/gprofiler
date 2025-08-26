@@ -593,12 +593,41 @@ DETECTED_PYTHON_PROCESSES_REGEX = r"(^.+/(lib)?python[^/]*$)|(^.+/site-packages/
 
 #### **Enhanced Detection Solution:**
 
+The solution uses conservative heuristics to distinguish legitimate Python processes from applications that merely embed Python for scripting capabilities.
+
+> **Important**: This filtering **only applies to py-spy** (ProcessProfilerBase), not PyPerf (eBPF). PyPerf profiles all Python processes system-wide and filters results afterwards, while py-spy must select specific processes to attach to beforehand.
+
+**Standard Python Processes (Correctly Profiled):**
+```bash
+/usr/bin/python3.9 /opt/app/server.py                    # System Python running script
+/opt/python/bin/python manage.py runserver              # Virtual env Python  
+/usr/local/bin/python3.12 -m flask run                  # Python module execution
+/usr/bin/uwsgi --wsgi-file app.py                       # uWSGI Python server
+/home/user/.pyenv/versions/3.11.4/bin/python script.py  # pyenv Python
+/opt/conda/bin/python -c "import sys; print(sys.path)"  # Conda Python with -c flag
+```
+
+**Embedded Python False Positives (Correctly Skipped):**
+```bash  
+/usr/bin/blender                          # 3D graphics app with Python scripting
+/opt/maya/bin/maya                        # Autodesk Maya with Python API
+/usr/lib/postgresql/bin/postgres          # PostgreSQL with PLPython extension  
+/opt/splunk/bin/splunkd                  # Splunk with Python plugins
+/app/deploybinary.runfiles/.../python3   # Bazel-built binary with embedded Python
+/opt/embedded-python/bin/myapp           # Custom app with bundled Python runtime
+```
+
 **1. Multi-Heuristic Validation:**
 ```python
 def _is_embedded_python_process(self, process: Process) -> bool:
     """
     Detect processes that embed Python but aren't primarily Python processes.
-    Uses multiple heuristics to avoid false positives.
+    Uses multiple heuristics to avoid false positives while maintaining high
+    coverage of legitimate Python applications.
+    
+    Conservative approach: Errs on the side of INCLUDING processes that might
+    be Python interpreters, since PyPerf (eBPF) provides comprehensive coverage
+    regardless of this filtering.
     """
     exe_basename = os.path.basename(process_exe(process)).lower()
     cmdline = " ".join(process.cmdline()).lower()
@@ -1121,6 +1150,8 @@ lrwxrwxrwx 1 root root 0 Jul 21 10:30 /proc/7777/exe -> /usr/bin/node
 
 ### .NET Detection (`gprofiler/profilers/dotnet.py`)
 
+> **Note**: .NET profiling is **disabled by default** (`--dotnet-mode disabled`). Enable with `--dotnet-mode dotnet-trace`.
+
 **Detection Strategy: Dual Pattern Matching**
 
 ```python
@@ -1151,6 +1182,8 @@ DETECTED_DOTNET_PROCESSES_REGEX_WINDOWS = r"clr\.dll|coreclr\.dll"
 ```
 
 ### PHP Detection (`gprofiler/profilers/php.py`)
+
+> **Note**: PHP profiling is **disabled by default** (`--php-mode disabled`). Enable with `--php-mode phpspy`.
 
 **Detection Strategy: Process Name Filter**
 
@@ -1802,7 +1835,7 @@ def _select_processes_to_profile(self):
 ```bash
 # Test detection manually
 grep -lE '^.+/libjvm\.so' /proc/*/maps        # Java
-grep -lE '(^.+/(lib)?python[^/]*$)' /proc/*/maps  # Python
+grep -lE '(^.+/(lib)?python[^/]*$)|(^.+/site-packages/.+?$)|(^.+/dist-packages/.+?$)' /proc/*/maps  # Python
 
 # Check if processes exist
 ps aux | grep java
