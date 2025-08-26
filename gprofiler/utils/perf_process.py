@@ -31,8 +31,8 @@ def perf_path() -> str:
 # TODO: automatically disable this profiler if can_i_use_perf_events() returns False?
 class PerfProcess:
     _DUMP_TIMEOUT_S = 5  # timeout for waiting perf to write outputs after signaling (or right after starting)
-    _RESTART_AFTER_S = 3600
-    _PERF_MEMORY_USAGE_THRESHOLD = 512 * 1024 * 1024
+    _RESTART_AFTER_S = 600  # 10 minutes - more aggressive for higher frequency profiling
+    _PERF_MEMORY_USAGE_THRESHOLD = 200 * 1024 * 1024  # 200MB - lower threshold for high memory consumption
     # default number of pages used by "perf record" when perf_event_mlock_kb=516
     # we use double for dwarf.
     _MMAP_SIZES = {"fp": 129, "dwarf": 257}

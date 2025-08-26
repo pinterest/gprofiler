@@ -190,7 +190,10 @@ class SystemProfiler(ProfilerBase):
         self._node_processes: List[Process] = []
         self._node_processes_attached: List[Process] = []
         self._perf_memory_restart = perf_memory_restart
-        switch_timeout_s = duration * 3  # allow gprofiler to be delayed up to 3 intervals before timing out.
+        # allow gprofiler to be delayed up to 3 intervals before timing out.
+        # For low-frequency profiling, use shorter switch intervals to reduce memory buildup
+        # But maintain reasonable safety margin to avoid premature rotations
+        switch_timeout_s = duration * 1.5 if frequency <= 11 else duration * 3
         extra_args = []
         try:
             # We want to be certain that `perf record` will collect samples.
