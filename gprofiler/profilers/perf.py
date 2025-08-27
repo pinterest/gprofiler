@@ -205,7 +205,16 @@ class SystemProfiler(ProfilerBase):
             logger.debug("Discovered perf event", discovered_perf_event=discovered_perf_event.name)
             extra_args.extend(discovered_perf_event.perf_extra_args())
         except PerfNoSupportedEvent:
-            logger.critical("Failed to determine perf event to use")
+            # If PID targeting failed during discovery, provide helpful message
+            if self._profiler_state.processes_to_profile is not None:
+                logger.critical(
+                    "Failed to determine perf event to use with target PIDs. "
+                    "Target processes may have exited or be invalid. "
+                    "Perf profiler will be disabled. Other profilers will continue. "
+                    "Consider using system-wide profiling (remove --pids) or '--perf-mode disabled'."
+                )
+            else:
+                logger.critical("Failed to determine perf event to use")
             raise
 
         if perf_mode in ("fp", "smart"):

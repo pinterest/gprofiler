@@ -21,11 +21,34 @@ from gprofiler.utils import (
     wait_for_file_by_prefix,
 )
 
+
 logger = get_logger_adapter(__name__)
 
 
 def perf_path() -> str:
     return resource_path("perf")
+
+
+def _is_pid_related_error(error_message: str) -> bool:
+    """
+    Check if an error message indicates a PID-related failure.
+    
+    :param error_message: The error message to check
+    :return: True if the error appears to be PID-related
+    """
+    error_lower = error_message.lower()
+    pid_error_patterns = [
+        "no such process",
+        "invalid pid",
+        "process not found", 
+        "process exited",
+        "operation not permitted",
+        "permission denied",
+        "attach failed",
+        "failed to attach"
+    ]
+    
+    return any(pattern in error_lower for pattern in pid_error_patterns)
 
 
 # TODO: automatically disable this profiler if can_i_use_perf_events() returns False?
@@ -97,7 +120,22 @@ class PerfProcess:
         logger.info(f"Starting {self._log_name}")
         # remove old files, should they exist from previous runs
         remove_path(self._output_path, missing_ok=True)
-        process = start_process(self._get_perf_cmd())
+        
+        try:
+            process = start_process(self._get_perf_cmd())
+        except CalledProcessError as e:
+            # Check if this is a PID-related failure
+            if "--pid" in self._pid_args and _is_pid_related_error(str(e)):
+                logger.error(
+                    f"{self._log_name} failed to start due to invalid target PIDs. "
+                    f"One or more target processes may have exited. "
+                    f"Consider using system-wide profiling (-a) instead of PID targeting. "
+                    f"Error: {e}"
+                )
+            else:
+                logger.error(f"{self._log_name} failed to start: {e}")
+            raise
+        
         try:
             wait_event(self._DUMP_TIMEOUT_S, self._stop_event, lambda: os.path.exists(self._output_path))
             self.start_time = time.monotonic()
