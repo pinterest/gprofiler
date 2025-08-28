@@ -64,6 +64,7 @@ class HeartbeatClient:
         self.command_ids_file = "/tmp/gprofiler_executed_commands.txt"  # Persist across restarts
         self.max_command_history = 1000  # Limit command history to prevent memory growth
         self.session = requests.Session()
+        self.containers_names_client = ContainerNamesClient()
         
         # Load previously executed command IDs
         self._load_executed_command_ids()
@@ -94,7 +95,8 @@ class HeartbeatClient:
                 "service_name": self.service_name,
                 "last_command_id": self.last_command_id,
                 "status": "active",
-                "timestamp": datetime.datetime.now().isoformat()
+                "timestamp": datetime.datetime.now().isoformat(),
+                **self.containers_names_client.get_k8s_info().to_dict()
             }
             
             url = f"{self.api_server}/api/metrics/heartbeat"
