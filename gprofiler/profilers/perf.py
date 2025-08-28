@@ -190,7 +190,10 @@ class SystemProfiler(ProfilerBase):
         self._node_processes: List[Process] = []
         self._node_processes_attached: List[Process] = []
         self._perf_memory_restart = perf_memory_restart
-        switch_timeout_s = duration * 3  # allow gprofiler to be delayed up to 3 intervals before timing out.
+        # allow gprofiler to be delayed up to 3 intervals before timing out.
+        # For low-frequency profiling, use shorter switch intervals to reduce memory buildup
+        # But maintain reasonable safety margin to avoid premature rotations
+        switch_timeout_s = duration * 1.5 if frequency <= 11 else duration * 3
         extra_args = []
         try:
             # We want to be certain that `perf record` will collect samples.
@@ -202,7 +205,16 @@ class SystemProfiler(ProfilerBase):
             logger.debug("Discovered perf event", discovered_perf_event=discovered_perf_event.name)
             extra_args.extend(discovered_perf_event.perf_extra_args())
         except PerfNoSupportedEvent:
-            logger.critical("Failed to determine perf event to use")
+            # If PID targeting failed during discovery, provide helpful message
+            if self._profiler_state.processes_to_profile is not None:
+                logger.critical(
+                    "Failed to determine perf event to use with target PIDs. "
+                    "Target processes may have exited or be invalid. "
+                    "Perf profiler will be disabled. Other profilers will continue. "
+                    "Consider using system-wide profiling (remove --pids) or '--perf-mode disabled'."
+                )
+            else:
+                logger.critical("Failed to determine perf event to use")
             raise
 
         if perf_mode in ("fp", "smart"):

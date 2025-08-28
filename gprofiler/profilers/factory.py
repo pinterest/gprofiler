@@ -1,6 +1,7 @@
 import sys
 from typing import TYPE_CHECKING, Any, List, Tuple, Union, cast
 
+from gprofiler.exceptions import PerfNoSupportedEvent
 from gprofiler.log import get_logger_adapter
 from gprofiler.metadata.system_metadata import get_arch
 from gprofiler.platform import is_windows
@@ -52,6 +53,13 @@ def get_profilers(
                     profiler_kwargs[key] = value
             try:
                 profiler_instance = profiler_config.profiler_class(**profiler_kwargs)
+            except PerfNoSupportedEvent:
+                # Handle perf-specific failures gracefully - continue with other profilers
+                logger.warning(
+                    f"Perf profiler initialization failed, continuing with other profilers. "
+                    f"Run with --no-perf to disable this warning."
+                )
+                continue
             except Exception:
                 logger.critical(
                     f"Couldn't create the {profiler_name} profiler, not continuing."

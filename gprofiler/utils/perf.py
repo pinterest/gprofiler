@@ -27,7 +27,7 @@ from gprofiler.exceptions import CalledProcessError, PerfNoSupportedEvent
 from gprofiler.gprofiler_types import ProcessToStackSampleCounters
 from gprofiler.log import get_logger_adapter
 from gprofiler.utils import run_process
-from gprofiler.utils.perf_process import PerfProcess, perf_path
+from gprofiler.utils.perf_process import PerfProcess, perf_path, _is_pid_related_error
 
 logger = get_logger_adapter(__name__)
 
@@ -84,6 +84,7 @@ def discover_appropriate_perf_event(
     """
 
     segfault_count = 0
+    pid_failure_count = 0
     total_events = len(SupportedPerfEvent)
     
     for event in SupportedPerfEvent:
@@ -113,6 +114,7 @@ def discover_appropriate_perf_event(
         except Exception as e:  # pylint: disable=broad-except
             # Check if this was a segfault in perf script, log it appropriately
             exc_name = type(e).__name__
+            error_message = str(e)
             
             # Check if this looks like a segfault-related error 
             if "CalledProcessError" in exc_name and hasattr(e, 'returncode') and getattr(e, 'returncode', 0) < 0:
@@ -120,6 +122,15 @@ def discover_appropriate_perf_event(
                 logger.warning(
                     f"Perf event {event.name} failed with signal {-getattr(e, 'returncode', 0)}, "
                     f"likely segfault. This is known to happen on some GPU machines.",
+                    perf_event=event.name,
+                )
+            # Check if this is a PID-related failure  
+            elif pids is not None and _is_pid_related_error(error_message):
+                pid_failure_count += 1
+                logger.warning(
+                    f"Perf event {event.name} failed due to target process issues. "
+                    f"One or more target processes may have exited during discovery. "
+                    f"Error: {error_message}",
                     perf_event=event.name,
                 )
             else:
@@ -138,6 +149,13 @@ def discover_appropriate_perf_event(
             f"All perf events failed with segfaults ({segfault_count}/{total_events}). "
             f"This is a known issue on some GPU machines. "
             f"Consider running with '--perf-mode disabled' to avoid using perf."
+        )
+    # If all events failed due to PID issues, provide a specific error message
+    elif pid_failure_count == total_events:
+        logger.critical(
+            f"All perf events failed due to target process issues ({pid_failure_count}/{total_events}). "
+            f"Target processes may have exited during discovery. "
+            f"Consider using system-wide profiling or '--perf-mode disabled' to avoid using perf."
         )
     
     raise PerfNoSupportedEvent

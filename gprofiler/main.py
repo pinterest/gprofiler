@@ -1296,34 +1296,7 @@ def main() -> None:
 
         ApplicationIdentifiers.init(enrichment_options)
         set_diagnostics(args.diagnostics)
-        gprofiler = GProfiler(
-            output_dir=args.output_dir,
-            flamegraph=args.flamegraph,
-            rotating_output=args.rotating_output,
-            rootless=args.rootless,
-            profiler_api_client=profiler_api_client,
-            collect_metrics=args.collect_metrics,
-            collect_metadata=args.collect_metadata,
-            enrichment_options=enrichment_options,
-            state=state,
-            usage_logger=usage_logger,
-            user_args=args.__dict__,
-            duration=args.duration,
-            profile_api_version=args.profile_api_version,
-            profiling_mode=args.profiling_mode,
-            collect_hw_metrics=getattr(args, "collect_hw_metrics", False),
-            profile_spawned_processes=args.profile_spawned_processes,
-            remote_logs_handler=remote_logs_handler,
-            controller_process=controller_process,
-            processes_to_profile=processes_to_profile,
-            external_metadata_path=external_metadata_path,
-            heartbeat_file_path=heartbeat_file_path,
-            perfspect_path=perfspect_path,
-            perfspect_duration=getattr(args, "tool_perfspect_duration", None),
-        )
-        logger.info("gProfiler initialized and ready to start profiling")
-
-        # Check if heartbeat server mode is enabled
+        # Check if heartbeat server mode is enabled FIRST
         if args.enable_heartbeat_server:
             if not args.upload_results:
                 logger.error("Heartbeat server mode requires --upload-results to be enabled")
@@ -1349,7 +1322,34 @@ def main() -> None:
             finally:
                 manager.stop()
         else:
-            # Normal profiling mode
+            # Normal profiling mode - create GProfiler instance only when needed
+            gprofiler = GProfiler(
+                output_dir=args.output_dir,
+                flamegraph=args.flamegraph,
+                rotating_output=args.rotating_output,
+                rootless=args.rootless,
+                profiler_api_client=profiler_api_client,
+                collect_metrics=args.collect_metrics,
+                collect_metadata=args.collect_metadata,
+                enrichment_options=enrichment_options,
+                state=state,
+                usage_logger=usage_logger,
+                user_args=args.__dict__,
+                duration=args.duration,
+                profile_api_version=args.profile_api_version,
+                profiling_mode=args.profiling_mode,
+                collect_hw_metrics=getattr(args, "collect_hw_metrics", False),
+                profile_spawned_processes=args.profile_spawned_processes,
+                remote_logs_handler=remote_logs_handler,
+                controller_process=controller_process,
+                processes_to_profile=processes_to_profile,
+                external_metadata_path=external_metadata_path,
+                heartbeat_file_path=heartbeat_file_path,
+                perfspect_path=perfspect_path,
+                perfspect_duration=getattr(args, "tool_perfspect_duration", None),
+            )
+            logger.info("gProfiler initialized and ready to start profiling")
+            
             if args.continuous:
                 gprofiler.run_continuous()
             else:
