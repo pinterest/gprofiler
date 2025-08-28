@@ -334,8 +334,12 @@ Investigation revealed that **perf memory consumption** (948MB observed) was pri
 _RESTART_AFTER_S = 600  # 10 minutes (down from 1 hour)
 _PERF_MEMORY_USAGE_THRESHOLD = 200 * 1024 * 1024  # 200MB (down from 512MB)
 
-# Dynamic switch timeout based on frequency
+# Dynamic perf file rotation duration based on frequency to reduce memory buildup
 switch_timeout_s = duration * 1.5 if frequency <= 11 else duration * 3
+# Rationale: Low-frequency profiling uses faster rotation (duration * 1.5) to prevent 
+# memory accumulation, while high-frequency profiling maintains longer rotation 
+# (duration * 3) for stability. This optimization reduces memory consumption during
+# extended profiling sessions.
 ```
 
 **PID Targeting Robustness:**
@@ -360,6 +364,7 @@ def _validate_target_processes(self, processes):
 | **Heartbeat Idle** | 500-800MB | 50-100MB | **90% reduction** |
 | **Invalid PID Handling** | Process crash | Graceful fallback | **100% uptime** |  
 | **Perf Memory** | 948MB peak | 200-400MB peak | **60% reduction** |
+| **Perf File Rotation** | duration * 3 (all cases) | duration * 1.5 (low freq) | **Faster rotation, less buildup** |
 
 ### Architecture Improvements
 
