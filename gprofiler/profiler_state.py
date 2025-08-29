@@ -25,6 +25,7 @@ class ProfilerState:
     profiling_mode: str
     container_names_client: Optional[ContainerNamesClient]
     processes_to_profile: Optional[List[Process]]
+    max_processes_per_profiler: int
 
     def __post_init__(self) -> None:
         self._temporary_dir = TemporaryDirectoryWithMode(dir=self.storage_dir, mode=0o755)
