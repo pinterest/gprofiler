@@ -219,6 +219,10 @@ class DynamicGProfilerManager:
                     # Check for idempotency - skip if command already executed
                     if command_id in self.heartbeat_client.executed_command_ids:
                         logger.info(f"Command ID {command_id} already executed, skipping...")
+
+                        # Wait for next heartbeat
+                        self.stop_event.wait(self.heartbeat_interval)
+
                         continue
                     
                     logger.info(f"Received {command_type} command: {command_id}")
