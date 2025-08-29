@@ -16,7 +16,6 @@
 
 import datetime
 import logging
-import os
 import socket
 import threading
 from pathlib import Path
@@ -60,13 +59,9 @@ class HeartbeatClient:
         self.hostname = get_hostname()
         self.ip_address = self._get_local_ip()
         self.last_command_id: Optional[str] = None
-        self.executed_command_ids: set = set()  # Track executed command IDs for idempotency
-        self.command_ids_file = "/tmp/gprofiler_executed_commands.txt"  # Persist across restarts
+        self.executed_command_ids: set = set()  # Track executed command IDs for idempotency (in-memory)
         self.max_command_history = 1000  # Limit command history to prevent memory growth
         self.session = requests.Session()
-        
-        # Load previously executed command IDs
-        self._load_executed_command_ids()
         
         # Set up authentication headers
         if self.server_token:
@@ -165,30 +160,11 @@ class HeartbeatClient:
             logger.error(f"Failed to send command completion for {command_id}: {e}")
             return False
 
-    def _load_executed_command_ids(self):
-        """Load previously executed command IDs from file for persistence across restarts"""
-        try:
-            if os.path.exists(self.command_ids_file):
-                with open(self.command_ids_file, 'r') as f:
-                    command_ids = f.read().strip().split('\n')
-                    self.executed_command_ids = set(filter(None, command_ids))  # Remove empty strings
-                    logger.info(f"Loaded {len(self.executed_command_ids)} previously executed command IDs")
-        except Exception as e:
-            logger.warning(f"Failed to load executed command IDs: {e}")
-            self.executed_command_ids = set()
     
-    def _save_executed_command_id(self, command_id: str):
-        """Save executed command ID to file for persistence"""
-        try:
-            with open(self.command_ids_file, 'a') as f:
-                f.write(f"{command_id}\n")
-        except Exception as e:
-            logger.warning(f"Failed to save executed command ID {command_id}: {e}")
     
     def mark_command_executed(self, command_id: str):
-        """Mark a command as executed and persist it"""
+        """Mark a command as executed (in-memory)"""
         self.executed_command_ids.add(command_id)
-        self._save_executed_command_id(command_id)
         
         # Cleanup old command IDs if we exceed the limit
         if len(self.executed_command_ids) > self.max_command_history:
@@ -208,15 +184,7 @@ class HeartbeatClient:
                 # In a real implementation, you'd want to track timestamps
                 commands_to_keep = command_list[-self.max_command_history:]
                 self.executed_command_ids = set(commands_to_keep)
-                
-                # Rewrite the file with only the commands we're keeping
-                try:
-                    with open(self.command_ids_file, 'w') as f:
-                        for cmd_id in self.executed_command_ids:
-                            f.write(f"{cmd_id}\n")
-                    logger.info(f"Cleaned up command ID history, keeping {len(self.executed_command_ids)} entries")
-                except Exception as e:
-                    logger.warning(f"Failed to rewrite command IDs file: {e}")
+                logger.info(f"Cleaned up command ID history in memory, keeping {len(self.executed_command_ids)} entries")
         except Exception as e:
             logger.warning(f"Failed to cleanup old command IDs: {e}")
 
@@ -251,6 +219,10 @@ class DynamicGProfilerManager:
                     # Check for idempotency - skip if command already executed
                     if command_id in self.heartbeat_client.executed_command_ids:
                         logger.info(f"Command ID {command_id} already executed, skipping...")
+
+                        # Wait for next heartbeat
+                        self.stop_event.wait(self.heartbeat_interval)
+
                         continue
                     
                     logger.info(f"Received {command_type} command: {command_id}")
