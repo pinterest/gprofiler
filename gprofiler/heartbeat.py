@@ -255,15 +255,16 @@ class DynamicGProfilerManager:
                     
                     logger.info(f"Received {command_type} command: {command_id}")
                     
-                    # Mark command as executed for idempotency
-                    self.heartbeat_client.mark_command_executed(command_id)
-                    self.heartbeat_client.last_command_id = command_id
-                    
                     if command_type == "stop":
                         # Stop current profiler without starting a new one
                         logger.info(f"RECEIVED STOP COMMAND for command ID: {command_id}")
                         logger.info(f"STOP command details: {profiling_command}")
                         self._stop_current_profiler()
+
+                        # Mark command as executed for idempotency
+                        self.heartbeat_client.mark_command_executed(command_id)
+                        self.heartbeat_client.last_command_id = command_id
+                        
                         # TODO: important comment to make sure profiler has stopped successful to avoid leak 
                         # Report completion for stop command
                         self.heartbeat_client.send_command_completion(
@@ -506,6 +507,10 @@ class DynamicGProfilerManager:
             # Calculate execution time
             end_time = datetime.datetime.now()
             execution_time = int((end_time - start_time).total_seconds())
+
+            # For start commands, it only should be marked as executed if the profiler was finished gracefully
+            self.heartbeat_client.mark_command_executed(command_id)
+            self.heartbeat_client.last_command_id = command_id
             
             # Clear the current profiler reference
             if self.current_gprofiler == gprofiler:
