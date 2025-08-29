@@ -254,6 +254,53 @@ class PySpyProfiler(SpawningProcessProfilerBase):
     def _is_missing_files_error(self, stderr: str, process: Process) -> bool:
         """Check if error is due to missing files while process is still running."""
         return (self._is_file_not_found_error(stderr) and is_process_running(process))
+    
+    def _is_pyspy_crash(self, returncode: int, stderr: str) -> bool:
+        """Check if py-spy crashed with SIGSEGV or other fatal signals."""
+        # SIGSEGV = 11, SIGABRT = 6, SIGBUS = 7
+        fatal_signals = [-11, 139, -6, 134, -7, 135]  # Both negative and positive forms
+        return returncode in fatal_signals or "died with" in stderr
+    
+    def _detect_corrupted_output(self, output_path: str) -> bool:
+        """Detect if py-spy output file appears corrupted."""
+        try:
+            if not os.path.exists(output_path):
+                return True
+                
+            with open(output_path, 'r') as f:
+                content = f.read(1024)  # Read first 1KB for quick check
+                
+            # Empty file
+            if not content.strip():
+                return True
+                
+            # Check for obvious corruption markers
+            lines = content.split('\n')[:10]  # Check first 10 lines
+            valid_lines = 0
+            
+            for line in lines:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                    
+                # Expected format: "stack_trace count"
+                parts = line.rpartition(' ')
+                if parts[0] and parts[2]:  # Has both stack and count
+                    try:
+                        int(parts[2])  # Count should be integer
+                        valid_lines += 1
+                    except ValueError:
+                        pass
+                        
+            # If less than 50% of non-empty lines are valid, consider corrupted
+            total_content_lines = len([l for l in lines if l.strip() and not l.startswith('#')])
+            if total_content_lines > 0 and valid_lines / total_content_lines < 0.5:
+                return True
+                
+        except Exception:
+            return True
+            
+        return False
 
     def _profile_process(self, process: Process, duration: int, spawned: bool) -> ProfileData:
         # Use full duration since young processes are now skipped entirely in _should_skip_process
@@ -286,6 +333,17 @@ class PySpyProfiler(SpawningProcessProfilerBase):
                 raise
             except CalledProcessError as e:
                 assert isinstance(e.stderr, str), f"unexpected type {type(e.stderr)}"
+
+                # Handle py-spy crashes (SIGSEGV, SIGABRT, etc.) - HIGH PRIORITY
+                if self._is_pyspy_crash(e.returncode, e.stderr):
+                    logger.error(f"py-spy crashed with signal {e.returncode} while profiling process {process.pid} ({comm}). "
+                               f"This may indicate memory corruption or py-spy bugs. Stderr: {e.stderr}")
+                    return ProfileData(
+                        self._profiling_error_stack("error", comm, f"py-spy crashed with signal {e.returncode}"),
+                        appid,
+                        app_metadata,
+                        container_name,
+                    )
 
                 # Process exited before py-spy could start (common, keep as debug)
                 if self._is_process_exit_error(e.stderr, process):
@@ -329,10 +387,31 @@ class PySpyProfiler(SpawningProcessProfilerBase):
                 raise
 
             logger.info(f"Finished profiling process {process.pid} with py-spy")
-            parsed = parse_one_collapsed_file(Path(local_output_path), comm)
-            if self.add_versions:
-                parsed = _add_versions_to_process_stacks(process, parsed)
-            return ProfileData(parsed, appid, app_metadata, container_name)
+            
+            # Check for corrupted output before parsing
+            if self._detect_corrupted_output(local_output_path):
+                logger.warning(f"py-spy output for process {process.pid} ({comm}) appears corrupted or incomplete. "
+                             f"This may be due to py-spy crashes or target process issues.")
+                return ProfileData(
+                    self._profiling_error_stack("error", comm, "corrupted py-spy output detected"),
+                    appid,
+                    app_metadata,
+                    container_name,
+                )
+            
+            try:
+                parsed = parse_one_collapsed_file(Path(local_output_path), comm)
+                if self.add_versions:
+                    parsed = _add_versions_to_process_stacks(process, parsed)
+                return ProfileData(parsed, appid, app_metadata, container_name)
+            except Exception as e:
+                logger.error(f"Failed to parse py-spy output for process {process.pid} ({comm}): {e}")
+                return ProfileData(
+                    self._profiling_error_stack("error", comm, f"failed to parse py-spy output: {str(e)}"),
+                    appid,
+                    app_metadata,
+                    container_name,
+                )
 
     def _select_processes_to_profile(self) -> List[Process]:
         filtered_procs = set()
