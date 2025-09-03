@@ -172,6 +172,10 @@ class SystemProfiler(ProfilerBase):
     def _should_limit_processes(self) -> bool:
         """Perf is a system-wide profiler and should not limit processes."""
         return False
+    
+    def _is_system_wide_profiler(self) -> bool:
+        """Perf is a system-wide profiler that can be disabled on busy systems."""
+        return True
 
     def __init__(
         self,

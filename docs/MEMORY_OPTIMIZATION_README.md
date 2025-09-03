@@ -359,12 +359,24 @@ def _validate_target_processes(self, processes):
 
 ## Problem 3: Hosts with 500+ Processes (Max Processes Optimization)
 
+
 ### Issue
 On hosts with hundreds of processes, gProfiler would attempt to profile ALL matching processes simultaneously, leading to:
 - Memory exhaustion (e.g., 1.6GB usage near 2GB limit)  
 - 119+ concurrent profiling tasks
 - ThreadPoolExecutor creating excessive threads
 - Process thrashing and system instability
+
+Even ebpf profiler was failing 
+check for ebpf compactibility
+```bash
+uname -a
+bpftool feature probe | grep 'JIT\|BTF'
+test -f /sys/kernel/btf/vmlinux && echo "BTF: yes" || echo "BTF: no"
+which bpftool
+which clang
+dmesg | tail -100 | grep -i bpf
+```
 
 ### Solution: Intelligent Process Limiting
 Added `--max-processes` configuration to limit runtime profilers to top N processes by CPU usage:
@@ -406,6 +418,31 @@ if self._should_limit_processes() and self._profiler_state.max_processes_per_pro
 - `gprofiler/profilers/perf.py`: Excluded system-wide profilers from limiting
 - `gprofiler/profilers/python_ebpf.py`: Excluded eBPF profilers from limiting
 
+### **System-Wide Profiler Disabling (New)**
+Added `--max-system-processes` to disable perf/eBPF when system is overloaded:
+
+```bash
+# Disable system-wide profilers when >300 total processes exist
+gprofiler --max-system-processes 300
+
+# Combined optimization for busy systems
+gprofiler --max-processes 25 --max-system-processes 300
+```
+
+**System-Wide Profiler Behavior:**
+- **Perf**: Uses `perf record -a` (all CPUs), memory scales with system activity
+- **eBPF**: Fixed ~30MB overhead, CPU scales with target process activity  
+- **Resource Impact**: On 500+ process systems, these can consume significant resources
+- **Auto-Disable**: When limit exceeded, logs warning and skips system-wide profiling
+- **Runtime Profilers Continue**: py-spy, Java, Ruby still work normally
+
+**Files Modified:**
+- `gprofiler/main.py`: Added `--max-system-processes` CLI argument
+- `gprofiler/profiler_state.py`: Added `max_system_processes_for_system_profilers` field
+- `gprofiler/profilers/profiler_base.py`: Added system process counting and disable logic
+- `gprofiler/profilers/perf.py`: Marked as system-wide profiler  
+- `gprofiler/profilers/python_ebpf.py`: Marked as system-wide profiler
+
 ## Problem 4 : Hosts with 500+ processes (eBPF Compatibility Check)
 First check if its ebpf comptability for optimized perf and python profiling using pyperf
 uname -a
@@ -431,6 +468,7 @@ perf invoked oom-killer: ...
 | **Perf Memory** | 948MB peak | 200-400MB peak | **60% reduction** |
 | **Perf File Rotation** | duration * 3 (all cases) | duration * 1.5 (low freq) | **Faster rotation, less buildup** |
 | **Max Processes Limit** | 500 threads (~4GB) | 50 threads (~400MB) | **90% reduction** |
+| **System-Wide Disabling** | Perf + eBPF always run | Disabled on busy systems | **Prevents resource spikes** |
 
 ### Architecture Improvements
 

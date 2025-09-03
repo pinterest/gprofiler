@@ -179,6 +179,57 @@ class ProcessProfilerBase(ProfilerBase):
         """
         return True
     
+    def _is_system_wide_profiler(self) -> bool:
+        """
+        Override this in system-wide profilers (perf, eBPF) to return True.
+        These profilers can be disabled when system has too many processes.
+        """
+        return False
+    
+    def _get_system_process_count(self) -> int:
+        """
+        Get total number of processes on the system for resource management decisions.
+        
+        Returns:
+            Total process count, or 0 if unable to determine
+        """
+        try:
+            import os
+            # Count entries in /proc that are numeric (PIDs)
+            proc_entries = os.listdir('/proc')
+            process_count = sum(1 for entry in proc_entries if entry.isdigit())
+            return process_count
+        except Exception as e:
+            logger.debug(f"Failed to get system process count: {e}")
+            return 0
+    
+    def _should_disable_due_to_system_load(self) -> bool:
+        """
+        Check if this profiler should be disabled due to high system process count.
+        Only applies to system-wide profilers when max_system_processes_for_system_profilers is set.
+        
+        Returns:
+            True if profiler should be disabled due to system load
+        """
+        if not self._is_system_wide_profiler():
+            return False
+            
+        max_system_processes = self._profiler_state.max_system_processes_for_system_profilers
+        if max_system_processes <= 0:
+            return False  # No limit configured
+            
+        current_process_count = self._get_system_process_count()
+        if current_process_count > max_system_processes:
+            logger.warning(
+                f"{self.__class__.__name__}: Disabling system-wide profiler due to high process count. "
+                f"Current: {current_process_count}, limit: {max_system_processes}. "
+                f"Use --max-system-processes to adjust or set to 0 to disable this limit."
+            )
+            return True
+            
+        logger.debug(f"{self.__class__.__name__}: System process count check passed: {current_process_count}/{max_system_processes}")
+        return False
+    
     def _get_top_processes_by_cpu(self, processes: List[Process], max_processes: int) -> List[Process]:
         """
         Filter processes to the top N by CPU usage to reduce memory consumption.
@@ -257,6 +308,11 @@ class ProcessProfilerBase(ProfilerBase):
             return self._duration  # Conservative fallback
 
     def snapshot(self) -> ProcessToProfileData:
+        # Check if system-wide profiler should be disabled due to high process count
+        if self._should_disable_due_to_system_load():
+            logger.info(f"{self.__class__.__name__}: Skipping profiling due to high system process count")
+            return {}
+            
         processes_to_profile = self._select_processes_to_profile()
         logger.debug(f"{self.__class__.__name__}: selected {len(processes_to_profile)} processes to profile")
         if self._profiler_state.processes_to_profile is not None and len(processes_to_profile) > 0:
