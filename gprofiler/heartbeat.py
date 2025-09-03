@@ -38,10 +38,11 @@ from gprofiler.metadata.system_metadata import get_hostname
 from gprofiler.profiler_state import ProfilerState
 from gprofiler.profilers.factory import get_profilers
 from gprofiler.profilers.profiler_base import NoopProfiler
+from gprofiler.profilers.registry import get_profilers_registry
 from gprofiler.state import State, init_state, get_state
 from gprofiler.system_metrics import NoopSystemMetricsMonitor, SystemMetricsMonitor, SystemMetricsMonitorBase
 from gprofiler.usage_loggers import NoopUsageLogger
-from gprofiler.utils import TEMPORARY_STORAGE_PATH
+from gprofiler.utils import TEMPORARY_STORAGE_PATH, pgrep_maps, pgrep_exe
 from gprofiler.hw_metrics import HWMetricsMonitor, HWMetricsMonitorBase, NoopHWMetricsMonitor
 from gprofiler.exceptions import NoProfilersEnabledError
 
@@ -80,7 +81,10 @@ class HeartbeatClient:
         except Exception:
             return "127.0.0.1"
     
-    def send_heartbeat(self) -> Optional[Dict[str, Any]]:
+    def send_heartbeat(
+        self,
+        available_pids: Optional[Dict[str, List[int]]] = None
+    ) -> Optional[Dict[str, Any]]:
         """Send heartbeat to server and return any profiling commands"""
         try:
             heartbeat_data = {
@@ -91,6 +95,10 @@ class HeartbeatClient:
                 "status": "active",
                 "timestamp": datetime.datetime.now().isoformat()
             }
+            
+            # Include available PIDs if provided
+            if available_pids is not None:
+                heartbeat_data["available_pids"] = available_pids
             
             url = f"{self.api_server}/api/metrics/heartbeat"
             response = self.session.post(
@@ -200,14 +208,83 @@ class DynamicGProfilerManager:
         self.stop_event = threading.Event()
         self.heartbeat_interval = 30  # seconds
     
+    def scan_available_pids(self) -> Dict[str, List[int]]:
+        """Scan the host for all available PIDs organized by language/profiler type"""
+        available_pids = {}
+        
+        try:
+            # Import regex patterns from granulate_utils
+            from granulate_utils.java import DETECTED_JAVA_PROCESSES_REGEX
+            from granulate_utils.python import DETECTED_PYTHON_PROCESSES_REGEX
+            
+            # Define profiler patterns
+            profiler_patterns = {
+                'java': DETECTED_JAVA_PROCESSES_REGEX,
+                'python': DETECTED_PYTHON_PROCESSES_REGEX,
+                'ruby': r"^.+/libruby",  # Ruby pattern
+                'dotnet': r"^.+/libcoreclr\.so",  # .NET pattern
+                'php': r"^.+/(lib)?php[^/]*$",  # PHP pattern
+            }
+            
+            # Scan for each language
+            for language, pattern in profiler_patterns.items():
+                try:
+                    if language == 'python':
+                        # Python uses both pgrep_maps and pgrep_exe on Windows
+                        from gprofiler.platform import is_windows
+                        if is_windows():
+                            processes = pgrep_exe("python")
+                        else:
+                            processes = pgrep_maps(pattern)
+                    else:
+                        # Other languages use pgrep_maps
+                        processes = pgrep_maps(pattern)
+                    
+                    pids = [p.pid for p in processes]
+                    
+                    # Only include languages that have running processes
+                    if pids:
+                        available_pids[language] = sorted(pids)
+                        logger.debug(f"Found {len(pids)} {language} processes")
+                    
+                except Exception as e:
+                    # Don't let individual profiler errors break the entire scan
+                    logger.debug(f"Error scanning {language} processes: {e}")
+                    continue
+            
+            if available_pids:
+                total_pids = sum(len(pids) for pids in available_pids.values())
+                logger.debug(
+                    f"Total available PIDs found: {total_pids} processes across "
+                    f"{len(available_pids)} languages"
+                )
+            else:
+                logger.debug("No available PIDs found for any supported languages")
+            
+        except Exception as e:
+            logger.debug(f"Error scanning available PIDs: {e}")
+        
+        return available_pids
+    
     def start_heartbeat_loop(self):
         """Start the main heartbeat loop"""
         logger.info("Starting heartbeat loop...")
         
         while not self.stop_event.is_set():
             try:
+                # Scan all available PIDs by language
+                available_pids = self.scan_available_pids()
+                if available_pids:
+                    total_pids = sum(len(pids) for pids in available_pids.values())
+                    logger.debug(
+                        f"Sending heartbeat with {total_pids} PIDs across "
+                        f"{len(available_pids)} languages"
+                    )
+                
                 # Send heartbeat and check for commands
-                command_response = self.heartbeat_client.send_heartbeat()
+                command_response = self.heartbeat_client.send_heartbeat(
+                    available_pids=available_pids
+                )
                 
                 if command_response and command_response.get("profiling_command"):
                     profiling_command = command_response["profiling_command"]
