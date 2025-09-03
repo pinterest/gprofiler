@@ -64,6 +64,10 @@ class PythonEbpfProfiler(ProfilerBase):
     def _should_limit_processes(self) -> bool:
         """eBPF Python profiler is system-wide and should not limit processes."""
         return False
+    
+    def _is_system_wide_profiler(self) -> bool:
+        """eBPF Python profiler is system-wide and can be disabled on busy systems."""
+        return True
     # 28mb (each symbol is 224 bytes), but needn't be physicall contiguous so don't care
     _SYMBOLS_MAP_SIZE = 131072
     _DUMP_SIGNAL = signal.SIGUSR2

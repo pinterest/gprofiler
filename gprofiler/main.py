@@ -178,6 +178,7 @@ class GProfiler:
             container_names_client=container_names_client,
             processes_to_profile=processes_to_profile,
             max_processes_per_profiler=user_args.get("max_processes_per_profiler", 0),
+            max_system_processes_for_system_profilers=user_args.get("max_system_processes_for_system_profilers", 0),
         )
         self.system_profiler, self.process_profilers = get_profilers(user_args, profiler_state=self._profiler_state)
         self._usage_logger = usage_logger
@@ -663,6 +664,15 @@ def parse_cmd_args() -> configargparse.Namespace:
         help="Maximum number of processes to profile per runtime profiler (0=unlimited). "
         "When exceeded, profiles only the top N processes by CPU usage. "
         "Does not affect system-wide profilers (perf, eBPF). Default: %(default)s",
+    )
+    parser.add_argument(
+        "--max-system-processes",
+        dest="max_system_processes_for_system_profilers",
+        type=positive_integer,
+        default=0,
+        help="Maximum total system processes before disabling system-wide profilers (perf, eBPF) (0=unlimited). "
+        "When exceeded, disables perf and eBPF profilers to reduce resource usage on busy systems. "
+        "Runtime profilers (py-spy, Java, etc.) continue normally. Default: %(default)s",
     )
     parser.add_argument(
         "--rootless",
