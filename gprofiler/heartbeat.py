@@ -288,6 +288,12 @@ class DynamicGProfilerManager:
             logger.info("STOPPING current gProfiler instance...")
             try:
                 self.current_gprofiler.stop()  # This sets the stop_event!
+                
+                # MISSING: Add comprehensive cleanup like in continuous mode
+                logger.debug("Starting comprehensive cleanup after heartbeat stop...")
+                self.current_gprofiler.maybe_cleanup_subprocesses()
+                logger.debug("Comprehensive cleanup completed")
+                
                 logger.info("Successfully called gprofiler.stop()")
             except Exception as e:
                 # TODO: This is a huge leak, report it  
