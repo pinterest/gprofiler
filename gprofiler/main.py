@@ -309,10 +309,26 @@ class GProfiler:
     def stop(self) -> None:
         logger.info("Stopping ...")
         self._profiler_state.stop_event.set()
-        self._system_metrics_monitor.stop()
-        self._hw_metrics_monitor.stop()
+        
+        # Stop system metrics monitor with exception protection
+        try:
+            self._system_metrics_monitor.stop()
+        except Exception as e:
+            logger.error(f"Error stopping system metrics monitor: {e}")
+        
+        # Stop hardware metrics monitor with exception protection
+        try:
+            self._hw_metrics_monitor.stop()
+        except Exception as e:
+            logger.error(f"Error stopping hardware metrics monitor: {e}")
+        
+        # Stop all profilers with individual exception protection
         for prof in self.all_profilers:
-            prof.stop()
+            try:
+                prof.stop()
+                logger.debug(f"Successfully stopped profiler: {prof.name}")
+            except Exception as e:
+                logger.error(f"Error stopping profiler {prof.name}: {e}")
 
     def _snapshot(self) -> None:   
         local_start_time = datetime.datetime.utcnow()

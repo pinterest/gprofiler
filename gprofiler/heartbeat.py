@@ -288,18 +288,22 @@ class DynamicGProfilerManager:
             logger.info("STOPPING current gProfiler instance...")
             try:
                 self.current_gprofiler.stop()  # This sets the stop_event!
-                
-                # MISSING: Add comprehensive cleanup like in continuous mode
-                logger.debug("Starting comprehensive cleanup after heartbeat stop...")
-                self.current_gprofiler.maybe_cleanup_subprocesses()
-                logger.debug("Comprehensive cleanup completed")
-                
                 logger.info("Successfully called gprofiler.stop()")
             except Exception as e:
                 # TODO: This is a huge leak, report it  
                 logger.error(f"Error stopping gProfiler: {e}")
-            finally:
-                self.current_gprofiler = None
+            
+            # ALWAYS cleanup subprocesses regardless of stop() success/failure
+            try:
+                logger.debug("Starting comprehensive cleanup after heartbeat stop...")
+                self.current_gprofiler.maybe_cleanup_subprocesses()
+                logger.debug("Comprehensive cleanup completed")
+            except Exception as cleanup_error:
+                # Cleanup errors are non-fatal - log and continue
+                logger.debug(f"Cleanup completed with minor errors (expected during stop): {cleanup_error}")
+            
+            # Always clear the reference
+            self.current_gprofiler = None
         
         if self.current_thread and self.current_thread.is_alive():
             # No need to actively kill the thread, the self.current_gprofiler.stop() already handles it using events
