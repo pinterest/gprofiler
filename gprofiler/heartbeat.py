@@ -295,12 +295,12 @@ class DynamicGProfilerManager:
             
             # ALWAYS cleanup subprocesses regardless of stop() success/failure
             try:
-                logger.debug("Starting comprehensive cleanup after heartbeat stop...")
+                logger.info("Starting comprehensive cleanup after heartbeat stop...")
                 self.current_gprofiler.maybe_cleanup_subprocesses()
-                logger.debug("Comprehensive cleanup completed")
+                logger.info("Comprehensive cleanup completed")
             except Exception as cleanup_error:
                 # Cleanup errors are non-fatal - log and continue
-                logger.debug(f"Cleanup completed with minor errors (expected during stop): {cleanup_error}")
+                logger.info(f"Cleanup completed with minor errors (expected during stop): {cleanup_error}")
             
             # Always clear the reference
             self.current_gprofiler = None

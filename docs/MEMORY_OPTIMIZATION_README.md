@@ -463,6 +463,85 @@ dmesg | tail -100 | grep -i bpf
 - `gprofiler/profilers/python_ebpf.py`: Added `_is_system_profiler = True` marker
 
 
+## Problem 4: Critical System Profiler Timing Bug
+
+### Issue: Skip Flag Completely Ineffective
+
+System profiler prevention (`--skip-system-profilers-above`) was completely broken due to a critical race condition where perf started during initialization, before the skip logic could prevent it.
+
+### Root Cause: Timing Bug in Initialization Order
+
+```
+❌ BUGGY FLOW:
+1. GProfiler.__init__() 
+   └─ SystemProfiler.__init__()  ← perf starts here!
+      └─ discover_appropriate_perf_event()
+         └─ perf_process.start()  🔥 ALREADY RUNNING
+
+2. GProfiler.start() 
+   └─ Check --skip-system-profilers-above threshold
+   └─ Skip SystemProfiler.start()  ← TOO LATE!
+
+Result: perf always runs despite skip flag
+```
+
+### Technical Solution: Deferred Initialization
+
+**Strategy**: Move subprocess creation from `__init__()` to `start()` to ensure proper timing.
+
+**Before (Buggy):**
+```python
+class SystemProfiler:
+    def __init__(self, ...):
+        # ❌ BUG: Starts perf during object creation
+        discovered_perf_event = discover_appropriate_perf_event(...)
+        extra_args.extend(discovered_perf_event.perf_extra_args())
+        # perf is already running!
+```
+
+**After (Fixed):**
+```python
+class SystemProfiler:
+    def __init__(self, ...):
+        # ✅ Store config only, no subprocess creation
+        self._perf_mode = perf_mode
+        self._perf_dwarf_stack_size = perf_dwarf_stack_size
+
+    def start(self) -> None:
+        # ✅ Event discovery only when actually starting
+        discovered_perf_event = discover_appropriate_perf_event(...)
+        # Now properly respects skip logic!
+```
+
+### Production Validation
+
+**Before Fix (Broken):**
+```bash
+$ gprofiler --skip-system-profilers-above 30
+[DEBUG] System process count: 397 (threshold: 30)  
+[WARNING] Skipping system profilers due to high process count
+[INFO] Skipping SystemProfiler due to high system process count
+$ ps aux | grep perf
+root  3899913  /tmp/.../perf record -F 11 -g ...  ← 🔥 Still running!
+```
+
+**After Fix (Working):**
+```bash
+$ gprofiler --skip-system-profilers-above 30
+[DEBUG] System process count: 397 (threshold: 30)
+[WARNING] Skipping system profilers due to high process count  
+[INFO] Skipping SystemProfiler due to high system process count
+$ ps aux | grep perf
+(no perf processes)  ← ✅ Properly prevented
+```
+
+### PyPerf Status: ✅ Not Affected
+
+PyPerf's kernel offset discovery properly happens in `start()` method, so skip logic works correctly for PyPerf.
+
+**Files Modified:**
+- `gprofiler/profilers/perf.py` - Moved event discovery from `__init__()` to `start()`
+
 ### Results Summary
 
 | **Optimization** | **Memory Before** | **Memory After** | **Improvement** |
@@ -471,6 +550,8 @@ dmesg | tail -100 | grep -i bpf
 | **Heartbeat Stop Cleanup** | 682MB → 682MB (no cleanup) | 682MB → 252MB | **63% memory restored** |
 | **Stop Operation Reliability** | Single failure → All fail | Independent stops | **100% reliable cleanup** |
 | **Invalid PID Handling** | Process crash | Graceful fallback | **100% uptime** |  
+| **Invalid PID Handling** | Process crash | Graceful fallback | **100% uptime** |
+| **System Profiler Timing Bug** | Skip flag ignored | Skip flag effective | **100% prevention reliability** |  
 | **Perf Memory** | 948MB peak | 200-400MB peak | **60% reduction** |
 | **Perf File Rotation** | duration * 3 (all cases) | duration * 1.5 (low freq) | **Faster rotation, less buildup** |
 | **Max Processes Limit** | 500 threads (~4GB) | 50 threads (~400MB) | **90% reduction** |
