@@ -168,6 +168,7 @@ class SystemProfiler(ProfilerBase):
     like some native software. DWARF by itself is not good enough, as it has issues with unwinding some
     versions of Go processes.
     """
+    _is_system_profiler = True  # Mark as system profiler for startup filtering
     
     def _should_limit_processes(self) -> bool:
         """Perf is a system-wide profiler and should not limit processes."""
