@@ -623,7 +623,92 @@ gprofiler --max-processes 25 --skip-system-profilers-above 300
 - `gprofiler/profilers/perf.py` - Added `_is_system_profiler = True` marker
 - `gprofiler/profilers/python_ebpf.py` - Added `_is_system_profiler = True` marker
 
-#### 4.9 Profiler Restart Interval and Size Optimizations
+#### 4.9 Critical System Profiler Timing Bug Fix
+
+**Issue**: **Critical Race Condition** - System profiler prevention (`--skip-system-profilers-above`) was completely ineffective due to a timing bug where perf started during initialization, before skip logic could prevent it.
+
+**Root Cause**: `SystemProfiler.__init__()` called `discover_appropriate_perf_event()` which **immediately started perf processes**, while the skip logic ran later in `GProfiler.start()`.
+
+**Problematic Flow:**
+```
+1. GProfiler.__init__() 
+   └─ SystemProfiler.__init__()
+      └─ discover_appropriate_perf_event()  
+         └─ perf_process.start()  ← 🔥 PERF STARTS HERE!
+
+2. GProfiler.start() 
+   └─ Check process count threshold
+   └─ Skip system profilers  ← ❌ TOO LATE! Perf already running
+```
+
+**Solution**: **Deferred Initialization Pattern** - Moved perf event discovery from `__init__()` to `start()` method to ensure proper skip logic timing.
+
+**Corrected Flow:**
+```
+1. GProfiler.__init__() 
+   └─ SystemProfiler.__init__()  ← ✅ No subprocess calls
+
+2. GProfiler.start() 
+   └─ Check process count threshold
+   └─ Skip prof.start() entirely  ← ✅ Skip logic prevents start()
+   └─ SystemProfiler.start() NEVER CALLED
+      └─ discover_appropriate_perf_event() NEVER RUNS  ← ✅ No perf processes!
+```
+
+**Technical Implementation:**
+```python
+# BEFORE (Buggy): Event discovery in __init__
+class SystemProfiler:
+    def __init__(self, ...):
+        # ... other init code ...
+        try:
+            discovered_perf_event = discover_appropriate_perf_event(...)  # ← BUG: Starts perf!
+            extra_args.extend(discovered_perf_event.perf_extra_args())
+        except PerfNoSupportedEvent:
+            raise
+
+# AFTER (Fixed): Event discovery in start()  
+class SystemProfiler:
+    def __init__(self, ...):
+        # Store config, defer subprocess creation
+        self._perf_mode = perf_mode
+        self._perf_dwarf_stack_size = perf_dwarf_stack_size
+        # ✅ NO subprocess calls during init
+
+    def start(self) -> None:
+        # ✅ Event discovery only when actually starting
+        discovered_perf_event = discover_appropriate_perf_event(...)
+        extra_args.extend(discovered_perf_event.perf_extra_args())
+        # Create PerfProcess instances and start them
+```
+
+**Production Validation:**
+```bash
+# Before fix: perf runs despite skip flag
+$ gprofiler --skip-system-profilers-above 30
+[DEBUG] System process count: 397 (threshold: 30)
+[WARNING] Skipping system profilers due to high process count
+[INFO] Skipping SystemProfiler due to high system process count  
+$ ps aux | grep perf
+root     3899913  /tmp/.../perf record -F 11 -g ...  ← 🔥 BUG: Still running!
+
+# After fix: perf properly prevented
+$ gprofiler --skip-system-profilers-above 30  
+[DEBUG] System process count: 397 (threshold: 30)
+[WARNING] Skipping system profilers due to high process count
+[INFO] Skipping SystemProfiler due to high system process count
+$ ps aux | grep perf
+(no perf processes)  ← ✅ FIXED: Properly prevented
+```
+
+**PyPerf Status**: ✅ **Not affected** - PyPerf's kernel offset discovery properly happens in `start()` method, so skip logic works correctly.
+
+**Impact**: Critical fix for resource-constrained environments where system profiler prevention is essential for stability.
+
+**Files Modified:**
+- `gprofiler/profilers/perf.py` - Moved `discover_appropriate_perf_event()` from `__init__()` to `start()`
+
+#### 4.10 Profiler Restart Interval and Size Optimizations
 
 **Issue**: Suboptimal restart behavior and excessive resource usage during profiler restarts
 
@@ -671,6 +756,7 @@ def _stop_current_profiler(self):
 | **High-Process Systems (500+ procs)** | 4-5GB+ → OOM kills | 400MB stable | **90% reduction** |
 | **Runtime Profiler Threads** | 500+ threads (~4GB) | 50 threads (~400MB) | **88% reduction** |
 | **System Profiler Prevention** | Always run (+1-2GB) | Skip when busy | **Prevents resource spikes** |
+| **System Profiler Timing Bug** | Skip flag ignored, perf always started | Skip flag effective, perf prevented | **100% skip effectiveness** |
 | **Peak Perf Memory** | 948MB | 200-400MB | **60% reduction** |
 | **File Descriptors** | 3000+ pipes | <50 pipes | **98% reduction** |
 | **Invalid PID Crashes** | Daily failures | 100% uptime | **Crash elimination** |

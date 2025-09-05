@@ -199,10 +199,25 @@ class SystemProfiler(ProfilerBase):
         self._node_processes: List[Process] = []
         self._node_processes_attached: List[Process] = []
         self._perf_memory_restart = perf_memory_restart
+        self._perf_mode = perf_mode
+        self._perf_dwarf_stack_size = perf_dwarf_stack_size
+        self._perf_inject = perf_inject
         # allow gprofiler to be delayed up to 3 intervals before timing out.
         # For low-frequency profiling, use shorter switch intervals to reduce memory buildup
         # But maintain reasonable safety margin to avoid premature rotations
-        switch_timeout_s = duration * 1.5 if frequency <= 11 else duration * 3
+        self._switch_timeout_s = duration * 1.5 if frequency <= 11 else duration * 3
+
+        self.perf_node_attach = perf_node_attach
+        # Defer perf process creation and event discovery to start() method
+        # This prevents perf from starting during __init__ when --skip-system-profilers-above is used
+        
+        # Initialize perf process attributes to None - they'll be created in start() if not skipped
+        self._perf_fp: Optional[PerfProcess] = None
+        self._perf_dwarf: Optional[PerfProcess] = None
+
+    def start(self) -> None:
+        # Perform perf event discovery and create PerfProcess instances
+        # This was moved from __init__ to prevent perf from starting during initialization
         extra_args = []
         try:
             # We want to be certain that `perf record` will collect samples.
@@ -226,41 +241,40 @@ class SystemProfiler(ProfilerBase):
                 logger.critical("Failed to determine perf event to use")
             raise
 
-        if perf_mode in ("fp", "smart"):
+        # Create PerfProcess instances now that we know we're actually starting
+        if self._perf_mode in ("fp", "smart"):
             self._perf_fp: Optional[PerfProcess] = PerfProcess(
                 frequency=self._frequency,
                 stop_event=self._profiler_state.stop_event,
                 output_path=os.path.join(self._profiler_state.storage_dir, "perf.fp"),
                 is_dwarf=False,
-                inject_jit=perf_inject,
+                inject_jit=self._perf_inject,
                 extra_args=extra_args,
                 processes_to_profile=self._profiler_state.processes_to_profile,
-                switch_timeout_s=switch_timeout_s,
+                switch_timeout_s=self._switch_timeout_s,
             )
             self._perfs.append(self._perf_fp)
         else:
             self._perf_fp = None
 
-        if perf_mode in ("dwarf", "smart"):
-            extra_args.extend(["--call-graph", f"dwarf,{perf_dwarf_stack_size}"])
+        if self._perf_mode in ("dwarf", "smart"):
+            dwarf_extra_args = extra_args + ["--call-graph", f"dwarf,{self._perf_dwarf_stack_size}"]
             self._perf_dwarf: Optional[PerfProcess] = PerfProcess(
                 frequency=self._frequency,
                 stop_event=self._profiler_state.stop_event,
                 output_path=os.path.join(self._profiler_state.storage_dir, "perf.dwarf"),
                 is_dwarf=True,
                 inject_jit=False,  # no inject in dwarf mode, yet
-                extra_args=extra_args,
+                extra_args=dwarf_extra_args,
                 processes_to_profile=self._profiler_state.processes_to_profile,
-                switch_timeout_s=switch_timeout_s,
+                switch_timeout_s=self._switch_timeout_s,
             )
             self._perfs.append(self._perf_dwarf)
         else:
             self._perf_dwarf = None
 
-        self.perf_node_attach = perf_node_attach
         assert self._perf_fp is not None or self._perf_dwarf is not None
 
-    def start(self) -> None:
         # we have to also generate maps here,
         # it might be too late for first round to generate it in snapshot()
         if self.perf_node_attach:
@@ -300,6 +314,11 @@ class SystemProfiler(ProfilerBase):
         return None
 
     def snapshot(self) -> ProcessToProfileData:
+        # Check if profiler was actually started (not skipped due to --skip-system-profilers-above)
+        if self._perf_fp is None and self._perf_dwarf is None:
+            logger.debug("SystemProfiler snapshot called but profiler was never started (likely skipped due to high process count)")
+            return {}
+        
         if self.perf_node_attach:
             self._node_processes = [process for process in self._node_processes if is_process_running(process)]
             new_processes = [process for process in get_node_processes() if process not in self._node_processes]
