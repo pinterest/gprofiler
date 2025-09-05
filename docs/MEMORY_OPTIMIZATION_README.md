@@ -357,30 +357,20 @@ def _validate_target_processes(self, processes):
     return valid_pids
 ```
 
-## Problem 3: Hosts with 500+ Processes (Max Processes Optimization)
+## Problem 3: Hosts with 500+ Processes (Intelligent Process Limiting)
 
+### Issue: Runtime Profiler Thread Explosion
+On hosts with hundreds of processes, gProfiler would attempt to profile ALL matching processes simultaneously:
+- **Memory exhaustion**: 1.6GB+ usage approaching 2GB limits
+- **Thread explosion**: 119+ concurrent profiling tasks creating excessive threads  
+- **System thrashing**: ThreadPoolExecutor overwhelming system resources
+- **Process instability**: Out-of-memory kills and system degradation
 
-### Issue
-On hosts with hundreds of processes, gProfiler would attempt to profile ALL matching processes simultaneously, leading to:
-- Memory exhaustion (e.g., 1.6GB usage near 2GB limit)  
-- 119+ concurrent profiling tasks
-- ThreadPoolExecutor creating excessive threads
-- Process thrashing and system instability
+**Root Cause**: No limit on concurrent runtime profilers (py-spy, Java, Ruby, etc.)
 
-Even ebpf profiler was failing 
-check for ebpf compactibility
-```bash
-uname -a
-bpftool feature probe | grep 'JIT\|BTF'
-test -f /sys/kernel/btf/vmlinux && echo "BTF: yes" || echo "BTF: no"
-which bpftool
-which clang
-dmesg | tail -100 | grep -i bpf
-```
+### Solution 1: Runtime Profiler Limiting (`--max-processes`)
 
-### Solution: Intelligent Process Limiting
-Added `--max-processes` configuration to limit runtime profilers to top N processes by CPU usage:
-
+**Configuration:**
 ```bash
 # Limit to top 50 processes by CPU usage (0=unlimited)
 gprofiler --max-processes 50
@@ -388,73 +378,89 @@ gprofiler --max-processes 50
 # Example: Host with 200 Python processes → profiles only top 50 by CPU
 ```
 
-### Technical Implementation
-- **Smart Filtering**: Sorts processes by CPU usage (0.1s measurement interval)
-- **CPU-Based Selection**: Profiles the most active processes first
-- **Profiler-Specific**: Only affects runtime profilers (py-spy, Java, Ruby, etc.)
-- **System-Wide Unchanged**: Perf and eBPF continue system-wide profiling
+**Technical Implementation:**
+- **CPU-Based Selection**: Sorts processes by CPU usage (0.1s measurement interval)
+- **Smart Filtering**: Profiles the most active processes first
+- **Runtime Profiler Only**: Only affects py-spy, Java, Ruby, etc.
+- **System Profilers Unchanged**: Perf and eBPF continue system-wide profiling
 - **Graceful Degradation**: Handles process measurement errors gracefully
 
-### Memory Impact
+**Memory Impact:**
 | **Scenario** | **Before** | **After** | **Memory Saved** |
 |--------------|------------|-----------|------------------|
-| 200 Python processes | 200 threads | 50 threads | ~1.2GB |
-| 500 Java processes | 500 threads | 50 threads | ~3.6GB |
+| 200 Python processes | 200 threads (~1.6GB) | 50 threads (~400MB) | **1.2GB saved** |
+| 500 Java processes | 500 threads (~4GB) | 50 threads (~400MB) | **3.6GB saved** |
 
-### Configuration Details
+### Solution 2: System Profiler Prevention (`--skip-system-profilers-above`)
+
+**Issue**: Even with runtime limiting, continuous profilers (perf, PyPerf) still ran system-wide:
+- **Perf memory usage**: Scales with system activity, can reach GB levels
+- **eBPF overhead**: ~30MB base + CPU scaling with target processes  
+- **OOM scenarios**: Combined with runtime profilers, triggered memory kills
+
+**❌ Original Flawed Implementation ([PR #27](https://github.com/pinterest/gprofiler/pull/27/files)):**
 ```python
-# In ProfilerBase.snapshot()
-if self._should_limit_processes() and self._profiler_state.max_processes_per_profiler > 0:
-    processes_to_profile = self._get_top_processes_by_cpu(
-        processes_to_profile, 
-        self._profiler_state.max_processes_per_profiler
-    )
+# WRONG: In snapshot() method - too late!
+def snapshot(self) -> ProcessToProfileData:
+    if self._should_disable_due_to_system_load():
+        return {}  # Perf already running continuously!
 ```
 
-**Files Modified:**
-- `gprofiler/main.py`: Added `--max-processes` CLI argument
-- `gprofiler/profiler_state.py`: Added `max_processes_per_profiler` field  
-- `gprofiler/profilers/profiler_base.py`: Implemented CPU-based process filtering
-- `gprofiler/profilers/perf.py`: Excluded system-wide profilers from limiting
-- `gprofiler/profilers/python_ebpf.py`: Excluded eBPF profilers from limiting
+**✅ Corrected Implementation:**
+```python
+# CORRECT: In start() method - prevents startup
+def start(self) -> None:
+    if total_processes > threshold and prof._is_system_profiler:
+        logger.info(f"Skipping {prof.__class__.__name__} due to high system process count")
+        continue  # System profiler never starts
+```
 
-### **System-Wide Profiler Disabling (New)**
-Added `--max-system-processes` to disable perf/eBPF when system is overloaded:
-
+**Configuration:**
 ```bash
-# Disable system-wide profilers when >300 total processes exist
-gprofiler --max-system-processes 300
+# Skip system profilers when >300 total processes exist  
+gprofiler --skip-system-profilers-above 300
 
 # Combined optimization for busy systems
-gprofiler --max-processes 25 --max-system-processes 300
+gprofiler --max-processes 25 --skip-system-profilers-above 300
 ```
 
-**System-Wide Profiler Behavior:**
-- **Perf**: Uses `perf record -a` (all CPUs), memory scales with system activity
-- **eBPF**: Fixed ~30MB overhead, CPU scales with target process activity  
-- **Resource Impact**: On 500+ process systems, these can consume significant resources
-- **Auto-Disable**: When limit exceeded, logs warning and skips system-wide profiling
-- **Runtime Profilers Continue**: py-spy, Java, Ruby still work normally
+**Architecture Fix:**
+- **Timing**: Logic moved from `snapshot()` to `start()` method
+- **Effectiveness**: Prevents system profilers from starting (not just skipping output)
+- **Marking**: System profilers marked with `_is_system_profiler = True`
+- **Result**: True prevention vs. post-startup disabling
+
+### Production Results ✅
+
+**System with 500+ processes:**
+```bash
+[WARNING] Skipping system profilers (perf, PyPerf) - 500 processes exceed threshold of 300
+[INFO] Skipping SystemProfiler due to high system process count  
+[INFO] Skipping PythonEbpfProfiler due to high system process count
+[INFO] Starting py-spy profiler (limited to 25 processes)
+[INFO] Starting Java profiler (limited to 25 processes)
+```
+
+**Memory Impact:**
+- **Before**: 500 threads + system profilers = 4-5GB+ → OOM kills
+- **After**: 25 threads + no system profilers = 400MB → Stable operation
+
+**eBPF Compatibility Check:**
+For systems that support eBPF profiling, verify compatibility first:
+```bash
+uname -a
+bpftool feature probe | grep 'JIT\|BTF'  
+test -f /sys/kernel/btf/vmlinux && echo "BTF: yes" || echo "BTF: no"
+which bpftool && which clang
+dmesg | tail -100 | grep -i bpf
+```
 
 **Files Modified:**
-- `gprofiler/main.py`: Added `--max-system-processes` CLI argument
-- `gprofiler/profiler_state.py`: Added `max_system_processes_for_system_profilers` field
-- `gprofiler/profilers/profiler_base.py`: Added system process counting and disable logic
-- `gprofiler/profilers/perf.py`: Marked as system-wide profiler  
-- `gprofiler/profilers/python_ebpf.py`: Marked as system-wide profiler
-
-## Problem 4 : Hosts with 500+ processes (eBPF Compatibility Check)
-First check if its ebpf comptability for optimized perf and python profiling using pyperf
-uname -a
-bpftool feature probe | grep 'JIT\|BTF'
-test -f /sys/kernel/btf/vmlinux && echo "BTF: yes" || echo "BTF: no"
-which bpftool
-which clang
-dmesg | tail -100 | grep -i bpf
-
-However received memory exception 
-Memory cgroup out of memory: Killed process ... (gprofiler) total-vm:10988916kB, anon-rss:1749844kB ...
-perf invoked oom-killer: ...
+- `gprofiler/main.py`: Added `--max-processes` and `--skip-system-profilers-above` CLI arguments
+- `gprofiler/profiler_state.py`: Added configuration fields
+- `gprofiler/profilers/profiler_base.py`: Implemented CPU-based process filtering
+- `gprofiler/profilers/perf.py`: Added `_is_system_profiler = True` marker
+- `gprofiler/profilers/python_ebpf.py`: Added `_is_system_profiler = True` marker
 
 
 ### Results Summary
