@@ -60,6 +60,15 @@ class PythonEbpfProfiler(ProfilerBase):
     _GET_FS_OFFSET_RESOURCE = "python/pyperf/get_fs_offset"
     _GET_STACK_OFFSET_RESOURCE = "python/pyperf/get_stack_offset"
     _EVENTS_BUFFER_PAGES = 256  # 1mb and needs to be physically contiguous
+    _is_system_profiler = True  # Mark as system profiler for startup filtering
+    
+    def _should_limit_processes(self) -> bool:
+        """eBPF Python profiler is system-wide and should not limit processes."""
+        return False
+    
+    def _is_system_wide_profiler(self) -> bool:
+        """eBPF Python profiler is system-wide and can be disabled on busy systems."""
+        return True
     # 28mb (each symbol is 224 bytes), but needn't be physicall contiguous so don't care
     _SYMBOLS_MAP_SIZE = 131072
     _DUMP_SIGNAL = signal.SIGUSR2
