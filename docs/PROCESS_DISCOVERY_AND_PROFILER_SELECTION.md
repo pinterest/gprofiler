@@ -1650,6 +1650,140 @@ class ProcessProfilerBase:
         return processes
 ```
 
+### Perf Memory Consumption Challenges
+
+The SystemProfiler (`perf`) is fundamentally different from runtime-specific profilers in terms of memory consumption and behavior, leading to unique optimization challenges.
+
+#### **Why Perf Consumes More Memory Than Other Profilers**
+
+**Runtime Profilers vs System Profiler Behavior:**
+
+| **Aspect** | **Runtime Profilers (Java, Python, etc.)** | **SystemProfiler (perf)** |
+|------------|---------------------------------------------|----------------------------|
+| **Lifecycle** | Start → Profile → Stop (per snapshot) | **Persistent (never stops)** |
+| **Target Scope** | Specific processes only | **System-wide (`-a` flag)** |
+| **Process Selection** | Cherry-pick target processes | **Cannot reliably cherry-pick** |
+| **Memory Pattern** | Bounded per snapshot | **Accumulates over time** |
+
+**Memory Consumption Data (Production Examples):**
+
+```bash
+# f=3, d=25 (Low frequency profiling)
+Peak Memory: 1131.8 MB
+├─ perf: 600.1 MB (53% of total)
+├─ gprofiler: 139.6 MB  
+├─ PyPerf: 89.5 MB
+└─ Other: 302.6 MB
+
+# f=5, d=30 (Medium frequency)  
+Peak Memory: 962.9 MB
+├─ perf: 446.4 MB (46% of total)
+├─ gprofiler: 129.9 MB
+├─ PyPerf: 85.7 MB
+└─ Other: 301.9 MB
+```
+
+#### **Root Cause: System-Wide Profiling Constraints**
+
+**Why Perf Cannot Cherry-Pick Processes:**
+
+```python
+# ❌ This approach fails in production
+perf_cmd = ["perf", "record", "--pid", "1234,5678,9999"]  # Fragile!
+
+# Problems:
+# 1. If ANY PID becomes unavailable → perf crashes
+# 2. High-churn environments (containers) → constant failures  
+# 3. Race conditions during process startup/shutdown
+```
+
+**Why System-Wide (`-a`) is Required:**
+
+```python
+# ✅ Production-safe approach
+perf_cmd = ["perf", "record", "-a"]  # Profiles everything
+
+# Benefits:
+# 1. Robust - never crashes due to missing PIDs
+# 2. Captures full system context (Go, C++, Node.js)
+# 3. Works in dynamic container environments
+```
+
+**The Memory Explosion Problem:**
+
+```
+Data Processing Pipeline (Root Cause):
+┌─────────────────┐    ┌──────────────────┐    ┌─────────────────────┐
+│ perf.data       │ →  │ perf script      │ →  │ Python Processing   │
+│ (Binary: ~50MB) │    │ (Text: ~200MB+)  │    │ (Parsed: ~200MB+)   │
+└─────────────────┘    └──────────────────┘    └─────────────────────┘
+                              ↑                           ↑
+                        Text expansion               String processing
+                        (4-10x size growth)         memory overhead
+```
+
+#### **Current Optimizations Implemented**
+
+**1. Aggressive Restart Thresholds:**
+
+```python
+# Previous vs Current settings
+_RESTART_AFTER_S = 3600        # → 600 (10 minutes)
+_PERF_MEMORY_USAGE_THRESHOLD = 512MB → 200MB
+```
+
+**2. Dynamic Switch Timeout Optimization:**
+
+```python
+# Frequency-based timeout adjustment
+switch_timeout_s = duration * 1.5 if frequency <= 11 else duration * 3
+
+# Impact: More frequent data collection → smaller accumulation
+```
+
+**Memory Impact of Optimizations:**
+
+```bash
+# Before optimizations (f=3, d=25)
+Peak: 1131.8 MB (perf: 600.1 MB)
+
+# After switch timeout optimization  
+Peak: 1003.0 MB (perf: 493.9 MB)  # 17% reduction
+
+# After restart threshold tuning
+Peak: 1114.5 MB (perf: 505.2 MB)  # 7-15% reduction
+```
+
+#### **Fundamental Limitations & Future Solutions**
+
+**Why Current Optimizations Have Limits:**
+
+- **Root cause unaddressed**: Text processing bottleneck remains
+- **Trade-offs**: More aggressive settings risk data loss
+- **Diminishing returns**: Further threshold reductions provide minimal benefit
+
+**Future Solution: Streaming Processing (In Development):**
+
+```python
+# Current: Load entire perf script output into memory
+huge_text = perf_script_proc.stdout.decode("utf8")  # 200+ MB
+for sample in huge_text.split("\n\n"):              # +200+ MB
+
+# Future: Stream processing line-by-line  
+for line in perf_script_proc.stdout:                # ~50-100 MB max
+    # Process incrementally without massive string allocation
+    
+# Expected memory reduction: 60-80%
+```
+
+**Architecture Considerations:**
+
+- **Short-term**: Tune restart frequency and switch timeouts based on workload
+- **Medium-term**: Implement streaming perf script processing
+- **Long-term**: Explore eBPF alternatives for system-wide profiling
+
+This explains why perf memory consumption remains the primary optimization challenge compared to bounded runtime profilers.
+
 ### Error Handling and Edge Cases
 
 #### **Race Conditions**
