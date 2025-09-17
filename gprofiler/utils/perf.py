@@ -120,10 +120,15 @@ def discover_appropriate_perf_event(
                 max_cgroups=max_cgroups,
             )
             perf_process.start()
-            parsed_perf_script = parse_perf_script(perf_process.wait_and_script())
+            perf_output = perf_process.wait_and_script()
+            logger.debug(f"Perf event {event.name} discovery output length: {len(perf_output) if perf_output else 0}")
+            parsed_perf_script = parse_perf_script(perf_output)
             if len(parsed_perf_script) > 0:
+                logger.debug(f"Perf event {event.name} discovery successful, found {len(parsed_perf_script)} samples")
                 # `perf script` isn't empty, we'll use this event.
                 return event
+            else:
+                logger.debug(f"Perf event {event.name} discovery failed, no samples collected")
         except Exception as e:  # pylint: disable=broad-except
             # Check if this was a segfault in perf script, log it appropriately
             exc_name = type(e).__name__

@@ -368,12 +368,12 @@ On hosts with hundreds of processes, gProfiler would attempt to profile ALL matc
 
 **Root Cause**: No limit on concurrent runtime profilers (py-spy, Java, Ruby, etc.)
 
-### Solution 1: Runtime Profiler Limiting (`--max-processes`)
+### Solution 1: Runtime Profiler Limiting (`--max-processes-runtime-profiler`)
 
 **Configuration:**
 ```bash
 # Limit to top 50 processes by CPU usage (0=unlimited)
-gprofiler --max-processes 50
+gprofiler --max-processes-runtime-profiler 50
 
 # Example: Host with 200 Python processes → profiles only top 50 by CPU
 ```
@@ -397,15 +397,16 @@ gprofiler --max-processes 50
 
 ```bash
 # If you need perf data on busy systems, use cgroup-based limiting:
-gprofiler --max-processes 50 --perf-use-cgroups --perf-max-cgroups 30  # ✅ Focused profiling
+gprofiler --max-processes-runtime-profiler 50 --perf-use-cgroups --perf-max-cgroups 30  # ✅ Focused profiling
 
 # Only disable perf entirely if you don't need the data:
-gprofiler --max-processes 50 --skip-system-profilers-above 500  # ⚠️ Zero perf coverage
+gprofiler --max-processes-runtime-profiler 50 --skip-system-profilers-above 500  # ⚠️ Zero perf coverage
 ```
 
 **Technical Innovation:**
 - **Container-Aware Selection**: Automatically identifies top N containers by resource usage
 - **Reliable Profiling**: Uses `perf -G cgroup1,cgroup2,...` instead of fragile PID lists
+- **Smart Conflict Resolution**: When `--perf-use-cgroups --perf-max-cgroups N` is specified, perf runs even if `--skip-system-profilers-above` threshold is exceeded (user intent honored)
 - **Memory Controlled**: Limits perf scope without losing critical data
 - **Zero Crashes**: Eliminates PID-related perf failures in dynamic environments
 
@@ -454,7 +455,7 @@ def start(self) -> None:
 gprofiler --skip-system-profilers-above 300
 
 # Combined optimization for busy systems
-gprofiler --max-processes 25 --skip-system-profilers-above 300
+gprofiler --max-processes-runtime-profiler 25 --skip-system-profilers-above 300
 ```
 
 **Architecture Fix:**
@@ -470,7 +471,7 @@ gprofiler --max-processes 25 --skip-system-profilers-above 300
 **Option A: Need Perf Data**
 ```bash
 gprofiler \
-  --max-processes 50 \
+  --max-processes-runtime-profiler 50 \
   --perf-use-cgroups \
   --perf-max-cgroups 30
 
@@ -483,7 +484,7 @@ gprofiler \
 **Option B: Don't Need Perf Data**
 ```bash
 gprofiler \
-  --max-processes 50 \
+  --max-processes-runtime-profiler 50 \
   --skip-system-profilers-above 300
 
 # Memory allocation:
@@ -496,7 +497,7 @@ gprofiler \
 **Conservative Configuration**
 ```bash
 gprofiler \
-  --max-processes 30 \
+  --max-processes-runtime-profiler 30 \
   --perf-use-cgroups \
   --perf-max-cgroups 20
 
@@ -510,7 +511,7 @@ gprofiler \
 **Comprehensive Profiling**
 ```bash
 gprofiler \
-  --max-processes 100 \
+  --max-processes-runtime-profiler 100 \
   --perf-use-cgroups \
   --perf-max-cgroups 50
 
@@ -522,7 +523,7 @@ gprofiler \
 **Fallback to Process Limiting Only**
 ```bash
 gprofiler \
-  --max-processes 40 \
+  --max-processes-runtime-profiler 40 \
   --skip-system-profilers-above 400
 
 # For systems without container runtime
@@ -571,7 +572,7 @@ dmesg | tail -100 | grep -i bpf
 ```
 
 **Files Modified:**
-- `gprofiler/main.py`: Added `--max-processes` and `--skip-system-profilers-above` CLI arguments
+- `gprofiler/main.py`: Added `--max-processes-runtime-profiler` and `--skip-system-profilers-above` CLI arguments
 - `gprofiler/profiler_state.py`: Added configuration fields
 - `gprofiler/profilers/profiler_base.py`: Implemented CPU-based process filtering
 - `gprofiler/profilers/perf.py`: Added `_is_system_profiler = True` marker

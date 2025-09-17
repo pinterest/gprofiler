@@ -96,6 +96,8 @@ class PerfProcess:
             try:
                 top_cgroups = get_top_cgroup_names_for_perf(max_cgroups)
                 if top_cgroups:
+                    # Cgroup monitoring requires system-wide mode (-a)
+                    self._pid_args.append("-a")
                     self._cgroup_args.extend(["-G", ",".join(top_cgroups)])
                     logger.info(f"Using cgroup-based profiling with {len(top_cgroups)} top cgroups: {top_cgroups[:3]}{'...' if len(top_cgroups) > 3 else ''}")
                 else:
@@ -139,10 +141,10 @@ class PerfProcess:
                 "-m",
                 str(self._MMAP_SIZES[self._type]),
             ]
+            + self._extra_args  # Events must come before cgroups
             + self._pid_args
             + self._cgroup_args
             + (["-k", "1"] if self._inject_jit else [])
-            + self._extra_args
         )
 
     def start(self) -> None:
@@ -150,8 +152,11 @@ class PerfProcess:
         # remove old files, should they exist from previous runs
         remove_path(self._output_path, missing_ok=True)
         
+        perf_cmd = self._get_perf_cmd()
+        logger.debug(f"{self._log_name} command: {' '.join(perf_cmd)}")
+        
         try:
-            process = start_process(self._get_perf_cmd())
+            process = start_process(perf_cmd)
         except CalledProcessError as e:
             # Check if this is a PID-related failure
             if "--pid" in self._pid_args and _is_pid_related_error(str(e)):

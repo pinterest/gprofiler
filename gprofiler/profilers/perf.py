@@ -185,6 +185,20 @@ class SystemProfiler(ProfilerBase):
     """
     _is_system_profiler = True  # Mark as system profiler for startup filtering
     
+    def should_skip_due_to_system_threshold(self) -> bool:
+        """
+        Override system profiler skipping logic when cgroup-based profiling is explicitly requested.
+        
+        If the user has explicitly configured cgroup-based profiling with a specific limit,
+        we should honor that intent and not disable perf due to system-wide process thresholds.
+        """
+        # If cgroup-based profiling is explicitly requested with a limit, don't skip
+        if self._perf_use_cgroups and self._perf_max_cgroups > 0:
+            return False
+        
+        # Otherwise, use the default system profiler skipping logic
+        return True
+    
     def _should_limit_processes(self) -> bool:
         """Perf is a system-wide profiler and should not limit processes."""
         return False
@@ -233,6 +247,7 @@ class SystemProfiler(ProfilerBase):
         # Initialize perf process attributes to None - they'll be created in start() if not skipped
         self._perf_fp: Optional[PerfProcess] = None
         self._perf_dwarf: Optional[PerfProcess] = None
+        self._is_noop = False  # Track if this profiler has been disabled
 
     def start(self) -> None:
         # Perform perf event discovery and create PerfProcess instances
@@ -250,28 +265,31 @@ class SystemProfiler(ProfilerBase):
             logger.debug("Discovered perf event", discovered_perf_event=discovered_perf_event.name)
             extra_args.extend(discovered_perf_event.perf_extra_args())
         except PerfNoSupportedEvent:
-            # Provide helpful message based on the profiling mode
+            # Handle perf failures gracefully by converting to NoopProfiler
             if self._perf_use_cgroups:
-                logger.critical(
+                logger.warning(
                     "Failed to determine perf event to use with cgroup-based profiling. "
                     "This is likely due to GPU machine compatibility issues where perf segfaults during event discovery. "
                     "Perf profiler will be disabled. Other profilers will continue. "
-                    "On GPU machines, consider using '--perf-mode disabled' to avoid this issue."
+                    "Use '--perf-mode disabled' to avoid this warning."
                 )
             elif self._profiler_state.processes_to_profile is not None:
-                logger.critical(
+                logger.warning(
                     "Failed to determine perf event to use with target PIDs. "
                     "Target processes may have exited or be invalid. "
                     "Perf profiler will be disabled. Other profilers will continue. "
                     "Consider using system-wide profiling (remove --pids) or '--perf-mode disabled'."
                 )
             else:
-                logger.critical(
+                logger.warning(
                     "Failed to determine perf event to use. "
                     "This is likely due to GPU machine compatibility issues where perf segfaults. "
                     "Perf profiler will be disabled. Other profilers will continue."
                 )
-            raise
+            
+            # Convert this profiler to a NoopProfiler to avoid further issues
+            self._convert_to_noop()
+            return
 
         # Create PerfProcess instances now that we know we're actually starting
         if self._perf_mode in ("fp", "smart"):
@@ -393,6 +411,33 @@ class SystemProfiler(ProfilerBase):
         else:
             appid = None
         return ProfileData(stacks, appid, metadata, self._profiler_state.get_container_name(pid))
+
+    def _convert_to_noop(self) -> None:
+        """Convert this profiler to a no-op state when perf fails to start."""
+        self._is_noop = True
+        # Clean up any existing perf processes
+        if self._perf_fp is not None:
+            try:
+                self._perf_fp.stop()
+            except Exception:
+                pass
+            self._perf_fp = None
+        if self._perf_dwarf is not None:
+            try:
+                self._perf_dwarf.stop()
+            except Exception:
+                pass
+            self._perf_dwarf = None
+
+    def stop(self) -> None:
+        if self._is_noop:
+            return
+        super().stop()
+
+    def snapshot(self) -> ProcessToProfileData:
+        if self._is_noop:
+            return {}
+        return super().snapshot()
 
 
 class PerfMetadata(ApplicationMetadata):

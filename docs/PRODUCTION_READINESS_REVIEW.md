@@ -549,10 +549,10 @@ def stop(self) -> None:
 
 **Root Cause Analysis**: gProfiler attempted to profile ALL matching processes simultaneously without resource constraints, combined with continuous system-wide profilers running regardless of system load.
 
-**Solution 1: Runtime Profiler Limiting (`--max-processes`)**
+**Solution 1: Runtime Profiler Limiting (`--max-processes-runtime-profiler`)**
 ```bash
 # Limit to top 50 processes by CPU usage (0=unlimited)  
-gprofiler --max-processes 50
+gprofiler --max-processes-runtime-profiler 50
 
 # Example: Host with 200 Python processes → profiles only top 50 by CPU
 ```
@@ -568,6 +568,8 @@ def _get_top_processes_by_cpu(self, processes: List[Process], max_processes: int
 ```
 
 **Solution 2: Cgroup-Based System Profiling (`--perf-use-cgroups`) - FOR WHEN YOU NEED PERF DATA**
+
+> **🎯 Smart Conflict Resolution**: When you explicitly request cgroup-based profiling with `--perf-use-cgroups --perf-max-cgroups N`, perf will run even if `--skip-system-profilers-above` threshold is exceeded. Your explicit intent is honored over system-wide thresholds.
 
 **🎯 Use Case**: When you still need perf profiling on busy systems but want to limit resource usage:
 
@@ -632,7 +634,7 @@ def start(self) -> None:
 ```bash
 # Keep perf data with controlled resource usage
 gprofiler \
-  --max-processes 50 \
+  --max-processes-runtime-profiler 50 \
   --perf-use-cgroups \
   --perf-max-cgroups 30
 
@@ -646,7 +648,7 @@ gprofiler \
 ```bash
 # Conservative limits for 2GB memory systems
 gprofiler \
-  --max-processes 30 \
+  --max-processes-runtime-profiler 30 \
   --perf-use-cgroups \
   --perf-max-cgroups 20
 ```
@@ -655,7 +657,7 @@ gprofiler \
 ```bash
 # More comprehensive profiling
 gprofiler \
-  --max-processes 100 \
+  --max-processes-runtime-profiler 100 \
   --perf-use-cgroups \
   --perf-max-cgroups 50
 ```
@@ -663,7 +665,7 @@ gprofiler \
 **Don't Need Perf Data - Minimal Resource Usage:**
 ```bash
 # Disable system profilers entirely, keep only runtime profilers
-gprofiler --max-processes 50 --skip-system-profilers-above 300
+gprofiler --max-processes-runtime-profiler 50 --skip-system-profilers-above 300
 
 # Result:
 # - Runtime profilers only (py-spy, Java, etc.)
@@ -674,7 +676,7 @@ gprofiler --max-processes 50 --skip-system-profilers-above 300
 **Legacy/Non-Containerized Systems:**
 ```bash
 # For systems without meaningful cgroup structure
-gprofiler --max-processes 40 --skip-system-profilers-above 400
+gprofiler --max-processes-runtime-profiler 40 --skip-system-profilers-above 400
 ```
 
 **Production Results**: ✅ **Validated under extreme load**

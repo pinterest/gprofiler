@@ -314,10 +314,19 @@ class GProfiler:
 
         for prof in list(self.all_profilers):
             try:
-                # Skip system profilers if threshold exceeded
+                # Skip system profilers if threshold exceeded, unless they override the logic
                 if skip_system_profilers and hasattr(prof, '_is_system_profiler') and prof._is_system_profiler:
-                    logger.info(f"Skipping {prof.__class__.__name__} due to high system process count")
-                    continue
+                    # Check if the profiler has custom logic for system threshold skipping
+                    if hasattr(prof, 'should_skip_due_to_system_threshold'):
+                        should_skip = prof.should_skip_due_to_system_threshold()
+                    else:
+                        should_skip = True
+                    
+                    if should_skip:
+                        logger.info(f"Skipping {prof.__class__.__name__} due to high system process count")
+                        continue
+                    else:
+                        logger.info(f"Not skipping {prof.__class__.__name__} despite high system process count (cgroup-based profiling requested)")
                     
                 prof.start()
             except Exception:
@@ -679,7 +688,7 @@ def parse_cmd_args() -> configargparse.Namespace:
         " given multiple times will append pids to one list",
     )
     parser.add_argument(
-        "--max-processes",
+        "--max-processes-runtime-profiler",
         dest="max_processes_per_profiler",
         type=positive_integer,
         default=0,
