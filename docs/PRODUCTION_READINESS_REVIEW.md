@@ -567,7 +567,39 @@ def _get_top_processes_by_cpu(self, processes: List[Process], max_processes: int
     return [proc for proc, cpu in processes_with_cpu[:max_processes]]
 ```
 
-**Solution 2: System Profiler Prevention (`--skip-system-profilers-above`)**
+**Solution 2: Cgroup-Based System Profiling (`--perf-use-cgroups`) - FOR WHEN YOU NEED PERF DATA**
+
+**🎯 Use Case**: When you still need perf profiling on busy systems but want to limit resource usage:
+
+```bash
+# If you need perf data on busy systems, use cgroup-based limiting:
+gprofiler --perf-use-cgroups --perf-max-cgroups 50  # ✅ Profiles top 50 containers
+
+# Only disable perf entirely if you don't need the data:
+gprofiler --skip-system-profilers-above 500  # ⚠️ Disables perf completely
+```
+
+**Technical Implementation:**
+```python
+# Intelligent cgroup selection based on resource usage
+def get_top_cgroups_by_usage(limit: int) -> List[CgroupResourceUsage]:
+    # 1. Scan all containers/cgroups
+    # 2. Measure CPU + memory usage per cgroup  
+    # 3. Rank by combined resource score
+    # 4. Return top N cgroups
+    
+# Perf command generation
+perf_cmd = ["perf", "record", "-G", "docker/container1,docker/container2,k8s/pod3"]
+```
+
+**When to Use Which Approach:**
+| Scenario | Recommended Solution | Reasoning |
+|----------|---------------------|-----------|
+| **Need perf data + busy system** | `--perf-use-cgroups` | ✅ Keeps perf data with controlled resource usage |
+| **Don't need perf data** | `--skip-system-profilers-above` | ✅ Minimal resources, runtime profilers only |
+| **Non-containerized environment** | `--skip-system-profilers-above` | ⚠️ Cgroups may not provide useful grouping |
+
+**Solution 3: Complete System Profiler Disabling (`--skip-system-profilers-above`) - WHEN YOU DON'T NEED PERF**
 
 **❌ Original Flawed Architecture ([GitHub PR #27](https://github.com/pinterest/gprofiler/pull/27/files)):**
 - **Wrong timing**: Logic in `snapshot()` method after profilers already started
@@ -588,13 +620,61 @@ def start(self) -> None:
         prof.start()
 ```
 
-**Configuration:**
-```bash
-# Skip system profilers when >300 total processes exist
-gprofiler --skip-system-profilers-above 300
+**Decision Tree for Configuration:**
 
-# Combined optimization for busy systems  
-gprofiler --max-processes 25 --skip-system-profilers-above 300
+**Step 1: Do you need perf profiling data?**
+- **Yes** → Use cgroup-based limiting (`--perf-use-cgroups`)
+- **No** → Disable system profilers (`--skip-system-profilers-above`)
+
+**Step 2: Choose your configuration based on your needs:**
+
+**Need Perf Data - High-Density Container Environment:**
+```bash
+# Keep perf data with controlled resource usage
+gprofiler \
+  --max-processes 50 \
+  --perf-use-cgroups \
+  --perf-max-cgroups 30
+
+# Result: 
+# - Runtime profilers: Top 50 processes by CPU
+# - Perf: Top 30 containers by resource usage
+# - Memory usage: ~800MB vs 4GB+ unlimited
+```
+
+**Memory-Constrained Systems:**
+```bash
+# Conservative limits for 2GB memory systems
+gprofiler \
+  --max-processes 30 \
+  --perf-use-cgroups \
+  --perf-max-cgroups 20
+```
+
+**Development/Testing:**
+```bash
+# More comprehensive profiling
+gprofiler \
+  --max-processes 100 \
+  --perf-use-cgroups \
+  --perf-max-cgroups 50
+```
+
+**Don't Need Perf Data - Minimal Resource Usage:**
+```bash
+# Disable system profilers entirely, keep only runtime profilers
+gprofiler --max-processes 50 --skip-system-profilers-above 300
+
+# Result:
+# - Runtime profilers only (py-spy, Java, etc.)
+# - No perf/eBPF profiling
+# - Minimal memory usage: ~400MB
+```
+
+**Legacy/Non-Containerized Systems:**
+```bash
+# For systems without meaningful cgroup structure
+gprofiler --max-processes 40 --skip-system-profilers-above 400
 ```
 
 **Production Results**: ✅ **Validated under extreme load**

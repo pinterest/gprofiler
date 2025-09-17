@@ -20,6 +20,11 @@ from gprofiler.utils import (
     wait_event,
     wait_for_file_by_prefix,
 )
+from gprofiler.utils.cgroup_utils import (
+    get_top_cgroup_names_for_perf,
+    validate_perf_cgroup_support,
+    is_cgroup_available
+)
 
 
 logger = get_logger_adapter(__name__)
@@ -71,6 +76,8 @@ class PerfProcess:
         extra_args: List[str],
         processes_to_profile: Optional[List[Process]],
         switch_timeout_s: int,
+        use_cgroups: bool = False,
+        max_cgroups: int = 50,
     ):
         self._start_time = 0.0
         self._frequency = frequency
@@ -78,12 +85,33 @@ class PerfProcess:
         self._output_path = output_path
         self._type = "dwarf" if is_dwarf else "fp"
         self._inject_jit = inject_jit
+        self._use_cgroups = use_cgroups
+        self._max_cgroups = max_cgroups
         self._pid_args = []
-        if processes_to_profile is not None:
+        self._cgroup_args = []
+        
+        # Determine profiling strategy
+        if use_cgroups and is_cgroup_available() and validate_perf_cgroup_support():
+            # Use cgroup-based profiling for better reliability
+            try:
+                top_cgroups = get_top_cgroup_names_for_perf(max_cgroups)
+                if top_cgroups:
+                    self._cgroup_args.extend(["-G", ",".join(top_cgroups)])
+                    logger.info(f"Using cgroup-based profiling with {len(top_cgroups)} top cgroups: {top_cgroups[:3]}{'...' if len(top_cgroups) > 3 else ''}")
+                else:
+                    logger.warning("No cgroups found with resource usage, falling back to system-wide profiling")
+                    self._pid_args.append("-a")
+            except Exception as e:
+                logger.warning(f"Failed to get top cgroups: {e}, falling back to system-wide profiling")
+                self._pid_args.append("-a")
+        elif processes_to_profile is not None:
+            # Traditional PID-based profiling
             self._pid_args.append("--pid")
             self._pid_args.append(",".join([str(process.pid) for process in processes_to_profile]))
         else:
+            # System-wide profiling
             self._pid_args.append("-a")
+            
         self._extra_args = extra_args
         self._switch_timeout_s = switch_timeout_s
         self._process: Optional[Popen] = None
@@ -112,6 +140,7 @@ class PerfProcess:
                 str(self._MMAP_SIZES[self._type]),
             ]
             + self._pid_args
+            + self._cgroup_args
             + (["-k", "1"] if self._inject_jit else [])
             + self._extra_args
         )

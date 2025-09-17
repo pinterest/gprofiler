@@ -156,6 +156,21 @@ def merge_global_perfs(
             action="store_false",
             dest="perf_memory_restart",
         ),
+        ProfilerArgument(
+            "--perf-use-cgroups",
+            help="Use cgroup-based profiling instead of PID-based profiling for better reliability. "
+            "Profiles the top N cgroups by resource usage, avoiding crashes from invalid PIDs.",
+            action="store_true",
+            default=False,
+            dest="perf_use_cgroups",
+        ),
+        ProfilerArgument(
+            "--perf-max-cgroups",
+            help="Maximum number of cgroups to profile when using --perf-use-cgroups. Default: %(default)s",
+            type=int,
+            default=50,
+            dest="perf_max_cgroups",
+        ),
     ],
     disablement_help="Disable the global perf of processes,"
     " and instead only concatenate runtime-specific profilers results",
@@ -188,6 +203,8 @@ class SystemProfiler(ProfilerBase):
         perf_inject: bool,
         perf_node_attach: bool,
         perf_memory_restart: bool,
+        perf_use_cgroups: bool = False,
+        perf_max_cgroups: int = 50,
         min_duration: int = 10,
     ):
         super().__init__(frequency, duration, profiler_state, min_duration)
@@ -202,6 +219,8 @@ class SystemProfiler(ProfilerBase):
         self._perf_mode = perf_mode
         self._perf_dwarf_stack_size = perf_dwarf_stack_size
         self._perf_inject = perf_inject
+        self._perf_use_cgroups = perf_use_cgroups
+        self._perf_max_cgroups = perf_max_cgroups
         # allow gprofiler to be delayed up to 3 intervals before timing out.
         # For low-frequency profiling, use shorter switch intervals to reduce memory buildup
         # But maintain reasonable safety margin to avoid premature rotations
@@ -225,12 +244,21 @@ class SystemProfiler(ProfilerBase):
                 Path(self._profiler_state.storage_dir),
                 self._profiler_state.stop_event,
                 self._profiler_state.processes_to_profile,
+                use_cgroups=self._perf_use_cgroups,
+                max_cgroups=self._perf_max_cgroups,
             )
             logger.debug("Discovered perf event", discovered_perf_event=discovered_perf_event.name)
             extra_args.extend(discovered_perf_event.perf_extra_args())
         except PerfNoSupportedEvent:
-            # If PID targeting failed during discovery, provide helpful message
-            if self._profiler_state.processes_to_profile is not None:
+            # Provide helpful message based on the profiling mode
+            if self._perf_use_cgroups:
+                logger.critical(
+                    "Failed to determine perf event to use with cgroup-based profiling. "
+                    "This is likely due to GPU machine compatibility issues where perf segfaults during event discovery. "
+                    "Perf profiler will be disabled. Other profilers will continue. "
+                    "On GPU machines, consider using '--perf-mode disabled' to avoid this issue."
+                )
+            elif self._profiler_state.processes_to_profile is not None:
                 logger.critical(
                     "Failed to determine perf event to use with target PIDs. "
                     "Target processes may have exited or be invalid. "
@@ -238,7 +266,11 @@ class SystemProfiler(ProfilerBase):
                     "Consider using system-wide profiling (remove --pids) or '--perf-mode disabled'."
                 )
             else:
-                logger.critical("Failed to determine perf event to use")
+                logger.critical(
+                    "Failed to determine perf event to use. "
+                    "This is likely due to GPU machine compatibility issues where perf segfaults. "
+                    "Perf profiler will be disabled. Other profilers will continue."
+                )
             raise
 
         # Create PerfProcess instances now that we know we're actually starting
@@ -252,6 +284,8 @@ class SystemProfiler(ProfilerBase):
                 extra_args=extra_args,
                 processes_to_profile=self._profiler_state.processes_to_profile,
                 switch_timeout_s=self._switch_timeout_s,
+                use_cgroups=self._perf_use_cgroups,
+                max_cgroups=self._perf_max_cgroups,
             )
             self._perfs.append(self._perf_fp)
         else:
@@ -268,6 +302,8 @@ class SystemProfiler(ProfilerBase):
                 extra_args=dwarf_extra_args,
                 processes_to_profile=self._profiler_state.processes_to_profile,
                 switch_timeout_s=self._switch_timeout_s,
+                use_cgroups=self._perf_use_cgroups,
+                max_cgroups=self._perf_max_cgroups,
             )
             self._perfs.append(self._perf_dwarf)
         else:
