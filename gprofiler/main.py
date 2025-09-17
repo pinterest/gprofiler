@@ -682,7 +682,7 @@ def parse_cmd_args() -> configargparse.Namespace:
         "--max-processes",
         dest="max_processes_per_profiler",
         type=positive_integer,
-        default=0,
+        default=50,
         help="Maximum number of processes to profile per runtime profiler (0=unlimited). "
         "When exceeded, profiles only the top N processes by CPU usage. "
         "Does not affect system-wide profilers (perf, eBPF). Default: %(default)s",

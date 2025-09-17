@@ -209,8 +209,8 @@ class DynamicGProfilerManager:
         self.heartbeat_interval = 30  # seconds
     
     def scan_available_pids(self) -> Dict[str, List[int]]:
-        """Scan the host for all available PIDs organized by language/profiler type"""
-        available_pids = {}
+        """Scan the host and return top-N PIDs by CPU, grouped by language."""
+        available_pids: Dict[str, List[int]] = {}
         
         try:
             # Import regex patterns from granulate_utils
@@ -226,31 +226,70 @@ class DynamicGProfilerManager:
                 'php': r"^.+/(lib)?php[^/]*$",  # PHP pattern
             }
             
-            # Scan for each language
+            # First, discover processes per language
+            processes_by_language: Dict[str, List[Process]] = {}
             for language, pattern in profiler_patterns.items():
                 try:
                     if language == 'python':
-                        # Python uses both pgrep_maps and pgrep_exe on Windows
                         from gprofiler.platform import is_windows
-                        if is_windows():
-                            processes = pgrep_exe("python")
-                        else:
-                            processes = pgrep_maps(pattern)
+                        processes = pgrep_exe("python") if is_windows() else pgrep_maps(pattern)
                     else:
-                        # Other languages use pgrep_maps
                         processes = pgrep_maps(pattern)
-                    
-                    pids = [p.pid for p in processes]
-                    
-                    # Only include languages that have running processes
-                    if pids:
-                        available_pids[language] = sorted(pids)
-                        logger.debug(f"Found {len(pids)} {language} processes")
-                    
+
+                    if processes:
+                        processes_by_language[language] = processes
+                        logger.debug(f"Found {len(processes)} {language} processes")
                 except Exception as e:
-                    # Don't let individual profiler errors break the entire scan
                     logger.debug(f"Error scanning {language} processes: {e}")
                     continue
+
+            # Flatten and deduplicate by PID across languages
+            pid_to_process: Dict[int, Process] = {}
+            pid_to_language: Dict[int, str] = {}
+            for language, processes in processes_by_language.items():
+                for proc in processes:
+                    pid = getattr(proc, "pid", None)
+                    if pid is None:
+                        continue
+                    if pid in pid_to_process:
+                        continue
+                    pid_to_process[pid] = proc
+                    pid_to_language[pid] = language
+
+            # Determine selection limit (0 means unlimited)
+            max_processes = getattr(self.base_args, "max_processes_per_profiler", 50)
+
+            if max_processes and max_processes > 0:
+                # Measure CPU percent for each unique process (short interval)
+                pid_cpu_pairs = []
+                for pid, proc in pid_to_process.items():
+                    try:
+                        cpu_percent = proc.cpu_percent(interval=0.1)
+                    except Exception:
+                        cpu_percent = 0.0
+                    pid_cpu_pairs.append((pid, cpu_percent))
+
+                # Select top-N by CPU
+                pid_cpu_pairs.sort(key=lambda x: x[1], reverse=True)
+                selected = pid_cpu_pairs[:max_processes]
+                selected_pids = {pid for pid, _ in selected}
+                pid_to_cpu = {pid: cpu for pid, cpu in selected}
+
+                # Group back by language, sorted by CPU within language
+                for pid in selected_pids:
+                    language = pid_to_language.get(pid)
+                    if language is None:
+                        continue
+                    available_pids.setdefault(language, []).append(pid)
+
+                for language, pids in available_pids.items():
+                    pids.sort(key=lambda p: pid_to_cpu.get(p, 0.0), reverse=True)
+            else:
+                # Unlimited: return all PIDs discovered per language, sorted
+                for language, processes in processes_by_language.items():
+                    pids = sorted([p.pid for p in processes])
+                    if pids:
+                        available_pids[language] = pids
             
             if available_pids:
                 total_pids = sum(len(pids) for pids in available_pids.values())
