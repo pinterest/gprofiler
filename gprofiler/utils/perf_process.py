@@ -123,6 +123,28 @@ class PerfProcess:
         return f"perf ({self._type} mode)"
 
     def _get_perf_cmd(self) -> List[str]:
+        # When using cgroups, perf requires events to be specified before cgroups.
+        # If no explicit events are provided but cgroups are used, add default event.
+        # For multiple cgroups, perf requires one event per cgroup.
+        extra_args = self._extra_args
+        if self._cgroup_args and not extra_args:
+            # Count the number of cgroups (they are comma-separated in -G argument)
+            cgroup_arg = None
+            for i, arg in enumerate(self._cgroup_args):
+                if arg == "-G" and i + 1 < len(self._cgroup_args):
+                    cgroup_arg = self._cgroup_args[i + 1]
+                    break
+            
+            if cgroup_arg:
+                num_cgroups = len(cgroup_arg.split(","))
+                # Add one event per cgroup (perf requirement)
+                extra_args = []
+                for _ in range(num_cgroups):
+                    extra_args.extend(["-e", "cycles"])
+            else:
+                # Fallback: single event
+                extra_args = ["-e", "cycles"]
+            
         return (
             [
                 perf_path(),
@@ -141,7 +163,7 @@ class PerfProcess:
                 "-m",
                 str(self._MMAP_SIZES[self._type]),
             ]
-            + self._extra_args  # Events must come before cgroups
+            + extra_args  # Events must come before cgroups
             + self._pid_args
             + self._cgroup_args
             + (["-k", "1"] if self._inject_jit else [])

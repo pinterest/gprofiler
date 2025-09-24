@@ -368,6 +368,10 @@ class SystemProfiler(ProfilerBase):
         return None
 
     def snapshot(self) -> ProcessToProfileData:
+        # Check if profiler is in noop state
+        if self._is_noop:
+            return {}
+            
         # Check if profiler was actually started (not skipped due to --skip-system-profilers-above)
         if self._perf_fp is None and self._perf_dwarf is None:
             logger.debug("SystemProfiler snapshot called but profiler was never started (likely skipped due to high process count)")
@@ -433,11 +437,6 @@ class SystemProfiler(ProfilerBase):
         if self._is_noop:
             return
         super().stop()
-
-    def snapshot(self) -> ProcessToProfileData:
-        if self._is_noop:
-            return {}
-        return super().snapshot()
 
 
 class PerfMetadata(ApplicationMetadata):

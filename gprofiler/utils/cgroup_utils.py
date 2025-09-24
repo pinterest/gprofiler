@@ -182,10 +182,40 @@ def cgroup_to_perf_name(cgroup_path: str) -> str:
     return os.path.basename(cgroup_path)
 
 
+def validate_cgroup_perf_event_access(cgroup_name: str) -> bool:
+    """Check if a cgroup exists in the perf_event controller"""
+    perf_event_path = f"/sys/fs/cgroup/perf_event/{cgroup_name}"
+    return os.path.exists(perf_event_path) and os.path.isdir(perf_event_path)
+
+
 def get_top_cgroup_names_for_perf(limit: int = 50) -> List[str]:
-    """Get top cgroup names in the format needed for perf -G option"""
+    """Get top cgroup names in the format needed for perf -G option
+    
+    Only returns cgroups that exist in both resource controllers (memory/cpu) 
+    and the perf_event controller, since perf needs access to both.
+    """
     top_cgroups = get_top_cgroups_by_usage(limit)
-    return [cgroup_to_perf_name(cgroup.cgroup_path) for cgroup in top_cgroups]
+    valid_cgroups = []
+    seen_names = set()  # Track unique cgroup names to avoid duplicates
+    
+    for cgroup in top_cgroups:
+        cgroup_name = cgroup_to_perf_name(cgroup.cgroup_path)
+        
+        # Skip duplicates (same cgroup from different controllers)
+        if cgroup_name in seen_names:
+            logger.debug(f"Skipping duplicate cgroup name {cgroup_name}")
+            continue
+            
+        if validate_cgroup_perf_event_access(cgroup_name):
+            valid_cgroups.append(cgroup_name)
+            seen_names.add(cgroup_name)
+        else:
+            logger.debug(f"Skipping cgroup {cgroup_name} - not available in perf_event controller")
+    
+    if len(valid_cgroups) < len(top_cgroups):
+        logger.info(f"Filtered cgroups for perf: {len(valid_cgroups)}/{len(top_cgroups)} cgroups have perf_event access")
+    
+    return valid_cgroups
 
 
 def validate_perf_cgroup_support() -> bool:
