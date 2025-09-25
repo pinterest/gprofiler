@@ -524,6 +524,49 @@ def is_profiler_disabled(profile_mode: str) -> bool:
     return profile_mode in ("none", "disabled")
 
 
+def cleanup_process_reference(process: Popen) -> None:
+    """Clean up a specific process reference immediately.
+    
+    This function removes a subprocess.Popen object from the global _processes list
+    and properly cleans up its resources. Based on Intel gProfiler PR #993.
+    
+    Args:
+        process: The Popen process to clean up
+    """
+    global _processes
+    
+    try:
+        # Remove from global process list
+        if process in _processes:
+            _processes.remove(process)
+            
+        # Close file descriptors that Python GC can't see
+        if process.stdout and not process.stdout.closed:
+            process.stdout.close()
+        if process.stderr and not process.stderr.closed:
+            process.stderr.close()
+        if process.stdin and not process.stdin.closed:
+            process.stdin.close()
+            
+        # Ensure process is fully reaped if still running
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        else:
+            # Process already terminated, just ensure it's reaped
+            try:
+                process.communicate(timeout=0.1)
+            except subprocess.TimeoutExpired:
+                pass  # Already terminated
+                
+    except Exception as e:
+        logger.warning(f"Error cleaning up process reference: {e}")
+
+
 def cleanup_completed_processes() -> dict:
     """Clean up completed processes from the global _processes list.
 
