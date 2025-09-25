@@ -117,13 +117,27 @@ def discover_appropriate_perf_event(
             error_message = str(e)
             
             # Check if this looks like a segfault-related error 
+            # Handle both CalledProcessError with negative return codes and other segfault-related exceptions
+            is_segfault = False
             if "CalledProcessError" in exc_name and hasattr(e, 'returncode') and getattr(e, 'returncode', 0) < 0:
-                segfault_count += 1
+                is_segfault = True
+                signal_num = -getattr(e, 'returncode', 0)
                 logger.warning(
-                    f"Perf event {event.name} failed with signal {-getattr(e, 'returncode', 0)}, "
+                    f"Perf event {event.name} failed with signal {signal_num}, "
                     f"likely segfault. This is known to happen on some GPU machines.",
                     perf_event=event.name,
                 )
+            # Also check for segfault-related error messages in the exception text
+            elif any(keyword in error_message.lower() for keyword in ['sigsegv', 'segfault', 'segmentation fault', 'signal 11']):
+                is_segfault = True
+                logger.warning(
+                    f"Perf event {event.name} failed with segfault-related error. "
+                    f"This is known to happen on some GPU machines. Error: {error_message}",
+                    perf_event=event.name,
+                )
+            
+            if is_segfault:
+                segfault_count += 1
             # Check if this is a PID-related failure  
             elif pids is not None and _is_pid_related_error(error_message):
                 pid_failure_count += 1
@@ -150,6 +164,13 @@ def discover_appropriate_perf_event(
             f"This is a known issue on some GPU machines. "
             f"Consider running with '--perf-mode disabled' to avoid using perf."
         )
+        # For GPU machines where all events segfault, return a default event anyway
+        # The runtime perf script handling will gracefully handle the segfaults
+        logger.info(
+            f"GPU machine detected - using default perf event despite segfaults. "
+            f"Runtime perf script crashes will be handled gracefully."
+        )
+        return SupportedPerfEvent.PERF_DEFAULT
     # If all events failed due to PID issues, provide a specific error message
     elif pid_failure_count == total_events:
         logger.critical(
