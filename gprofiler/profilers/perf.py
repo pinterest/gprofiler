@@ -171,6 +171,15 @@ def merge_global_perfs(
             default=50,
             dest="perf_max_cgroups",
         ),
+        ProfilerArgument(
+            "--perf-max-docker-containers",
+            help="Maximum number of individual Docker containers to profile instead of the broad 'docker' cgroup. "
+            "When set, profiles the top N highest-resource individual containers rather than all containers together. "
+            "Set to 0 to use the broad 'docker' cgroup (default behavior). Default: %(default)s",
+            type=int,
+            default=0,
+            dest="perf_max_docker_containers",
+        ),
     ],
     disablement_help="Disable the global perf of processes,"
     " and instead only concatenate runtime-specific profilers results",
@@ -219,6 +228,7 @@ class SystemProfiler(ProfilerBase):
         perf_memory_restart: bool,
         perf_use_cgroups: bool = False,
         perf_max_cgroups: int = 50,
+        perf_max_docker_containers: int = 0,
         min_duration: int = 10,
     ):
         super().__init__(frequency, duration, profiler_state, min_duration)
@@ -235,6 +245,7 @@ class SystemProfiler(ProfilerBase):
         self._perf_inject = perf_inject
         self._perf_use_cgroups = perf_use_cgroups
         self._perf_max_cgroups = perf_max_cgroups
+        self._perf_max_docker_containers = perf_max_docker_containers
         # allow gprofiler to be delayed up to 3 intervals before timing out.
         # For low-frequency profiling, use shorter switch intervals to reduce memory buildup
         # But maintain reasonable safety margin to avoid premature rotations
@@ -304,6 +315,7 @@ class SystemProfiler(ProfilerBase):
                 switch_timeout_s=self._switch_timeout_s,
                 use_cgroups=self._perf_use_cgroups,
                 max_cgroups=self._perf_max_cgroups,
+                max_docker_containers=self._perf_max_docker_containers,
             )
             self._perfs.append(self._perf_fp)
         else:
@@ -322,6 +334,7 @@ class SystemProfiler(ProfilerBase):
                 switch_timeout_s=self._switch_timeout_s,
                 use_cgroups=self._perf_use_cgroups,
                 max_cgroups=self._perf_max_cgroups,
+                max_docker_containers=self._perf_max_docker_containers,
             )
             self._perfs.append(self._perf_dwarf)
         else:

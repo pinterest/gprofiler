@@ -78,6 +78,7 @@ class PerfProcess:
         switch_timeout_s: int,
         use_cgroups: bool = False,
         max_cgroups: int = 50,
+        max_docker_containers: int = 0,
     ):
         self._start_time = 0.0
         self._frequency = frequency
@@ -94,7 +95,7 @@ class PerfProcess:
         if use_cgroups and is_cgroup_available() and validate_perf_cgroup_support():
             # Use cgroup-based profiling for better reliability
             try:
-                top_cgroups = get_top_cgroup_names_for_perf(max_cgroups)
+                top_cgroups = get_top_cgroup_names_for_perf(max_cgroups, max_docker_containers)
                 if top_cgroups:
                     # Cgroup monitoring requires system-wide mode (-a)
                     self._pid_args.append("-a")

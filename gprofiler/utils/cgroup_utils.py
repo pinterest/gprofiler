@@ -188,32 +188,143 @@ def validate_cgroup_perf_event_access(cgroup_name: str) -> bool:
     return os.path.exists(perf_event_path) and os.path.isdir(perf_event_path)
 
 
-def get_top_cgroup_names_for_perf(limit: int = 50) -> List[str]:
+def get_top_docker_containers_for_perf(limit: int) -> List[str]:
+    """Get top Docker containers by resource usage for perf profiling
+    
+    Returns individual Docker container cgroup names that exist in perf_event controller.
+    """
+    import subprocess
+    
+    docker_containers = []
+    try:
+        # Get running Docker containers with resource stats
+        result = subprocess.run(
+            ["docker", "stats", "--no-stream", "--format", "{{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}"],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode == 0:
+            container_stats = []
+            for line in result.stdout.strip().split('\n'):
+                if line.strip():
+                    parts = line.split('\t')
+                    if len(parts) >= 2:
+                        container_id = parts[0]
+                        cpu_percent_str = parts[1].replace('%', '')
+                        try:
+                            cpu_percent = float(cpu_percent_str)
+                            container_stats.append((container_id, cpu_percent))
+                        except ValueError:
+                            continue
+            
+            # Sort by CPU usage (descending)
+            container_stats.sort(key=lambda x: x[1], reverse=True)
+            
+            # Get full container IDs and check perf_event access
+            for container_id, cpu_percent in container_stats[:limit * 2]:  # Get more than needed in case some don't have perf access
+                try:
+                    # Get full container ID
+                    full_id_result = subprocess.run(
+                        ["docker", "inspect", "--format", "{{.Id}}", container_id],
+                        capture_output=True,
+                        text=True,
+                        timeout=5
+                    )
+                    
+                    if full_id_result.returncode == 0:
+                        full_id = full_id_result.stdout.strip()
+                        docker_cgroup = f"docker/{full_id}"
+                        
+                        # Check if this container has perf_event access
+                        if validate_cgroup_perf_event_access(docker_cgroup):
+                            docker_containers.append(docker_cgroup)
+                            logger.debug(f"Added Docker container for profiling: {container_id} (CPU: {cpu_percent}%)")
+                            
+                            if len(docker_containers) >= limit:
+                                break
+                        else:
+                            logger.debug(f"Docker container {container_id} not available in perf_event controller")
+                
+                except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
+                    logger.debug(f"Failed to get full ID for container {container_id}: {e}")
+                    continue
+                    
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError) as e:
+        logger.debug(f"Failed to get Docker container stats: {e}")
+    
+    return docker_containers
+
+
+def get_top_cgroup_names_for_perf(limit: int = 50, max_docker_containers: int = 0) -> List[str]:
     """Get top cgroup names in the format needed for perf -G option
+    
+    Args:
+        limit: Maximum total number of cgroups to return
+        max_docker_containers: If > 0, profile individual Docker containers instead of broad 'docker' cgroup
     
     Only returns cgroups that exist in both resource controllers (memory/cpu) 
     and the perf_event controller, since perf needs access to both.
     """
-    top_cgroups = get_top_cgroups_by_usage(limit)
-    valid_cgroups = []
-    seen_names = set()  # Track unique cgroup names to avoid duplicates
-    
-    for cgroup in top_cgroups:
-        cgroup_name = cgroup_to_perf_name(cgroup.cgroup_path)
+    if max_docker_containers > 0:
+        # Use individual Docker container profiling
+        docker_containers = get_top_docker_containers_for_perf(max_docker_containers)
         
-        # Skip duplicates (same cgroup from different controllers)
-        if cgroup_name in seen_names:
-            logger.debug(f"Skipping duplicate cgroup name {cgroup_name}")
-            continue
+        # Get other non-Docker cgroups
+        top_cgroups = get_top_cgroups_by_usage(limit)
+        other_cgroups = []
+        seen_names = set(docker_containers)  # Track unique cgroup names to avoid duplicates
+        
+        for cgroup in top_cgroups:
+            cgroup_name = cgroup_to_perf_name(cgroup.cgroup_path)
             
-        if validate_cgroup_perf_event_access(cgroup_name):
-            valid_cgroups.append(cgroup_name)
-            seen_names.add(cgroup_name)
-        else:
-            logger.debug(f"Skipping cgroup {cgroup_name} - not available in perf_event controller")
+            # Skip Docker cgroups (we're handling them individually)
+            if cgroup_name.startswith("docker"):
+                continue
+                
+            # Skip duplicates
+            if cgroup_name in seen_names:
+                logger.debug(f"Skipping duplicate cgroup name {cgroup_name}")
+                continue
+                
+            if validate_cgroup_perf_event_access(cgroup_name):
+                other_cgroups.append(cgroup_name)
+                seen_names.add(cgroup_name)
+                
+                # Respect total limit
+                if len(docker_containers) + len(other_cgroups) >= limit:
+                    break
+            else:
+                logger.debug(f"Skipping cgroup {cgroup_name} - not available in perf_event controller")
+        
+        valid_cgroups = docker_containers + other_cgroups
+        
+        if docker_containers:
+            logger.info(f"Using individual Docker container profiling: {len(docker_containers)} containers, {len(other_cgroups)} other cgroups")
+        
+    else:
+        # Use traditional cgroup profiling (including broad 'docker' cgroup)
+        top_cgroups = get_top_cgroups_by_usage(limit)
+        valid_cgroups = []
+        seen_names = set()  # Track unique cgroup names to avoid duplicates
+        
+        for cgroup in top_cgroups:
+            cgroup_name = cgroup_to_perf_name(cgroup.cgroup_path)
+            
+            # Skip duplicates (same cgroup from different controllers)
+            if cgroup_name in seen_names:
+                logger.debug(f"Skipping duplicate cgroup name {cgroup_name}")
+                continue
+                
+            if validate_cgroup_perf_event_access(cgroup_name):
+                valid_cgroups.append(cgroup_name)
+                seen_names.add(cgroup_name)
+            else:
+                logger.debug(f"Skipping cgroup {cgroup_name} - not available in perf_event controller")
     
-    if len(valid_cgroups) < len(top_cgroups):
-        logger.info(f"Filtered cgroups for perf: {len(valid_cgroups)}/{len(top_cgroups)} cgroups have perf_event access")
+    if len(valid_cgroups) < limit:
+        logger.info(f"Filtered cgroups for perf: {len(valid_cgroups)}/{limit} cgroups have perf_event access")
     
     return valid_cgroups
 
