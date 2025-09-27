@@ -93,6 +93,46 @@ class PerfProcess:
     def _log_name(self) -> str:
         return f"perf ({self._type} mode)"
 
+    def _get_profiling_scope_info(self) -> tuple[str, str, int]:
+        """
+        Determine the profiling scope and return information about it.
+        
+        Returns:
+            tuple: (scope_type, log_message, process_count)
+                - scope_type: "system_wide", "pid_based", or "other"
+                - log_message: Human-readable description for logging
+                - process_count: Number of processes being monitored (0 if unknown)
+        """
+        if "-a" in self._pid_args:
+            import psutil
+            total_processes = len(list(psutil.process_iter()))
+            return (
+                "system_wide",
+                f"Starting {self._log_name} with system-wide profiling (monitoring ALL {total_processes} processes)",
+                total_processes
+            )
+        elif "--pid" in self._pid_args:
+            pid_arg_index = self._pid_args.index("--pid")
+            if pid_arg_index + 1 < len(self._pid_args):
+                pids = self._pid_args[pid_arg_index + 1].split(",")
+                return (
+                    "pid_based",
+                    f"Starting {self._log_name} targeting {len(pids)} specific PIDs",
+                    len(pids)
+                )
+            else:
+                return (
+                    "pid_based",
+                    f"Starting {self._log_name} with PID-based profiling (no PIDs specified)",
+                    0
+                )
+        else:
+            return (
+                "other",
+                f"Starting {self._log_name}",
+                0
+            )
+
     def _get_perf_cmd(self) -> List[str]:
         return (
             [
@@ -118,7 +158,10 @@ class PerfProcess:
         )
 
     def start(self) -> None:
-        logger.info(f"Starting {self._log_name}")
+        # Log profiling scope before starting
+        scope_type, log_message, process_count = self._get_profiling_scope_info()
+        logger.info(log_message)
+        
         # remove old files, should they exist from previous runs
         remove_path(self._output_path, missing_ok=True)
         
