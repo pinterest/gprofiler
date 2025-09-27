@@ -11,6 +11,7 @@ from psutil import Process
 from gprofiler.exceptions import CalledProcessError
 from gprofiler.log import get_logger_adapter
 from gprofiler.utils import (
+    cleanup_process_reference,
     reap_process,
     remove_files_by_prefix,
     remove_path,
@@ -92,6 +93,46 @@ class PerfProcess:
     def _log_name(self) -> str:
         return f"perf ({self._type} mode)"
 
+    def _get_profiling_scope_info(self) -> tuple[str, str, int]:
+        """
+        Determine the profiling scope and return information about it.
+        
+        Returns:
+            tuple: (scope_type, log_message, process_count)
+                - scope_type: "system_wide", "pid_based", or "other"
+                - log_message: Human-readable description for logging
+                - process_count: Number of processes being monitored (0 if unknown)
+        """
+        if "-a" in self._pid_args:
+            import psutil
+            total_processes = len(list(psutil.process_iter()))
+            return (
+                "system_wide",
+                f"Starting {self._log_name} with system-wide profiling (monitoring ALL {total_processes} processes)",
+                total_processes
+            )
+        elif "--pid" in self._pid_args:
+            pid_arg_index = self._pid_args.index("--pid")
+            if pid_arg_index + 1 < len(self._pid_args):
+                pids = self._pid_args[pid_arg_index + 1].split(",")
+                return (
+                    "pid_based",
+                    f"Starting {self._log_name} targeting {len(pids)} specific PIDs",
+                    len(pids)
+                )
+            else:
+                return (
+                    "pid_based",
+                    f"Starting {self._log_name} with PID-based profiling (no PIDs specified)",
+                    0
+                )
+        else:
+            return (
+                "other",
+                f"Starting {self._log_name}",
+                0
+            )
+
     def _get_perf_cmd(self) -> List[str]:
         return (
             [
@@ -117,7 +158,10 @@ class PerfProcess:
         )
 
     def start(self) -> None:
-        logger.info(f"Starting {self._log_name}")
+        # Log profiling scope before starting
+        scope_type, log_message, process_count = self._get_profiling_scope_info()
+        logger.info(log_message)
+        
         # remove old files, should they exist from previous runs
         remove_path(self._output_path, missing_ok=True)
         
@@ -156,6 +200,7 @@ class PerfProcess:
         if self._process is not None:
             self._process.terminate()  # okay to call even if process is already dead
             exit_code, stdout, stderr = reap_process(self._process)
+            cleanup_process_reference(process=self._process)
             self._process = None
             logger.info(f"Stopped {self._log_name}", exit_code=exit_code, stderr=stderr, stdout=stdout)
 
@@ -204,6 +249,9 @@ class PerfProcess:
         try:
             perf_data = wait_for_file_by_prefix(f"{self._output_path}.", self._DUMP_TIMEOUT_S, self._stop_event)
         except Exception:
+            # Check if process died first
+            process_died = self._process is not None and self._process.poll() is not None
+            
             assert self._process is not None and self._process.stdout is not None and self._process.stderr is not None
             logger.critical(
                 f"{self._log_name} failed to dump output",
@@ -211,13 +259,18 @@ class PerfProcess:
                 perf_stderr=self._process.stderr.read(),
                 perf_running=self.is_running(),
             )
+            
+            # Clean up after logging
+            if process_died:
+                cleanup_process_reference(process=self._process)
+                self._process = None
             raise
         finally:
             # always read its stderr
             # using read1() which performs just a single read() call and doesn't read until EOF
             # (unlike Popen.communicate())
-            assert self._process is not None and self._process.stderr is not None
-            logger.debug(f"{self._log_name} run output", perf_stderr=self._process.stderr.read1())  # type: ignore
+            if self._process is not None and self._process.stderr is not None:
+                logger.debug(f"{self._log_name} run output", perf_stderr=self._process.stderr.read1())  # type: ignore
 
         try:
             inject_data = Path(f"{str(perf_data)}.inject")
@@ -228,13 +281,20 @@ class PerfProcess:
                 perf_data.unlink()
                 perf_data = inject_data
 
+            perf_script_cmd = [perf_path(), "script", "-F", "+pid", "-i", str(perf_data)]
             try:
                 perf_script_proc = run_process(
-                    [perf_path(), "script", "-F", "+pid", "-i", str(perf_data)],
+                    perf_script_cmd,
                     suppress_log=True,
                 )
                 return perf_script_proc.stdout.decode("utf8")
             except CalledProcessError as e:
+                # Log the command that failed for debugging
+                logger.critical(
+                    f"{self._log_name} failed to run perf script: {str(e)}",
+                    command=" ".join(perf_script_cmd),
+                )
+                
                 # Handle segfaults in perf script, particularly common on GPU machines
                 if e.returncode and e.returncode < 0:
                     # Negative return code indicates death by signal

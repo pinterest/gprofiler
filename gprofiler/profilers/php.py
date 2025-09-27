@@ -30,7 +30,14 @@ from gprofiler.log import get_logger_adapter
 from gprofiler.profiler_state import ProfilerState
 from gprofiler.profilers.profiler_base import ProfilerBase
 from gprofiler.profilers.registry import ProfilerArgument, register_profiler
-from gprofiler.utils import random_prefix, reap_process, resource_path, start_process, wait_event
+from gprofiler.utils import (
+    cleanup_process_reference,
+    random_prefix,
+    reap_process,
+    resource_path,
+    start_process,
+    wait_event,
+)
 
 logger = get_logger_adapter(__name__)
 # Currently tracing only php-fpm, TODO: support mod_php in apache.
@@ -105,19 +112,23 @@ class PHPSpyProfiler(ProfilerBase):
         phpspy_dir = os.path.dirname(phpspy_path)
         env = os.environ.copy()
         env["PATH"] = f"{env.get('PATH')}:{phpspy_dir}"
-        process = start_process(cmd, env=env)
+        phpspy_proc = start_process(cmd, env=env)
         # Executing phpspy, expecting the output file to be created, phpspy creates it at bootstrap after argument
         # parsing.
         # If an error occurs after this stage it's probably a spied _process specific and not phpspy general error.
         try:
             wait_event(self.poll_timeout, self._profiler_state.stop_event, lambda: os.path.exists(self._output_path))
         except TimeoutError:
-            process.kill()
-            assert process.stdout is not None and process.stderr is not None
-            logger.error(f"phpspy failed to start. stdout {process.stdout.read()!r} stderr {process.stderr.read()!r}")
+            phpspy_proc.kill()
+            # Clean up the global reference
+            cleanup_process_reference(process=phpspy_proc)
+            assert phpspy_proc.stdout is not None and phpspy_proc.stderr is not None
+            logger.error(
+                f"phpspy failed to start. stdout {phpspy_proc.stdout.read()!r} stderr {phpspy_proc.stderr.read()!r}"
+            )
             raise
         else:
-            self._process = process
+            self._process = phpspy_proc
 
         # Set the stderr fd as non-blocking so the read operation on it won't block if no data is available.
         assert self._process.stderr is not None
@@ -233,6 +244,7 @@ class PHPSpyProfiler(ProfilerBase):
         if self._process is not None:
             self._process.terminate()
             exit_code, stdout, stderr = reap_process(self._process)
+            cleanup_process_reference(process=self._process)
             self._process = None
             logger.info(
                 "Finished profiling PHP processes with phpspy",

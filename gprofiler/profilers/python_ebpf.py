@@ -34,6 +34,7 @@ from gprofiler.profiler_state import ProfilerState
 from gprofiler.profilers import python
 from gprofiler.profilers.profiler_base import ProfilerBase
 from gprofiler.utils import (
+    cleanup_process_reference,
     poll_process,
     random_prefix,
     reap_process,
@@ -414,6 +415,8 @@ class PythonEbpfProfiler(ProfilerBase):
                     # Re-raise if it's a different AttributeError
                     raise
             
+            # Clean up the process reference
+            cleanup_process_reference(process=self.process)
             self.process = None
 
         stdout = stdout.decode() if isinstance(stdout, bytes) else stdout
