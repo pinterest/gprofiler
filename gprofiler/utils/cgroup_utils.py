@@ -32,15 +32,18 @@ class CgroupResourceUsage:
     
     @property
     def total_score(self) -> float:
-        """Calculate a combined score for ranking cgroups by resource usage"""
+        """Calculate a combined score for ranking cgroups by resource usage
+        
+        Prioritizes CPU usage over memory since CPU indicates active processes
+        that are more interesting for profiling.
+        """
         # Normalize CPU (ns) and memory (bytes) to comparable scales
-        # CPU: convert nanoseconds to seconds, then scale
-        # Memory: convert bytes to MB, then scale
         cpu_score = self.cpu_usage / 1_000_000_000  # ns to seconds
         memory_score = self.memory_usage / (1024 * 1024)  # bytes to MB
         
-        # Weight CPU and memory equally, but you could adjust these weights
-        return cpu_score + memory_score
+        # Weight CPU heavily (10x) since active CPU usage is more important for profiling
+        # than static memory usage
+        return (cpu_score * 10) + memory_score
 
 
 def is_cgroup_available() -> bool:
