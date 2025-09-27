@@ -567,90 +567,29 @@ def _get_top_processes_by_cpu(self, processes: List[Process], max_processes: int
     return [proc for proc, cpu in processes_with_cpu[:max_processes]]
 ```
 
-**Solution 2: Cgroup-Based System Profiling (`--perf-use-cgroups`) - FOR WHEN YOU NEED PERF DATA**
+**Solution 2: Cgroup-Based System Profiling (`--perf-use-cgroups --perf-max-cgroups`)**
 
-> **🎯 Smart Conflict Resolution**: When you explicitly request cgroup-based profiling with `--perf-use-cgroups --perf-max-cgroups N`, perf will run even if `--skip-system-profilers-above` threshold is exceeded. Your explicit intent is honored over system-wide thresholds.
+**Use Case**: When you need perf profiling on busy systems but want controlled resource usage.
 
-**🎯 Use Case**: When you still need perf profiling on busy systems but want to limit resource usage:
-
-```bash
-# If you need perf data on busy systems, use cgroup-based limiting:
-gprofiler --perf-use-cgroups --perf-max-cgroups 50  # ✅ Profiles top 50 containers
-
-# Only disable perf entirely if you don't need the data:
-gprofiler --skip-system-profilers-above 500  # ⚠️ Disables perf completely
-```
-
-**Technical Implementation:**
-```python
-# Intelligent cgroup selection based on resource usage
-def get_top_cgroups_by_usage(limit: int) -> List[CgroupResourceUsage]:
-    # 1. Scan all containers/cgroups
-    # 2. Measure CPU + memory usage per cgroup  
-    # 3. Rank by combined resource score
-    # 4. Return top N cgroups
-    
-# Perf command generation
-perf_cmd = ["perf", "record", "-G", "docker/container1,docker/container2,k8s/pod3"]
-```
-
-**🆕 Enhanced Docker Container Profiling (`--perf-max-docker-containers`)**
-
-**New Feature**: Individual Docker container profiling instead of broad "docker" cgroup profiling.
-
-**Problem Solved**: Traditional cgroup profiling uses the broad "docker" cgroup which profiles ALL containers together, making it difficult to identify which specific containers are consuming resources.
-
-**Solution**: The new `--perf-max-docker-containers` option profiles individual high-resource Docker containers:
+**How it works**: Scans cgroups, selects top N by resource usage, uses `perf -G cgroup1,cgroup2,...` instead of fragile PID lists.
 
 ```bash
-# Traditional approach (profiles all containers together)
-gprofiler --perf-use-cgroups --perf-max-cgroups 10
-# Result: Uses broad "docker" cgroup - all containers profiled together
-
-# New approach (profiles individual containers)
-gprofiler --perf-use-cgroups --perf-max-docker-containers 5
-# Result: Profiles top 5 highest-CPU individual containers
-
-# Combined approach (individual containers + other cgroups)
-gprofiler --perf-use-cgroups --perf-max-cgroups 10 --perf-max-docker-containers 3
-# Result: Top 3 individual containers + up to 7 other cgroups
+# Profile top 50 cgroups by resource usage
+gprofiler --perf-use-cgroups --perf-max-cgroups 50
+# Result: Controlled memory usage with targeted perf data
 ```
 
-**How It Works:**
-1. **Discovery**: Uses `docker stats` to identify running containers and CPU usage
-2. **Ranking**: Sorts containers by CPU utilization (highest first)
-3. **Validation**: Only selects containers with perf_event controller access
-4. **Integration**: Combines individual containers with other system cgroups
+**Solution 3: Docker Container Profiling (`--perf-max-docker-containers`)**
 
-**Benefits:**
-- **Granular Profiling**: See performance data per individual container
-- **Resource Focus**: Automatically targets highest-CPU containers
-- **Better Insights**: Identify specific problematic containers vs. general "docker" activity
-- **Production Ready**: Respects perf_event security constraints
+**Use Case**: Individual Docker container profiling instead of broad "docker" cgroup profiling.
 
-**Memory Optimization Impact:**
-- **Individual Containers**: More targeted profiling = lower memory overhead per container
-- **Automatic Selection**: Only profiles active high-resource containers
-- **Smart Limits**: Respects total cgroup limits while maximizing container visibility
+**How it works**: Uses `docker stats` to identify highest-CPU containers, profiles individual containers for granular insights.
 
-**Example Output:**
+```bash
+# Profile top 5 individual Docker containers + other cgroups
+gprofiler --perf-use-cgroups --perf-max-cgroups 10 --perf-max-docker-containers 5
+# Result: Per-container performance data with controlled memory usage
 ```
-# Before (traditional):
-Using cgroup-based profiling with 1 top cgroups: ['docker']
-
-# After (individual containers):
-Using individual Docker container profiling: 3 containers, 1 other cgroups
-Using cgroup-based profiling with 4 top cgroups: ['docker/016e9b9974b8...', 'docker/c57baa11027a...', 'docker/896822f9d170...', 'cfbrkd']
-```
-
-**When to Use Which Approach:**
-| Scenario | Recommended Solution | Reasoning |
-|----------|---------------------|-----------|
-| **Need perf data + busy system** | `--perf-use-cgroups` | ✅ Keeps perf data with controlled resource usage |
-| **Need granular container insights** | `--perf-max-docker-containers` | ✅ Individual container profiling vs. broad "docker" |
-| **High-density Docker environment** | `--perf-max-docker-containers 5-10` | ✅ Focus on highest-resource containers |
-| **Don't need perf data** | `--skip-system-profilers-above` | ✅ Minimal resources, runtime profilers only |
-| **Non-containerized environment** | `--skip-system-profilers-above` | ⚠️ Cgroups may not provide useful grouping |
 
 **Solution 3: Complete System Profiler Disabling (`--skip-system-profilers-above`) - WHEN YOU DON'T NEED PERF**
 
@@ -1105,54 +1044,34 @@ All critical reliability issues have been systematically addressed:
 - Heartbeat command history > 1200 entries
 - Restart failure rate > 10%
 
-## 🚀 Quick Reference: Docker Container Profiling Options
+## 🚀 Quick Reference: Large Process Solutions
 
-### Traditional vs. Individual Container Profiling
+### Decision Tree
+1. **Do you need perf data?**
+   - Yes → Use `--perf-use-cgroups --perf-max-cgroups N`
+   - No → Use `--skip-system-profilers-above N`
 
-| Approach | Command | Use Case | Memory Impact | Insights |
-|----------|---------|----------|---------------|----------|
-| **Traditional** | `--perf-use-cgroups --perf-max-cgroups 10` | General container monitoring | Standard | Broad "docker" cgroup data |
-| **Individual** | `--perf-max-docker-containers 5` | Problem container identification | More targeted | Per-container performance |
-| **Combined** | `--perf-max-cgroups 15 --perf-max-docker-containers 5` | Best of both worlds | Optimized | Individual containers + system cgroups |
+2. **Need individual container insights?**
+   - Yes → Add `--perf-max-docker-containers N`
+   - No → Use standard cgroup profiling
 
-### Production-Ready Configurations
+3. **Always limit runtime profilers:**
+   - Use `--max-processes-runtime-profiler N` (recommended: 30-50)
 
+### Quick Commands
 ```bash
-# High-Density Production (500+ containers)
-gprofiler --perf-use-cgroups --perf-max-cgroups 20 --perf-max-docker-containers 10 --max-processes-runtime-profiler 50
+# High-density production (need perf data)
+gprofiler --max-processes-runtime-profiler 50 --perf-use-cgroups --perf-max-cgroups 30
 
-# Memory-Constrained Production (2-4GB systems)
-gprofiler --perf-use-cgroups --perf-max-cgroups 10 --perf-max-docker-containers 5 --max-processes-runtime-profiler 30
+# Memory-constrained (need perf data)  
+gprofiler --max-processes-runtime-profiler 30 --perf-use-cgroups --perf-max-cgroups 20
 
-# Development/Debugging (focus on problem containers)
-gprofiler --perf-use-cgroups --perf-max-docker-containers 3 --max-processes-runtime-profiler 20
+# Container problem identification
+gprofiler --max-processes-runtime-profiler 40 --perf-use-cgroups --perf-max-cgroups 15 --perf-max-docker-containers 10
 
-# Minimal Resource Usage (when perf data not critical)
-gprofiler --skip-system-profilers-above 200 --max-processes-runtime-profiler 30
+# Minimal resources (no perf data)
+gprofiler --max-processes-runtime-profiler 50 --skip-system-profilers-above 300
 ```
-
-### Memory Optimization Guidelines
-
-- **Idle Memory**: 50-100MB (with heartbeat mode optimization)
-- **Active Memory**: 300-800MB (depending on container count)
-- **Peak Memory**: <500MB for perf operations
-- **File Descriptors**: <100 pipes (with subprocess cleanup)
-- **Target**: 96% memory reduction vs. unoptimized (2.8GB → 50-100MB idle)
-
-### Container Profiling Decision Tree
-
-1. **Do you need to identify specific problem containers?**
-   - Yes → Use `--perf-max-docker-containers N`
-   - No → Use traditional `--perf-use-cgroups`
-
-2. **How many containers should you profile?**
-   - High-resource systems: 10-20 containers
-   - Memory-constrained: 3-5 containers
-   - Development: 1-3 containers
-
-3. **Do you need system-wide context too?**
-   - Yes → Combine with `--perf-max-cgroups`
-   - No → Use only `--perf-max-docker-containers`
 
 ### Operational Runbooks
 - Memory spike investigation procedures
