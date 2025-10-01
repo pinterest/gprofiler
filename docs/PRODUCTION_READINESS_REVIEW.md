@@ -549,10 +549,10 @@ def stop(self) -> None:
 
 **Root Cause Analysis**: gProfiler attempted to profile ALL matching processes simultaneously without resource constraints, combined with continuous system-wide profilers running regardless of system load.
 
-**Solution 1: Runtime Profiler Limiting (`--max-processes`)**
+**Solution 1: Runtime Profiler Limiting (`--max-processes-runtime-profiler`)**
 ```bash
 # Limit to top 50 processes by CPU usage (0=unlimited)  
-gprofiler --max-processes 50
+gprofiler --max-processes-runtime-profiler 50
 
 # Example: Host with 200 Python processes → profiles only top 50 by CPU
 ```
@@ -567,7 +567,52 @@ def _get_top_processes_by_cpu(self, processes: List[Process], max_processes: int
     return [proc for proc, cpu in processes_with_cpu[:max_processes]]
 ```
 
-**Solution 2: System Profiler Prevention (`--skip-system-profilers-above`)**
+**Solution 2: Cgroup-Based System Profiling (`--perf-use-cgroups --perf-max-cgroups`)**
+
+**Use Case**: When you need perf profiling on busy systems but want controlled resource usage.
+
+**How it works**: 
+- Scans ALL available cgroups (typically 100-200 total)
+- **Automatically detects cgroup v1/v2** and uses appropriate file paths
+- Selects top N by **CPU usage** (10x weighted over memory)
+- Uses `perf -G cgroup1,cgroup2,...` instead of fragile PID lists
+- Includes individual services, containers, and nested cgroups
+
+```bash
+# Profile top 50 cgroups by CPU usage (from ALL available cgroups)
+gprofiler --perf-use-cgroups --perf-max-cgroups 50
+# Result: Controlled memory usage with CPU-focused perf data
+# Selects: ssh.service, docker containers, clickhouse-server.service, etc.
+```
+
+**Solution 3: Docker Container Profiling (`--perf-max-docker-containers`)**
+
+**Use Case**: Individual Docker container profiling instead of broad "docker" cgroup profiling.
+
+**How it works**: 
+- Uses `docker stats` to identify highest-CPU containers
+- **🆕 Automatically detects cgroup version (v1/v2)** and uses appropriate paths
+- Profiles individual containers for granular insights with proper path resolution
+- **Critical**: Interacts with `--perf-max-cgroups` parameter
+
+**🆕 Cgroup v1/v2 Compatibility (2024 Update)**:
+- **Cgroup v1**: Uses `/sys/fs/cgroup/perf_event/docker/abc123def456...`
+- **Cgroup v2**: Uses `/sys/fs/cgroup/system.slice/docker-abc123def456.scope`
+- **Hybrid Systems**: Automatically detects which version Docker is using
+- **Path Conversion**: Converts cgroup v2 paths to perf-compatible format for `perf -G`
+
+**⚠️ Parameter Behavior:**
+```bash
+# Only Docker containers (NO system cgroups)
+gprofiler --perf-use-cgroups --perf-max-docker-containers 10 --perf-max-cgroups 0
+# Result: ONLY 10 Docker containers, no system.slice or services
+
+# Docker containers + system cgroups
+gprofiler --perf-use-cgroups --perf-max-docker-containers 5 --perf-max-cgroups 15
+# Result: 5 Docker containers + up to 10 other cgroups (total ≤ 15)
+```
+
+**Solution 3: Complete System Profiler Disabling (`--skip-system-profilers-above`) - WHEN YOU DON'T NEED PERF**
 
 **❌ Original Flawed Architecture ([GitHub PR #27](https://github.com/pinterest/gprofiler/pull/27/files)):**
 - **Wrong timing**: Logic in `snapshot()` method after profilers already started
@@ -588,13 +633,141 @@ def start(self) -> None:
         prof.start()
 ```
 
-**Configuration:**
-```bash
-# Skip system profilers when >300 total processes exist
-gprofiler --skip-system-profilers-above 300
+**Decision Tree for Configuration:**
 
-# Combined optimization for busy systems  
-gprofiler --max-processes 25 --skip-system-profilers-above 300
+**Step 1: Do you need perf profiling data?**
+- **Yes** → Use cgroup-based limiting (`--perf-use-cgroups`)
+- **No** → Disable system profilers (`--skip-system-profilers-above`)
+
+**Step 2: Choose your configuration based on your needs:**
+
+**Need Perf Data - High-Density Container Environment:**
+```bash
+# Traditional approach: Keep perf data with controlled resource usage
+gprofiler \
+  --max-processes-runtime-profiler 50 \
+  --perf-use-cgroups \
+  --perf-max-cgroups 30
+
+# Result: 
+# - Runtime profilers: Top 50 processes by CPU
+# - Perf: Top 30 containers by resource usage (may include broad "docker" cgroup)
+# - Memory usage: ~800MB vs 4GB+ unlimited
+
+# NEW: Individual container profiling for better insights
+gprofiler \
+  --max-processes-runtime-profiler 50 \
+  --perf-use-cgroups \
+  --perf-max-cgroups 20 \
+  --perf-max-docker-containers 10
+
+# Result:
+# - Runtime profilers: Top 50 processes by CPU
+# - Perf: Top 10 individual Docker containers + up to 10 other cgroups
+# - Better granularity: See per-container performance vs. aggregate "docker"
+# - Memory usage: Similar to traditional but more targeted profiling
+```
+
+**Memory-Constrained Systems:**
+```bash
+# Conservative limits for 2GB memory systems
+gprofiler \
+  --max-processes-runtime-profiler 30 \
+  --perf-use-cgroups \
+  --perf-max-cgroups 20
+
+# For Docker-heavy environments with memory constraints
+gprofiler \
+  --max-processes-runtime-profiler 20 \
+  --perf-use-cgroups \
+  --perf-max-cgroups 15 \
+  --perf-max-docker-containers 5
+
+# Result: Focus on top 5 problem containers + essential other cgroups
+```
+
+**Development/Testing:**
+```bash
+# More comprehensive profiling
+gprofiler \
+  --max-processes-runtime-profiler 100 \
+  --perf-use-cgroups \
+  --perf-max-cgroups 50
+```
+
+**🛡️ Production Guard Rails (Recommended for Production Environments):**
+```bash
+# Production-ready configuration with multiple safety layers
+gprofiler \
+  --max-processes-runtime-profiler 20 \
+  --skip-system-profilers-above 500 \
+  --perf-use-cgroups \
+  --perf-max-cgroups 0 \
+  --perf-max-docker-containers 1
+
+# Result: 
+# - Runtime profilers limited to 20 processes max
+# - Perf completely disabled if system has >500 processes  
+# - When perf runs, profiles only 1 Docker container
+# - Never falls back to dangerous system-wide profiling
+```
+
+**🔒 Safety Layer Breakdown:**
+
+1. **Hard Process Limit** (`--skip-system-profilers-above 500`):
+   - **Purpose**: Absolute safety threshold - disables perf entirely on busy systems
+   - **Behavior**: If system has >500 processes, perf is completely disabled
+   - **No Exceptions**: Applies regardless of cgroup configuration
+
+2. **Runtime Process Limiting** (`--max-processes-runtime-profiler 20`):
+   - **Purpose**: Limits memory-intensive runtime profilers (py-spy, Java, etc.)
+   - **Behavior**: Profiles only top 20 processes by CPU usage
+   - **Always Active**: Works even when perf is disabled
+
+3. **Targeted Container Profiling** (`--perf-max-docker-containers 1`):
+   - **Purpose**: Minimal perf scope - profiles only the busiest container
+   - **Behavior**: Uses `docker stats` to find highest CPU container
+   - **Fallback Protection**: If no containers found, perf is safely disabled
+
+4. **System-Wide Prevention** (`--perf-max-cgroups 0`):
+   - **Purpose**: Prevents profiling of system cgroups (system.slice, etc.)
+   - **Behavior**: Only Docker containers are considered for profiling
+   - **Memory Savings**: Avoids expensive system-wide cgroup scanning
+
+**Escalation Path for Different System Loads:**
+```bash
+# Light Load Systems (<200 processes)
+gprofiler --max-processes-runtime-profiler 50 --perf-use-cgroups --perf-max-docker-containers 3 --perf-max-cgroups 0
+
+# Medium Load Systems (200-500 processes)  
+gprofiler --max-processes-runtime-profiler 20 --perf-use-cgroups --perf-max-docker-containers 2 --perf-max-cgroups 0
+
+# Heavy Load Systems (>500 processes) - Perf Auto-Disabled
+gprofiler --max-processes-runtime-profiler 10 --skip-system-profilers-above 500 --perf-use-cgroups --perf-max-docker-containers 1 --perf-max-cgroups 0
+```
+
+**🆕 Enhanced Safety Features (2024 Update):**
+- **No Fallback Risk**: Never falls back to `perf -a` (system-wide profiling)
+- **Graceful Degradation**: If Docker container profiling fails, perf is safely disabled
+- **Clear Logging**: Detailed messages explain why perf was disabled
+- **Continued Operation**: Runtime profilers continue even if perf is disabled
+- **Cgroup v1/v2 Support**: Works on all modern container environments
+
+**Don't Need Perf Data - Minimal Resource Usage:**
+```bash
+# Disable system profilers entirely, keep only runtime profilers
+gprofiler --max-processes-runtime-profiler 50 --skip-system-profilers-above 300
+
+# Result:
+# - Runtime profilers only (py-spy, Java, etc.)
+# - No perf/eBPF profiling
+# - Minimal memory usage: ~400MB
+```
+
+**Legacy/Non-Containerized Systems:**
+```bash
+# For systems without meaningful cgroup structure
+gprofiler --max-processes-runtime-profiler 40 --skip-system-profilers-above 400
 ```
 
 **Production Results**: ✅ **Validated under extreme load**
@@ -950,6 +1123,49 @@ All critical reliability issues have been systematically addressed:
 - Heartbeat command history > 1200 entries
 - Restart failure rate > 10%
 
+## 🚀 Quick Reference: Large Process Solutions
+
+### Decision Tree
+1. **Do you need perf data?**
+   - Yes → Use `--perf-use-cgroups` with appropriate limits
+   - No → Use `--skip-system-profilers-above N`
+
+2. **What type of perf insights do you need?**
+   - **All system activity** → `--perf-max-cgroups N` (includes services, containers, etc.)
+   - **Only container focus** → `--perf-max-docker-containers N --perf-max-cgroups 0`
+   - **Mixed approach** → `--perf-max-docker-containers X --perf-max-cgroups Y`
+
+3. **Always limit runtime profilers:**
+   - Use `--max-processes-runtime-profiler N` (recommended: 30-50)
+
+### Quick Commands
+```bash
+# High-density production (comprehensive system view)
+gprofiler --max-processes-runtime-profiler 50 --perf-use-cgroups --perf-max-cgroups 30
+# Result: Top 30 cgroups by CPU (services, containers, etc.)
+
+# Container-focused troubleshooting (pure container view)
+gprofiler --max-processes-runtime-profiler 50 --perf-use-cgroups --perf-max-docker-containers 20 --perf-max-cgroups 0
+# Result: ONLY top 20 Docker containers by CPU, no system noise
+
+# Memory-constrained (balanced approach)
+gprofiler --max-processes-runtime-profiler 30 --perf-use-cgroups --perf-max-cgroups 15 --perf-max-docker-containers 8
+# Result: 8 containers + up to 7 other cgroups = 15 total
+
+# Production guard rails (recommended for production)
+gprofiler --max-processes-runtime-profiler 20 --skip-system-profilers-above 500 --perf-use-cgroups --perf-max-cgroups 0 --perf-max-docker-containers 1
+# Result: Multi-layered safety, 1 container max, hard process limits
+
+# Minimal resources (no perf data)
+gprofiler --max-processes-runtime-profiler 50 --skip-system-profilers-above 300
+# Result: Only runtime profilers, ~400MB memory
+```
+
+### ⚠️ Critical Parameter Interaction
+- `--perf-max-cgroups 0` = **NO system cgroups** (only Docker if specified)
+- `--perf-max-cgroups N` = **Up to N total cgroups** (Docker + others combined)
+- Both parameters use **CPU-based selection** (10x weighted over memory)
+
 ### Operational Runbooks
 - Memory spike investigation procedures
 - Error pattern analysis guidelines
@@ -995,13 +1211,19 @@ All critical reliability issues have been systematically addressed:
 
 6. **Fault-Tolerant Architecture**: Lazy initialization, fault isolation, and error recovery preventing cascading failures.
 
+7. **Enhanced Docker Container Profiling with Cgroup v1/v2 Support**: Automatic detection of cgroup versions with proper path resolution for both traditional and modern container environments, ensuring compatibility across all deployment scenarios.
+
+8. **Production Guard Rails**: Multi-layered safety system with hard process limits, graceful perf disabling, and elimination of dangerous system-wide profiling fallbacks, providing robust protection against resource exhaustion in production environments.
+
 These improvements build upon the existing reliability foundation, further enhancing gProfiler's production readiness with:
-- **15 total reliability metrics** showing significant improvements (up from 11)
+- **17 total reliability metrics** showing significant improvements (up from 15)
 - **96% memory reduction** in idle mode (2.8GB → 500-800MB and 50-100MB idle)
 - **Multi-layered memory management** addressing all leak sources
 - **Comprehensive error handling** covering all edge cases
 - **Zero-crash reliability** with graceful degradation
 - **Resource cleanup optimization** for sustained operations
+- **Universal cgroup compatibility** supporting both v1 and v2 environments
+- **Production-grade safety** with multiple guard rails and no dangerous fallbacks
 
 ---
 

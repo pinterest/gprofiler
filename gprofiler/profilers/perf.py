@@ -156,6 +156,30 @@ def merge_global_perfs(
             action="store_false",
             dest="perf_memory_restart",
         ),
+        ProfilerArgument(
+            "--perf-use-cgroups",
+            help="Use cgroup-based profiling instead of PID-based profiling for better reliability. "
+            "Profiles the top N cgroups by resource usage, avoiding crashes from invalid PIDs.",
+            action="store_true",
+            default=False,
+            dest="perf_use_cgroups",
+        ),
+        ProfilerArgument(
+            "--perf-max-cgroups",
+            help="Maximum number of cgroups to profile when using --perf-use-cgroups. Default: %(default)s",
+            type=int,
+            default=50,
+            dest="perf_max_cgroups",
+        ),
+        ProfilerArgument(
+            "--perf-max-docker-containers",
+            help="Maximum number of individual Docker containers to profile instead of the broad 'docker' cgroup. "
+            "When set, profiles the top N highest-resource individual containers rather than all containers together. "
+            "Set to 0 to use the broad 'docker' cgroup (default behavior). Default: %(default)s",
+            type=int,
+            default=0,
+            dest="perf_max_docker_containers",
+        ),
     ],
     disablement_help="Disable the global perf of processes,"
     " and instead only concatenate runtime-specific profilers results",
@@ -169,6 +193,17 @@ class SystemProfiler(ProfilerBase):
     versions of Go processes.
     """
     _is_system_profiler = True  # Mark as system profiler for startup filtering
+    
+    def should_skip_due_to_system_threshold(self) -> bool:
+        """
+        Always skip perf when system process threshold is exceeded.
+        
+        This provides a hard safety limit - if the system has too many processes,
+        disable perf entirely regardless of cgroup configuration to prevent resource exhaustion.
+        """
+        # Always use the default system profiler skipping logic
+        # No overrides - safety first!
+        return True
     
     def _should_limit_processes(self) -> bool:
         """Perf is a system-wide profiler and should not limit processes."""
@@ -188,6 +223,9 @@ class SystemProfiler(ProfilerBase):
         perf_inject: bool,
         perf_node_attach: bool,
         perf_memory_restart: bool,
+        perf_use_cgroups: bool = False,
+        perf_max_cgroups: int = 50,
+        perf_max_docker_containers: int = 0,
         min_duration: int = 10,
     ):
         super().__init__(frequency, duration, profiler_state, min_duration)
@@ -202,6 +240,9 @@ class SystemProfiler(ProfilerBase):
         self._perf_mode = perf_mode
         self._perf_dwarf_stack_size = perf_dwarf_stack_size
         self._perf_inject = perf_inject
+        self._perf_use_cgroups = perf_use_cgroups
+        self._perf_max_cgroups = perf_max_cgroups
+        self._perf_max_docker_containers = perf_max_docker_containers
         # allow gprofiler to be delayed up to 3 intervals before timing out.
         # For low-frequency profiling, use shorter switch intervals to reduce memory buildup
         # But maintain reasonable safety margin to avoid premature rotations
@@ -214,6 +255,7 @@ class SystemProfiler(ProfilerBase):
         # Initialize perf process attributes to None - they'll be created in start() if not skipped
         self._perf_fp: Optional[PerfProcess] = None
         self._perf_dwarf: Optional[PerfProcess] = None
+        self._is_noop = False  # Track if this profiler has been disabled
 
     def start(self) -> None:
         # Perform perf event discovery and create PerfProcess instances
@@ -225,21 +267,37 @@ class SystemProfiler(ProfilerBase):
                 Path(self._profiler_state.storage_dir),
                 self._profiler_state.stop_event,
                 self._profiler_state.processes_to_profile,
+                use_cgroups=self._perf_use_cgroups,
+                max_cgroups=self._perf_max_cgroups,
             )
             logger.debug("Discovered perf event", discovered_perf_event=discovered_perf_event.name)
             extra_args.extend(discovered_perf_event.perf_extra_args())
         except PerfNoSupportedEvent:
-            # If PID targeting failed during discovery, provide helpful message
-            if self._profiler_state.processes_to_profile is not None:
-                logger.critical(
+            # Handle perf failures gracefully by converting to NoopProfiler
+            if self._perf_use_cgroups:
+                logger.warning(
+                    "Failed to determine perf event to use with cgroup-based profiling. "
+                    "This is likely due to GPU machine compatibility issues where perf segfaults during event discovery. "
+                    "Perf profiler will be disabled. Other profilers will continue. "
+                    "Use '--perf-mode disabled' to avoid this warning."
+                )
+            elif self._profiler_state.processes_to_profile is not None:
+                logger.warning(
                     "Failed to determine perf event to use with target PIDs. "
                     "Target processes may have exited or be invalid. "
                     "Perf profiler will be disabled. Other profilers will continue. "
                     "Consider using system-wide profiling (remove --pids) or '--perf-mode disabled'."
                 )
             else:
-                logger.critical("Failed to determine perf event to use")
-            raise
+                logger.warning(
+                    "Failed to determine perf event to use. "
+                    "This is likely due to GPU machine compatibility issues where perf segfaults. "
+                    "Perf profiler will be disabled. Other profilers will continue."
+                )
+            
+            # Convert this profiler to a NoopProfiler to avoid further issues
+            self._convert_to_noop()
+            return
 
         # Create PerfProcess instances now that we know we're actually starting
         if self._perf_mode in ("fp", "smart"):
@@ -252,6 +310,9 @@ class SystemProfiler(ProfilerBase):
                 extra_args=extra_args,
                 processes_to_profile=self._profiler_state.processes_to_profile,
                 switch_timeout_s=self._switch_timeout_s,
+                use_cgroups=self._perf_use_cgroups,
+                max_cgroups=self._perf_max_cgroups,
+                max_docker_containers=self._perf_max_docker_containers,
             )
             self._perfs.append(self._perf_fp)
         else:
@@ -268,6 +329,9 @@ class SystemProfiler(ProfilerBase):
                 extra_args=dwarf_extra_args,
                 processes_to_profile=self._profiler_state.processes_to_profile,
                 switch_timeout_s=self._switch_timeout_s,
+                use_cgroups=self._perf_use_cgroups,
+                max_cgroups=self._perf_max_cgroups,
+                max_docker_containers=self._perf_max_docker_containers,
             )
             self._perfs.append(self._perf_dwarf)
         else:
@@ -314,6 +378,10 @@ class SystemProfiler(ProfilerBase):
         return None
 
     def snapshot(self) -> ProcessToProfileData:
+        # Check if profiler is in noop state
+        if self._is_noop:
+            return {}
+            
         # Check if profiler was actually started (not skipped due to --skip-system-profilers-above)
         if self._perf_fp is None and self._perf_dwarf is None:
             logger.debug("SystemProfiler snapshot called but profiler was never started (likely skipped due to high process count)")
@@ -357,6 +425,28 @@ class SystemProfiler(ProfilerBase):
         else:
             appid = None
         return ProfileData(stacks, appid, metadata, self._profiler_state.get_container_name(pid))
+
+    def _convert_to_noop(self) -> None:
+        """Convert this profiler to a no-op state when perf fails to start."""
+        self._is_noop = True
+        # Clean up any existing perf processes
+        if self._perf_fp is not None:
+            try:
+                self._perf_fp.stop()
+            except Exception:
+                pass
+            self._perf_fp = None
+        if self._perf_dwarf is not None:
+            try:
+                self._perf_dwarf.stop()
+            except Exception:
+                pass
+            self._perf_dwarf = None
+
+    def stop(self) -> None:
+        if self._is_noop:
+            return
+        super().stop()
 
 
 class PerfMetadata(ApplicationMetadata):

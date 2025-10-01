@@ -69,7 +69,8 @@ class SupportedPerfEvent(Enum):
 
 
 def discover_appropriate_perf_event(
-    tmp_dir: Path, stop_event: Event, pids: Optional[List[Process]] = None
+    tmp_dir: Path, stop_event: Event, pids: Optional[List[Process]] = None,
+    use_cgroups: bool = False, max_cgroups: int = 50
 ) -> SupportedPerfEvent:
     """
     Get the appropriate event should be used by `perf record`.
@@ -80,6 +81,10 @@ def discover_appropriate_perf_event(
     actually collects samples, and make changes only if it doesn't.
 
     :param tmp_dir: working directory of this function
+    :param stop_event: event to signal stopping
+    :param pids: optional list of processes to profile (for PID-based profiling)
+    :param use_cgroups: whether to use cgroup-based profiling
+    :param max_cgroups: maximum number of cgroups to profile
     :return: `perf record` extra arguments to use (e.g. `["-e", "cpu-clock"]`)
     """
 
@@ -96,6 +101,12 @@ def discover_appropriate_perf_event(
                 "sleep",
                 "0.5",
             ]  # `sleep 0.5` is enough to be certain some samples should've been collected.
+            # For discovery, we need to ensure we can capture the 'sleep 0.5' command
+            # When using cgroups, the sleep command won't be in any target cgroup,
+            # so we use system-wide profiling for discovery regardless of the final mode
+            discovery_pids = None if use_cgroups else pids
+            discovery_use_cgroups = False  # Always use system-wide for discovery
+            
             perf_process = PerfProcess(
                 frequency=11,
                 stop_event=stop_event,
@@ -103,14 +114,21 @@ def discover_appropriate_perf_event(
                 is_dwarf=False,
                 inject_jit=False,
                 extra_args=current_extra_args,
-                processes_to_profile=pids,
+                processes_to_profile=discovery_pids,
                 switch_timeout_s=15,
+                use_cgroups=discovery_use_cgroups,
+                max_cgroups=max_cgroups,
             )
             perf_process.start()
-            parsed_perf_script = parse_perf_script(perf_process.wait_and_script())
+            perf_output = perf_process.wait_and_script()
+            logger.debug(f"Perf event {event.name} discovery output length: {len(perf_output) if perf_output else 0}")
+            parsed_perf_script = parse_perf_script(perf_output)
             if len(parsed_perf_script) > 0:
+                logger.debug(f"Perf event {event.name} discovery successful, found {len(parsed_perf_script)} samples")
                 # `perf script` isn't empty, we'll use this event.
                 return event
+            else:
+                logger.debug(f"Perf event {event.name} discovery failed, no samples collected")
         except Exception as e:  # pylint: disable=broad-except
             # Check if this was a segfault in perf script, log it appropriately
             exc_name = type(e).__name__
