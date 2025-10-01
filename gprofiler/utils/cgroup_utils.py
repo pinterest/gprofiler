@@ -19,8 +19,16 @@ import logging
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict
 from dataclasses import dataclass
+from enum import Enum
 
 logger = logging.getLogger(__name__)
+
+
+class CgroupVersion(Enum):
+    """Cgroup version enumeration"""
+    V1 = "v1"
+    V2 = "v2"
+    UNKNOWN = "unknown"
 
 @dataclass
 class CgroupResourceUsage:
@@ -46,32 +54,100 @@ class CgroupResourceUsage:
         return (cpu_score * 10) + memory_score
 
 
+def detect_cgroup_version() -> CgroupVersion:
+    """Detect which cgroup version is in use for Docker containers"""
+    try:
+        # Check if Docker containers are using cgroup v1 paths (hybrid systems)
+        if os.path.exists("/sys/fs/cgroup/memory/docker") or os.path.exists("/sys/fs/cgroup/cpu,cpuacct/docker"):
+            return CgroupVersion.V1
+        
+        # Check if cgroup v2 is mounted and being used
+        with open("/proc/mounts", "r") as f:
+            mounts = f.read()
+            if "cgroup2" in mounts and "/sys/fs/cgroup" in mounts:
+                # Check if Docker containers exist in v2 paths
+                v2_docker_paths = [
+                    "/sys/fs/cgroup/system.slice",
+                    "/sys/fs/cgroup/docker"
+                ]
+                for path in v2_docker_paths:
+                    if os.path.exists(path):
+                        try:
+                            entries = os.listdir(path)
+                            if any("docker" in entry.lower() for entry in entries):
+                                return CgroupVersion.V2
+                        except (OSError, PermissionError):
+                            continue
+                
+                # If cgroup2 is mounted but no Docker containers found in v2, check v1
+                if "/sys/fs/cgroup/memory" in mounts or "/sys/fs/cgroup/cpu" in mounts:
+                    return CgroupVersion.V1
+                else:
+                    return CgroupVersion.V2
+            elif "cgroup" in mounts and ("/sys/fs/cgroup/memory" in mounts or "/sys/fs/cgroup/cpu" in mounts):
+                return CgroupVersion.V1
+    except (IOError, OSError) as e:
+        logger.debug(f"Failed to read /proc/mounts: {e}")
+    
+    # Fallback: check filesystem structure
+    if os.path.exists("/sys/fs/cgroup/memory") or os.path.exists("/sys/fs/cgroup/cpu,cpuacct"):
+        return CgroupVersion.V1
+    elif os.path.exists("/sys/fs/cgroup/cgroup.controllers"):
+        return CgroupVersion.V2
+    
+    return CgroupVersion.UNKNOWN
+
+
 def is_cgroup_available() -> bool:
     """Check if cgroup filesystem is available and mounted"""
-    return os.path.exists("/sys/fs/cgroup")
+    return os.path.exists("/sys/fs/cgroup") and detect_cgroup_version() != CgroupVersion.UNKNOWN
 
 
 def get_cgroup_cpu_usage(cgroup_path: str) -> Optional[int]:
     """Get CPU usage for a cgroup in nanoseconds"""
-    usage_file = os.path.join(cgroup_path, "cpuacct.usage")
-    if not os.path.exists(usage_file):
-        # Try alternative path
-        alt_path = cgroup_path.replace("/cpu,cpuacct/", "/cpuacct/")
-        usage_file = os.path.join(alt_path, "cpuacct.usage")
-        if not os.path.exists(usage_file):
-            return None
+    cgroup_version = detect_cgroup_version()
     
-    try:
-        with open(usage_file, 'r') as f:
-            return int(f.read().strip())
-    except (IOError, ValueError) as e:
-        logger.debug(f"Failed to read CPU usage from {usage_file}: {e}")
+    if cgroup_version == CgroupVersion.V2:
+        # cgroup v2 uses cpu.stat file
+        cpu_stat_file = os.path.join(cgroup_path, "cpu.stat")
+        if os.path.exists(cpu_stat_file):
+            try:
+                with open(cpu_stat_file, 'r') as f:
+                    for line in f:
+                        if line.startswith("usage_usec "):
+                            # Convert microseconds to nanoseconds
+                            return int(line.split()[1]) * 1000
+            except (IOError, ValueError) as e:
+                logger.debug(f"Failed to read CPU usage from {cpu_stat_file}: {e}")
         return None
+    
+    else:  # cgroup v1
+        usage_file = os.path.join(cgroup_path, "cpuacct.usage")
+        if not os.path.exists(usage_file):
+            # Try alternative path
+            alt_path = cgroup_path.replace("/cpu,cpuacct/", "/cpuacct/")
+            usage_file = os.path.join(alt_path, "cpuacct.usage")
+            if not os.path.exists(usage_file):
+                return None
+        
+        try:
+            with open(usage_file, 'r') as f:
+                return int(f.read().strip())
+        except (IOError, ValueError) as e:
+            logger.debug(f"Failed to read CPU usage from {usage_file}: {e}")
+            return None
 
 
 def get_cgroup_memory_usage(cgroup_path: str) -> Optional[int]:
     """Get memory usage for a cgroup in bytes"""
-    usage_file = os.path.join(cgroup_path, "memory.usage_in_bytes")
+    cgroup_version = detect_cgroup_version()
+    
+    if cgroup_version == CgroupVersion.V2:
+        # cgroup v2 uses memory.current file
+        usage_file = os.path.join(cgroup_path, "memory.current")
+    else:  # cgroup v1
+        usage_file = os.path.join(cgroup_path, "memory.usage_in_bytes")
+    
     if not os.path.exists(usage_file):
         return None
     
@@ -86,32 +162,52 @@ def get_cgroup_memory_usage(cgroup_path: str) -> Optional[int]:
 def find_all_cgroups() -> List[str]:
     """Find all available cgroups in the system"""
     cgroups = []
+    cgroup_version = detect_cgroup_version()
     
-    # Common cgroup mount points to check
-    cgroup_bases = [
-        "/sys/fs/cgroup/cpu,cpuacct",
-        "/sys/fs/cgroup/memory",
-        "/sys/fs/cgroup/cpuacct",
-    ]
+    if cgroup_version == CgroupVersion.V2:
+        # cgroup v2 unified hierarchy
+        base = "/sys/fs/cgroup"
+        try:
+            for root, dirs, files in os.walk(base):
+                # Skip the root directory itself
+                if root == base:
+                    continue
+                
+                # Check if this directory has the necessary files for v2
+                cpu_file = os.path.join(root, "cpu.stat")
+                memory_file = os.path.join(root, "memory.current")
+                
+                if os.path.exists(cpu_file) or os.path.exists(memory_file):
+                    cgroups.append(root)
+        except OSError as e:
+            logger.debug(f"Error walking cgroup v2 directory {base}: {e}")
     
-    for base in cgroup_bases:
-        if os.path.exists(base):
-            try:
-                # Walk through all subdirectories
-                for root, dirs, files in os.walk(base):
-                    # Skip the base directory itself
-                    if root == base:
-                        continue
-                    
-                    # Check if this directory has the necessary files
-                    cpu_file = os.path.join(root, "cpuacct.usage")
-                    memory_file = root.replace("/cpu,cpuacct/", "/memory/") + "/memory.usage_in_bytes"
-                    
-                    if os.path.exists(cpu_file) or os.path.exists(memory_file):
-                        cgroups.append(root)
-            except OSError as e:
-                logger.debug(f"Error walking cgroup directory {base}: {e}")
-                continue
+    else:  # cgroup v1
+        # Common cgroup mount points to check
+        cgroup_bases = [
+            "/sys/fs/cgroup/cpu,cpuacct",
+            "/sys/fs/cgroup/memory",
+            "/sys/fs/cgroup/cpuacct",
+        ]
+        
+        for base in cgroup_bases:
+            if os.path.exists(base):
+                try:
+                    # Walk through all subdirectories
+                    for root, dirs, files in os.walk(base):
+                        # Skip the base directory itself
+                        if root == base:
+                            continue
+                        
+                        # Check if this directory has the necessary files
+                        cpu_file = os.path.join(root, "cpuacct.usage")
+                        memory_file = root.replace("/cpu,cpuacct/", "/memory/") + "/memory.usage_in_bytes"
+                        
+                        if os.path.exists(cpu_file) or os.path.exists(memory_file):
+                            cgroups.append(root)
+                except OSError as e:
+                    logger.debug(f"Error walking cgroup directory {base}: {e}")
+                    continue
     
     return list(set(cgroups))  # Remove duplicates
 
@@ -185,10 +281,58 @@ def cgroup_to_perf_name(cgroup_path: str) -> str:
     return os.path.basename(cgroup_path)
 
 
+def convert_cgroupv2_path_to_perf_name(cgroup_path: str) -> str:
+    """Convert a cgroup v2 path to perf-compatible name"""
+    # Remove the base cgroup path
+    if cgroup_path.startswith("/sys/fs/cgroup/"):
+        relative_path = cgroup_path[len("/sys/fs/cgroup/"):]
+    else:
+        relative_path = cgroup_path
+    
+    # Handle Docker container paths in cgroup v2
+    if "docker-" in relative_path and ".scope" in relative_path:
+        # Extract container ID from system.slice/docker-<container_id>.scope
+        import re
+        match = re.search(r'docker-([a-f0-9]{64})\.scope', relative_path)
+        if match:
+            container_id = match.group(1)
+            return f"docker/{container_id}"
+    
+    # Handle other Docker paths
+    if relative_path.startswith("docker/"):
+        return relative_path
+    
+    # For other cgroups, use the relative path
+    return relative_path
+
+
 def validate_cgroup_perf_event_access(cgroup_name: str) -> bool:
-    """Check if a cgroup exists in the perf_event controller"""
-    perf_event_path = f"/sys/fs/cgroup/perf_event/{cgroup_name}"
-    return os.path.exists(perf_event_path) and os.path.isdir(perf_event_path)
+    """Check if a cgroup is available for perf profiling"""
+    cgroup_version = detect_cgroup_version()
+    
+    if cgroup_version == CgroupVersion.V2:
+        # In cgroup v2, perf events are handled differently
+        # The cgroup path should exist in the unified hierarchy
+        if cgroup_name.startswith("docker/"):
+            # For Docker containers in cgroup v2, check common paths
+            container_id = cgroup_name.replace("docker/", "")
+            possible_paths = [
+                f"/sys/fs/cgroup/system.slice/docker-{container_id}.scope",
+                f"/sys/fs/cgroup/docker/{container_id}",
+                f"/sys/fs/cgroup/system.slice/docker.service/docker/{container_id}",
+            ]
+            for path in possible_paths:
+                if os.path.exists(path) and os.path.isdir(path):
+                    return True
+            return False
+        else:
+            # For other cgroups in v2, check if the path exists
+            cgroup_path = f"/sys/fs/cgroup/{cgroup_name}"
+            return os.path.exists(cgroup_path) and os.path.isdir(cgroup_path)
+    
+    else:  # cgroup v1
+        perf_event_path = f"/sys/fs/cgroup/perf_event/{cgroup_name}"
+        return os.path.exists(perf_event_path) and os.path.isdir(perf_event_path)
 
 
 def get_top_docker_containers_for_perf(limit: int) -> List[str]:
@@ -199,6 +343,8 @@ def get_top_docker_containers_for_perf(limit: int) -> List[str]:
     import subprocess
     
     docker_containers = []
+    cgroup_version = detect_cgroup_version()
+    
     try:
         # Get running Docker containers with resource stats
         result = subprocess.run(
@@ -238,17 +384,37 @@ def get_top_docker_containers_for_perf(limit: int) -> List[str]:
                     
                     if full_id_result.returncode == 0:
                         full_id = full_id_result.stdout.strip()
-                        docker_cgroup = f"docker/{full_id}"
+                        
+                        if cgroup_version == CgroupVersion.V2:
+                            # For cgroup v2, we need to find the actual cgroup path
+                            # and convert it to perf-compatible format
+                            possible_paths = [
+                                f"/sys/fs/cgroup/system.slice/docker-{full_id}.scope",
+                                f"/sys/fs/cgroup/docker/{full_id}",
+                                f"/sys/fs/cgroup/system.slice/docker.service/docker/{full_id}",
+                            ]
+                            
+                            docker_cgroup = None
+                            for path in possible_paths:
+                                if os.path.exists(path) and os.path.isdir(path):
+                                    docker_cgroup = convert_cgroupv2_path_to_perf_name(path)
+                                    break
+                            
+                            if not docker_cgroup:
+                                docker_cgroup = f"docker/{full_id}"  # Fallback
+                        else:
+                            # cgroup v1 format
+                            docker_cgroup = f"docker/{full_id}"
                         
                         # Check if this container has perf_event access
                         if validate_cgroup_perf_event_access(docker_cgroup):
                             docker_containers.append(docker_cgroup)
-                            logger.debug(f"Added Docker container for profiling: {container_id} (CPU: {cpu_percent}%)")
+                            logger.debug(f"Added Docker container for profiling: {container_id} (CPU: {cpu_percent}%) -> {docker_cgroup}")
                             
                             if len(docker_containers) >= limit:
                                 break
                         else:
-                            logger.debug(f"Docker container {container_id} not available in perf_event controller")
+                            logger.debug(f"Docker container {container_id} not available for perf profiling")
                 
                 except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
                     logger.debug(f"Failed to get full ID for container {container_id}: {e}")
