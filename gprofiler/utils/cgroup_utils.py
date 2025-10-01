@@ -327,7 +327,11 @@ def validate_cgroup_perf_event_access(cgroup_name: str) -> bool:
             return False
         else:
             # For other cgroups in v2, check if the path exists
-            cgroup_path = f"/sys/fs/cgroup/{cgroup_name}"
+            # Handle both absolute and relative paths
+            if cgroup_name.startswith("/sys/fs/cgroup/"):
+                cgroup_path = cgroup_name
+            else:
+                cgroup_path = f"/sys/fs/cgroup/{cgroup_name}"
             return os.path.exists(cgroup_path) and os.path.isdir(cgroup_path)
     
     else:  # cgroup v1
@@ -387,7 +391,7 @@ def get_top_docker_containers_for_perf(limit: int) -> List[str]:
                         
                         if cgroup_version == CgroupVersion.V2:
                             # For cgroup v2, we need to find the actual cgroup path
-                            # and convert it to perf-compatible format
+                            # and use the relative path for perf
                             possible_paths = [
                                 f"/sys/fs/cgroup/system.slice/docker-{full_id}.scope",
                                 f"/sys/fs/cgroup/docker/{full_id}",
@@ -397,11 +401,26 @@ def get_top_docker_containers_for_perf(limit: int) -> List[str]:
                             docker_cgroup = None
                             for path in possible_paths:
                                 if os.path.exists(path) and os.path.isdir(path):
-                                    docker_cgroup = convert_cgroupv2_path_to_perf_name(path)
+                                    # For cgroup v2, perf expects the relative path from /sys/fs/cgroup/
+                                    docker_cgroup = path.replace("/sys/fs/cgroup/", "")
+                                    logger.debug(f"Found cgroup v2 path for container {container_id}: {path} -> {docker_cgroup}")
                                     break
                             
                             if not docker_cgroup:
-                                docker_cgroup = f"docker/{full_id}"  # Fallback
+                                # Fallback: try to find any docker-related path for this container
+                                try:
+                                    import glob
+                                    pattern = f"/sys/fs/cgroup/**/docker*{full_id[:12]}*"
+                                    matches = glob.glob(pattern, recursive=True)
+                                    if matches:
+                                        docker_cgroup = matches[0].replace("/sys/fs/cgroup/", "")
+                                        logger.debug(f"Found fallback cgroup v2 path: {matches[0]} -> {docker_cgroup}")
+                                    else:
+                                        docker_cgroup = f"docker/{full_id}"  # Last resort fallback
+                                        logger.debug(f"No cgroup v2 path found, using fallback: {docker_cgroup}")
+                                except Exception as e:
+                                    docker_cgroup = f"docker/{full_id}"
+                                    logger.debug(f"Error finding cgroup v2 path: {e}, using fallback: {docker_cgroup}")
                         else:
                             # cgroup v1 format
                             docker_cgroup = f"docker/{full_id}"
