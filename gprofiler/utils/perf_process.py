@@ -102,11 +102,28 @@ class PerfProcess:
                     self._cgroup_args.extend(["-G", ",".join(top_cgroups)])
                     logger.info(f"Using cgroup-based profiling with {len(top_cgroups)} top cgroups: {top_cgroups[:3]}{'...' if len(top_cgroups) > 3 else ''}")
                 else:
-                    logger.warning("No cgroups found with resource usage, falling back to system-wide profiling")
-                    self._pid_args.append("-a")
+                    # Never fall back to system-wide profiling when cgroups are explicitly requested
+                    from gprofiler.exceptions import PerfNoSupportedEvent
+                    if max_docker_containers > 0:
+                        logger.error(f"No Docker containers found for profiling despite --perf-max-docker-containers={max_docker_containers}. "
+                                   "This could indicate cgroup v2 compatibility issues or no running containers. "
+                                   "Perf profiler will be disabled to prevent system-wide profiling.")
+                        raise PerfNoSupportedEvent("Docker container profiling requested but no containers available")
+                    elif max_cgroups > 0:
+                        logger.error(f"No cgroups found for profiling despite --perf-max-cgroups={max_cgroups}. "
+                                   "This could indicate cgroup compatibility issues or no active cgroups. "
+                                   "Perf profiler will be disabled to prevent system-wide profiling.")
+                        raise PerfNoSupportedEvent("Cgroup profiling requested but no cgroups available")
+                    else:
+                        logger.error("Cgroup profiling was requested (--perf-use-cgroups) but no specific limits were set. "
+                                   "Perf profiler will be disabled to prevent system-wide profiling.")
+                        raise PerfNoSupportedEvent("Cgroup profiling requested but no containers or cgroups specified")
             except Exception as e:
-                logger.warning(f"Failed to get top cgroups: {e}, falling back to system-wide profiling")
-                self._pid_args.append("-a")
+                # Never fall back to system-wide profiling when cgroups are explicitly requested
+                from gprofiler.exceptions import PerfNoSupportedEvent
+                logger.error(f"Failed to get cgroups for profiling: {e}. "
+                           "Perf profiler will be disabled to prevent system-wide profiling.")
+                raise PerfNoSupportedEvent(f"Cgroup profiling failed: {e}")
         elif processes_to_profile is not None:
             # Traditional PID-based profiling
             self._pid_args.append("--pid")

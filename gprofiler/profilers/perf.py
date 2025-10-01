@@ -196,16 +196,13 @@ class SystemProfiler(ProfilerBase):
     
     def should_skip_due_to_system_threshold(self) -> bool:
         """
-        Override system profiler skipping logic when cgroup-based profiling is explicitly requested.
+        Always skip perf when system process threshold is exceeded.
         
-        If the user has explicitly configured cgroup-based profiling with a specific limit,
-        we should honor that intent and not disable perf due to system-wide process thresholds.
+        This provides a hard safety limit - if the system has too many processes,
+        disable perf entirely regardless of cgroup configuration to prevent resource exhaustion.
         """
-        # If cgroup-based profiling is explicitly requested with a limit, don't skip
-        if self._perf_use_cgroups and self._perf_max_cgroups > 0:
-            return False
-        
-        # Otherwise, use the default system profiler skipping logic
+        # Always use the default system profiler skipping logic
+        # No overrides - safety first!
         return True
     
     def _should_limit_processes(self) -> bool:
