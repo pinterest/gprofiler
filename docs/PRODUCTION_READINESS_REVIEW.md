@@ -699,7 +699,7 @@ gprofiler \
 ```bash
 # Production-ready configuration with multiple safety layers
 gprofiler \
-  --max-processes 20 \
+  --max-processes-runtime-profiler 20 \
   --skip-system-profilers-above 500 \
   --perf-use-cgroups \
   --perf-max-cgroups 0 \
@@ -719,7 +719,7 @@ gprofiler \
    - **Behavior**: If system has >500 processes, perf is completely disabled
    - **No Exceptions**: Applies regardless of cgroup configuration
 
-2. **Runtime Process Limiting** (`--max-processes 20`):
+2. **Runtime Process Limiting** (`--max-processes-runtime-profiler 20`):
    - **Purpose**: Limits memory-intensive runtime profilers (py-spy, Java, etc.)
    - **Behavior**: Profiles only top 20 processes by CPU usage
    - **Always Active**: Works even when perf is disabled
@@ -737,13 +737,13 @@ gprofiler \
 **Escalation Path for Different System Loads:**
 ```bash
 # Light Load Systems (<200 processes)
-gprofiler --max-processes 50 --perf-use-cgroups --perf-max-docker-containers 3 --perf-max-cgroups 0
+gprofiler --max-processes-runtime-profiler 50 --perf-use-cgroups --perf-max-docker-containers 3 --perf-max-cgroups 0
 
 # Medium Load Systems (200-500 processes)  
-gprofiler --max-processes 20 --perf-use-cgroups --perf-max-docker-containers 2 --perf-max-cgroups 0
+gprofiler --max-processes-runtime-profiler 20 --perf-use-cgroups --perf-max-docker-containers 2 --perf-max-cgroups 0
 
 # Heavy Load Systems (>500 processes) - Perf Auto-Disabled
-gprofiler --max-processes 10 --skip-system-profilers-above 500 --perf-use-cgroups --perf-max-docker-containers 1 --perf-max-cgroups 0
+gprofiler --max-processes-runtime-profiler 10 --skip-system-profilers-above 500 --perf-use-cgroups --perf-max-docker-containers 1 --perf-max-cgroups 0
 ```
 
 **🆕 Enhanced Safety Features (2024 Update):**
@@ -1153,7 +1153,7 @@ gprofiler --max-processes-runtime-profiler 30 --perf-use-cgroups --perf-max-cgro
 # Result: 8 containers + up to 7 other cgroups = 15 total
 
 # Production guard rails (recommended for production)
-gprofiler --max-processes 20 --skip-system-profilers-above 500 --perf-use-cgroups --perf-max-cgroups 0 --perf-max-docker-containers 1
+gprofiler --max-processes-runtime-profiler 20 --skip-system-profilers-above 500 --perf-use-cgroups --perf-max-cgroups 0 --perf-max-docker-containers 1
 # Result: Multi-layered safety, 1 container max, hard process limits
 
 # Minimal resources (no perf data)
