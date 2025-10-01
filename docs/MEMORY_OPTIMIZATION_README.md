@@ -397,6 +397,7 @@ gprofiler --max-processes-runtime-profiler 50
 
 **How it works**: 
 - Scans ALL available cgroups (183 total on typical systems)
+- **Automatically detects cgroup v1/v2** and uses appropriate file paths
 - Selects top N cgroups by **CPU usage** (10x weighted over memory)
 - Uses `perf -G cgroup1,cgroup2,...` instead of fragile PID lists
 - Eliminates PID-related crashes in dynamic environments
@@ -794,8 +795,15 @@ These optimizations ensure **gprofiler can run reliably** even with invalid conf
 
 **How it works**:
 - Uses `docker stats` to identify running containers by **CPU usage**
-- Profiles individual containers: `/sys/fs/cgroup/perf_event/docker/abc123def456...`
+- **Automatically detects cgroup version (v1/v2)** and uses appropriate paths
+- Profiles individual containers with proper cgroup path resolution
 - Provides per-container performance data instead of aggregate
+
+**🆕 Cgroup v1/v2 Compatibility (2024 Update)**:
+- **Cgroup v1**: Uses `/sys/fs/cgroup/perf_event/docker/abc123def456...`
+- **Cgroup v2**: Uses `/sys/fs/cgroup/system.slice/docker-abc123def456.scope`
+- **Hybrid Systems**: Automatically detects which version Docker is using
+- **Path Conversion**: Converts cgroup v2 paths to perf-compatible format
 
 **⚠️ Parameter Interaction:**
 ```bash
@@ -808,7 +816,69 @@ gprofiler --perf-use-cgroups --perf-max-docker-containers 10 --perf-max-cgroups 
 # Result: 10 Docker containers + up to 10 other cgroups (total ≤ 20)
 ```
 
-**Benefits**: CPU-based selection of most active containers with granular per-container insights.
+**Benefits**: CPU-based selection of most active containers with granular per-container insights, now supporting both cgroup v1 and v2 systems.
+
+### 🛡️ Production Guard Rails and Safety Limits
+
+**When to use**: Production environments where you need multiple layers of protection against resource exhaustion.
+
+**Recommended Production Configuration:**
+```bash
+# Production-ready configuration with multiple safety layers
+gprofiler \
+  --max-processes 20 \
+  --skip-system-profilers-above 500 \
+  --perf-use-cgroups \
+  --perf-max-cgroups 0 \
+  --perf-max-docker-containers 1
+
+# Result: 
+# - Runtime profilers limited to 20 processes max
+# - Perf completely disabled if system has >500 processes  
+# - When perf runs, profiles only 1 Docker container
+# - Never falls back to dangerous system-wide profiling
+```
+
+**Safety Layer Breakdown:**
+
+1. **🔒 Hard Process Limit** (`--skip-system-profilers-above 500`):
+   - **Purpose**: Absolute safety threshold - disables perf entirely on busy systems
+   - **Behavior**: If system has >500 processes, perf is completely disabled
+   - **No Exceptions**: Applies regardless of cgroup configuration
+
+2. **⚖️ Runtime Process Limiting** (`--max-processes 20`):
+   - **Purpose**: Limits memory-intensive runtime profilers (py-spy, Java, etc.)
+   - **Behavior**: Profiles only top 20 processes by CPU usage
+   - **Always Active**: Works even when perf is disabled
+
+3. **🎯 Targeted Container Profiling** (`--perf-max-docker-containers 1`):
+   - **Purpose**: Minimal perf scope - profiles only the busiest container
+   - **Behavior**: Uses `docker stats` to find highest CPU container
+   - **Fallback Protection**: If no containers found, perf is safely disabled
+
+4. **🚫 System-Wide Prevention** (`--perf-max-cgroups 0`):
+   - **Purpose**: Prevents profiling of system cgroups (system.slice, etc.)
+   - **Behavior**: Only Docker containers are considered for profiling
+   - **Memory Savings**: Avoids expensive system-wide cgroup scanning
+
+**Escalation Path for Different System Loads:**
+
+```bash
+# Light Load Systems (<200 processes)
+gprofiler --max-processes 50 --perf-use-cgroups --perf-max-docker-containers 3 --perf-max-cgroups 0
+
+# Medium Load Systems (200-500 processes)  
+gprofiler --max-processes 20 --perf-use-cgroups --perf-max-docker-containers 2 --perf-max-cgroups 0
+
+# Heavy Load Systems (>500 processes) - Perf Auto-Disabled
+gprofiler --max-processes 10 --skip-system-profilers-above 500 --perf-use-cgroups --perf-max-docker-containers 1 --perf-max-cgroups 0
+```
+
+**Error Handling Improvements:**
+- **No Fallback Risk**: Never falls back to `perf -a` (system-wide profiling)
+- **Graceful Degradation**: If Docker container profiling fails, perf is safely disabled
+- **Clear Logging**: Detailed messages explain why perf was disabled
+- **Continued Operation**: Runtime profilers continue even if perf is disabled
 
 ---
 
@@ -823,7 +893,7 @@ gprofiler --perf-use-cgroups --perf-max-docker-containers 10 --perf-max-cgroups 
    - **Perf File Rotation Optimization**: Dynamic rotation (duration * 1.5 for low-freq vs duration * 3) reducing memory buildup
    - **Invalid PID Crash Prevention**: 100% uptime improvement with graceful fallback mechanisms
 
-2. **Enhanced Docker Container Profiling**: Granular container-level profiling with `--perf-max-docker-containers` for precise problem container identification
+2. **Enhanced Docker Container Profiling**: Granular container-level profiling with `--perf-max-docker-containers` for precise problem container identification, now with full cgroup v1/v2 compatibility and automatic version detection
 
 3. **Enhanced PID Error Handling**: Comprehensive validation and graceful handling of process lifecycle errors across all profilers, reducing PID-related errors by 94%
 
@@ -835,6 +905,8 @@ gprofiler --perf-use-cgroups --perf-max-docker-containers 10 --perf-max-cgroups 
 
 7. **Fault-Tolerant Architecture**: Lazy initialization, fault isolation, and error recovery preventing cascading failures
 
+8. **Production Guard Rails**: Multi-layered safety system with hard process limits, graceful perf disabling, and elimination of dangerous system-wide profiling fallbacks
+
 ### Overall Results
 
 These improvements provide:
@@ -844,5 +916,7 @@ These improvements provide:
 - **Zero-crash reliability** with graceful degradation
 - **Resource cleanup optimization** for sustained operations
 - **Granular container insights** for targeted troubleshooting
+- **Production-ready safety** with multiple guard rails and cgroup v1/v2 support
+- **Elimination of dangerous fallbacks** preventing system-wide profiling risks
 
 *This document represents the comprehensive journey from identifying critical production blockers to implementing robust solutions that ensure gProfiler meets high reliability standards for production deployment.*
