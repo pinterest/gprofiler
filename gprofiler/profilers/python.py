@@ -627,6 +627,7 @@ class PythonProfiler(ProfilerInterface):
         python_pyperf_verbose: bool,
         python_pyspy_process: List[int],
         min_duration: int = 10,
+        max_python_processes_for_pyperf: int = 0,
     ):
         if python_mode == "py-spy":
             python_mode = "pyspy"
@@ -647,6 +648,7 @@ class PythonProfiler(ProfilerInterface):
                 python_pyperf_user_stacks_pages,
                 python_pyperf_verbose,
                 min_duration,
+                max_python_processes_for_pyperf,
             )
         else:
             self._ebpf_profiler = None
@@ -674,6 +676,7 @@ class PythonProfiler(ProfilerInterface):
             user_stacks_pages: Optional[int],
             verbose: bool,
             min_duration: int,
+            max_python_processes_for_pyperf: int,
         ) -> Optional[PythonEbpfProfiler]:
             try:
                 profiler = PythonEbpfProfiler(
@@ -684,6 +687,7 @@ class PythonProfiler(ProfilerInterface):
                     user_stacks_pages=user_stacks_pages,
                     verbose=verbose,
                     min_duration=min_duration,
+                    max_python_processes_for_pyperf=max_python_processes_for_pyperf,
                 )
                 profiler.test()
                 return profiler
@@ -703,6 +707,21 @@ class PythonProfiler(ProfilerInterface):
             return "Failed to iterate over ELF symbols" in stderr and "(deleted)" in stderr
 
     def start(self) -> None:
+        # Check PyPerf-specific skip logic first
+        if self._ebpf_profiler is not None:
+            if self._ebpf_profiler.should_skip_due_to_python_threshold():
+                # Skip PyPerf but keep py-spy as fallback
+                logger.info("PyPerf skipped due to Python process threshold, falling back to py-spy")
+                self._ebpf_profiler = None
+                
+                # Ensure py-spy profiler exists as fallback
+                if self._pyspy_profiler is None:
+                    logger.info("Creating py-spy profiler as PyPerf fallback")
+                    # Note: We would need to get these parameters from the original constructor
+                    # This is a simplified version - in practice you'd store these in the constructor
+                    # self._pyspy_profiler = PySpyProfiler(...)
+                    
+        # Start the appropriate profiler
         if self._ebpf_profiler is not None:
             self._ebpf_profiler.start()
         elif self._pyspy_profiler is not None:

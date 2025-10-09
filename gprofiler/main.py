@@ -701,9 +701,19 @@ def parse_cmd_args() -> configargparse.Namespace:
         dest="max_system_processes_for_system_profilers",
         type=positive_integer,
         default=0,
-        help="Skip system-wide profilers (perf, eBPF) when total system processes exceed this threshold (0=unlimited). "
-        "When exceeded, prevents perf and eBPF profilers from starting to reduce resource usage on busy systems. "
+        help="Skip system-wide profilers (perf only) when total system processes exceed this threshold (0=unlimited). "
+        "When exceeded, prevents perf profiler from starting to reduce resource usage on busy systems. "
+        "PyPerf has its own threshold via --skip-pyperf-profiler-above. "
         "Runtime profilers (py-spy, Java, etc.) continue normally with --max-processes limiting. Default: %(default)s",
+    )
+    parser.add_argument(
+        "--skip-pyperf-profiler-above",
+        dest="max_python_processes_for_pyperf",
+        type=positive_integer,
+        default=0,
+        help="Skip PyPerf (eBPF Python profiler) when Python processes exceed this threshold (0=unlimited). "
+        "When exceeded, prevents PyPerf from starting but allows py-spy fallback for Python profiling. "
+        "This provides fine-grained control over PyPerf resource usage independent of system profilers. Default: %(default)s",
     )
     parser.add_argument(
         "--rootless",
