@@ -568,6 +568,237 @@ gProfiler chose specific profilers for production readiness and performance over
 
 This architecture enables gProfiler to provide enterprise-grade continuous profiling across multiple languages while maintaining production safety, cost efficiency, and operational simplicity.
 
+## 🔒 Instance Locking Mechanism
+
+gProfiler implements a sophisticated locking mechanism to prevent multiple instances from running simultaneously, ensuring system stability and avoiding resource conflicts. This is critical in environments where gProfiler might be deployed both as containers and system services.
+
+### Overview
+
+gProfiler uses a **Unix domain socket-based mutex** in the abstract namespace to create a system-wide lock that works across:
+- Container deployments (Docker, Kubernetes)
+- System service deployments (systemd, init systems)
+- Standalone executable runs
+- Mixed deployment scenarios
+
+### Technical Implementation
+
+#### 1. Abstract Unix Domain Socket Lock
+
+The core locking mechanism is implemented in `granulate-utils/granulate_utils/linux/mutex.py`:
+
+```python
+def try_acquire_mutex(name: str) -> None:
+    """
+    Try to acquire a system-wide mutex named `name`. If it is already acquired an exception is raised.
+    
+    The mutex is implemented using a Unix domain socket bound to an abstract address. This provides automatic cleanup
+    when the process goes down, and does not make any assumptions about filesystem structure (as happens with file-based
+    locks). See unix(7) for more info.
+    To see who's holding the lock now, you can run "sudo netstat -xp | grep <name>".
+    """
+    sock = socket.socket(socket.AF_UNIX)
+    try:
+        sock.bind("\0" + name)  # Abstract socket address
+    except OSError as e:
+        if e.errno != errno.EADDRINUSE:
+            raise
+        raise CouldNotAcquireMutex(name) from None
+    else:
+        # Python sockets are not inheritable by default (no need to mark with CLOEXEC to avoid our childs
+        # from inheriting the mutex)
+        _mutexes[name] = sock  # Keep socket alive
+```
+
+**Key Features:**
+- **Abstract Namespace**: Uses `\0` prefix to create abstract socket (no filesystem dependency)
+- **Automatic Cleanup**: Socket disappears when process dies (no stale locks)
+- **Atomic Operation**: Kernel ensures only one process can bind to the address
+- **Cross-Namespace**: Works across different mount/network namespaces
+
+#### 2. Network Namespace Isolation
+
+The lock acquisition happens in the **init network namespace** to ensure system-wide visibility:
+
+```python
+def grab_gprofiler_mutex() -> bool:
+    """
+    Implements a basic, system-wide mutex for gProfiler, to make sure we don't run 2 instances simultaneously.
+    The mutex is implemented by a Unix domain socket bound to an address in the abstract namespace of the init
+    network namespace. This provides automatic cleanup when the process goes down, and does not make any assumption
+    on filesystem structure (as happens with file-based locks).
+    In order to see who's holding the lock now, you can run "sudo netstat -xp | grep gprofiler".
+    """
+    GPROFILER_LOCK = "\x00gprofiler_lock"
+    
+    try:
+        run_in_ns_wrapper(["net"], lambda: try_acquire_mutex(GPROFILER_LOCK))
+    except CouldNotAcquireMutex:
+        print(
+            "Could not acquire gProfiler's lock. Is it already running?"
+            " Try 'sudo netstat -xp | grep gprofiler' to see which process holds the lock.",
+            file=sys.stderr,
+        )
+        return False
+    else:
+        # success
+        return True
+```
+
+**Network Namespace Strategy:**
+- **Init Namespace Access**: `run_in_ns_wrapper(["net"], ...)` switches to PID 1's network namespace
+- **Container Compatibility**: Containers with `--pid=host` can access init namespace
+- **Host Compatibility**: Host processes naturally have access to init namespace
+- **Cross-Boundary Lock**: Single lock works across container and host boundaries
+
+#### 3. Integration with Startup Process
+
+The lock check is integrated early in the startup process (`gprofiler/main.py`):
+
+```python
+def verify_preconditions(args: configargparse.Namespace, processes_to_profile: Optional[List[Process]]) -> None:
+    # ... other precondition checks ...
+    
+    try:
+        if is_linux() and not grab_gprofiler_mutex():
+            sys.exit(0)  # Exit gracefully if lock cannot be acquired
+    except Exception:
+        traceback.print_exc()
+        print(
+            "Could not acquire gProfiler's lock due to an error. Are you running gProfiler in privileged mode?",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+```
+
+**Startup Flow:**
+1. **Early Check**: Lock acquisition happens before profiler initialization
+2. **Graceful Exit**: Failed lock acquisition results in clean exit (exit code 0)
+3. **Error Handling**: Distinguishes between lock conflicts and permission errors
+4. **Privileged Mode**: Requires appropriate permissions for namespace switching
+
+### Locking Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                        gProfiler Locking Architecture                          │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                 │
+│  Container Environment              Host Environment                             │
+│  ┌─────────────────────────────┐    ┌─────────────────────────────────────────┐ │
+│  │  gProfiler Container        │    │  gProfiler systemd Service             │ │
+│  │  (--pid=host)               │    │                                         │ │
+│  │                             │    │                                         │ │
+│  │  1. Startup                 │    │  1. Startup                             │ │
+│  │  2. grab_gprofiler_mutex()  │    │  2. grab_gprofiler_mutex()              │ │
+│  │  3. run_in_ns_wrapper()     │    │  3. run_in_ns_wrapper()                 │ │
+│  │     ↓                       │    │     ↓                                   │ │
+│  └─────┼───────────────────────┘    └─────┼───────────────────────────────────┘ │
+│        │                                  │                                     │
+│        │              ┌───────────────────┼─────────────────────┐               │
+│        │              │    Init Network Namespace (PID 1)      │               │
+│        │              │                   │                     │               │
+│        └──────────────►│  Abstract Socket: \x00gprofiler_lock   │◄──────────────┘
+│                       │                   │                     │
+│                       │  ┌─────────────────────────────────────┐│
+│                       │  │    Only ONE process can bind!       ││
+│                       │  │                                     ││
+│                       │  │  First to bind:  SUCCESS ✓          ││
+│                       │  │  Second to bind: EADDRINUSE ✗       ││
+│                       │  │                                     ││
+│                       │  └─────────────────────────────────────┘│
+│                       └─────────────────────────────────────────┘
+│                                                                                 │
+│  Verification Command:                                                          │
+│  $ sudo netstat -xp | grep gprofiler                                           │
+│  unix  2  [ ]  STREAM  1625700265  2426791/gprofiler  @@gprofiler_lock         │
+│                                                                                 │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Why This Design?
+
+#### 1. **Cross-Deployment Compatibility**
+- **Container ↔ Host**: Lock works between containerized and host-deployed gProfiler
+- **Multiple Containers**: Prevents multiple container instances from conflicting
+- **Mixed Environments**: Handles complex deployment scenarios automatically
+
+#### 2. **Production Safety**
+- **Resource Protection**: Prevents multiple profilers from interfering with each other
+- **System Stability**: Avoids CPU/memory overhead from duplicate profiling
+- **Clean Failure**: Failed lock attempts exit gracefully without disruption
+
+#### 3. **Operational Benefits**
+- **Automatic Cleanup**: No stale lock files to clean up manually
+- **Easy Debugging**: `netstat -xp | grep gprofiler` shows current lock holder
+- **No Configuration**: Works out-of-the-box without additional setup
+
+#### 4. **Technical Advantages**
+- **Atomic Operations**: Kernel-level synchronization prevents race conditions
+- **No Filesystem Dependencies**: Works across different mount namespaces
+- **Permission Model**: Respects existing Unix permission models
+- **Performance**: Minimal overhead for lock acquisition/release
+
+### Common Scenarios
+
+#### Scenario 1: Container Already Running
+```bash
+# Container gProfiler is running (PID 2426791)
+$ sudo netstat -xp | grep gprofiler
+unix  2  [ ]  STREAM  1625700265  2426791/gprofiler  @@gprofiler_lock
+
+# systemd service tries to start
+$ sudo systemctl start gprofiler
+# Result: Service fails gracefully, systemd shows:
+# "Could not acquire gProfiler's lock. Is it already running?"
+```
+
+#### Scenario 2: Host Service Already Running
+```bash
+# systemd service is running (PID 1234567)
+$ sudo netstat -xp | grep gprofiler
+unix  2  [ ]  STREAM  1625700265  1234567/gprofiler  @@gprofiler_lock
+
+# Container tries to start
+$ docker run --pid=host gprofiler
+# Result: Container exits immediately with message:
+# "Could not acquire gProfiler's lock. Is it already running?"
+```
+
+#### Scenario 3: Process Dies
+```bash
+# gProfiler process dies (crash, kill, etc.)
+# Abstract socket automatically disappears
+$ sudo netstat -xp | grep gprofiler
+# (no output - lock is released)
+
+# Next gProfiler instance can start successfully
+$ sudo systemctl start gprofiler
+# Result: SUCCESS - lock acquired
+```
+
+### Troubleshooting
+
+#### Check Current Lock Holder
+```bash
+sudo netstat -xp | grep gprofiler
+```
+
+#### Force Release Lock (Emergency)
+```bash
+# Kill the process holding the lock
+sudo kill -TERM <PID>
+# Lock is automatically released when process dies
+```
+
+#### Permission Issues
+```bash
+# Ensure gProfiler runs with sufficient privileges
+# Container: --privileged or specific capabilities
+# Host: root user or appropriate capabilities
+```
+
+This locking mechanism demonstrates gProfiler's production-ready design, ensuring reliable operation across diverse deployment scenarios while maintaining system stability and operational simplicity.
+
 ## 🔍 Language Identification: Agent vs Backend
 
 **Key Question**: Are perf stack traces identified as Go/C++/Node.js at the agent side (gProfiler) or in the backend (Performance Studio)?
