@@ -46,6 +46,7 @@ from gprofiler.gprofiler_types import (
     StackToSampleCount,
     integers_list,
     nonnegative_integer,
+    positive_integer,
 )
 from gprofiler.log import get_logger_adapter
 from gprofiler.metadata import application_identifiers
@@ -607,6 +608,15 @@ class PySpyProfiler(SpawningProcessProfilerBase):
             " they are not recognized by gProfiler as Python processes."
             " Note - gProfiler assumes that the given processes are kept running as long as gProfiler runs.",
         ),
+        ProfilerArgument(
+            name="--python-pyperf-max-processes",
+            dest="python_pyperf_max_processes",
+            type=positive_integer,
+            default=0,
+            help="Skip PyPerf (eBPF Python profiler) when Python processes exceed this threshold (0=unlimited). "
+            "When exceeded, prevents PyPerf from starting but allows py-spy fallback for Python profiling. "
+            "This provides fine-grained control over PyPerf resource usage independent of system profilers. Default: %(default)s",
+        ),
     ],
     supported_profiling_modes=["cpu"],
 )
@@ -627,7 +637,7 @@ class PythonProfiler(ProfilerInterface):
         python_pyperf_verbose: bool,
         python_pyspy_process: List[int],
         min_duration: int = 10,
-        max_python_processes_for_pyperf: int = 0,
+        python_pyperf_max_processes: int = 0,
     ):
         if python_mode == "py-spy":
             python_mode = "pyspy"
@@ -639,6 +649,8 @@ class PythonProfiler(ProfilerInterface):
                 raise Exception(f"PyPerf is supported only on x86_64 (and not on this arch {get_arch()})")
             python_mode = "pyspy"
 
+        logger.debug(f"Initializing Python profiler with python_pyperf_max_processes={python_pyperf_max_processes}")
+
         if python_mode in ("auto", "pyperf"):
             self._ebpf_profiler = self._create_ebpf_profiler(
                 frequency,
@@ -648,7 +660,7 @@ class PythonProfiler(ProfilerInterface):
                 python_pyperf_user_stacks_pages,
                 python_pyperf_verbose,
                 min_duration,
-                max_python_processes_for_pyperf,
+                python_pyperf_max_processes,
             )
         else:
             self._ebpf_profiler = None
@@ -676,7 +688,7 @@ class PythonProfiler(ProfilerInterface):
             user_stacks_pages: Optional[int],
             verbose: bool,
             min_duration: int,
-            max_python_processes_for_pyperf: int,
+            python_pyperf_max_processes: int,
         ) -> Optional[PythonEbpfProfiler]:
             try:
                 profiler = PythonEbpfProfiler(
@@ -687,7 +699,7 @@ class PythonProfiler(ProfilerInterface):
                     user_stacks_pages=user_stacks_pages,
                     verbose=verbose,
                     min_duration=min_duration,
-                    max_python_processes_for_pyperf=max_python_processes_for_pyperf,
+                    python_pyperf_max_processes=python_pyperf_max_processes,
                 )
                 profiler.test()
                 return profiler
