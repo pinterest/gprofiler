@@ -1135,9 +1135,9 @@ All critical reliability issues have been systematically addressed:
    - No → Use `--skip-system-profilers-above N`
 
 2. **How many Python processes do you have?**
-   - **1-30 Python processes** → Use `--skip-pyperf-profiler-above 30` (PyPerf optimal range)
-   - **30+ Python processes** → Use `--skip-pyperf-profiler-above 25` (conservative with py-spy fallback)
-   - **Mixed workload** → Use `--skip-pyperf-profiler-above 25 --skip-system-profilers-above 300`
+   - **1-30 Python processes** → Use `--python-pyperf-max-processes 30` (PyPerf optimal range)
+   - **30+ Python processes** → Use `--python-pyperf-max-processes 25` (conservative with py-spy fallback)
+   - **Mixed workload** → Use `--python-pyperf-max-processes 25 --skip-system-profilers-above 300`
 
 3. **What type of perf insights do you need?**
    - **All system activity** → `--perf-max-cgroups N` (includes services, containers, etc.)
@@ -1154,7 +1154,7 @@ gprofiler --max-processes-runtime-profiler 50 --perf-use-cgroups --perf-max-cgro
 # Result: Top 30 cgroups by CPU (services, containers, etc.)
 
 # Python-heavy microservices (RECOMMENDED for Python workloads)
-gprofiler --max-processes-runtime-profiler 10 --skip-pyperf-profiler-above 30 --perf-use-cgroups --perf-max-docker-containers 8
+gprofiler --max-processes-runtime-profiler 10 --python-pyperf-max-processes 30 --perf-use-cgroups --perf-max-docker-containers 8
 # Result: PyPerf handles up to 30 Python processes (100% coverage), top 8 containers via perf
 
 # Container-focused troubleshooting (pure container view)
@@ -1162,15 +1162,15 @@ gprofiler --max-processes-runtime-profiler 50 --perf-use-cgroups --perf-max-dock
 # Result: ONLY top 20 Docker containers by CPU, no system noise
 
 # Memory-constrained with PyPerf optimization (balanced approach)
-gprofiler --max-processes-runtime-profiler 30 --skip-pyperf-profiler-above 20 --perf-use-cgroups --perf-max-cgroups 10 --perf-max-docker-containers 5
+gprofiler --max-processes-runtime-profiler 30 --python-pyperf-max-processes 20 --perf-use-cgroups --perf-max-cgroups 10 --perf-max-docker-containers 5
 # Result: PyPerf handles 20 Python processes + 5 containers + 5 other cgroups, <600MB memory
 
 # Production guard rails (recommended for production)
-gprofiler --max-processes-runtime-profiler 20 --skip-system-profilers-above 500 --skip-pyperf-profiler-above 15 --perf-use-cgroups --perf-max-cgroups 0 --perf-max-docker-containers 1
+gprofiler --max-processes-runtime-profiler 20 --skip-system-profilers-above 500 --python-pyperf-max-processes 15 --perf-use-cgroups --perf-max-cgroups 0 --perf-max-docker-containers 1
 # Result: Multi-layered safety, conservative PyPerf threshold, 1 container max, hard process limits
 
 # Minimal resources (no perf data, Python-optimized)
-gprofiler --max-processes-runtime-profiler 50 --skip-system-profilers-above 300 --skip-pyperf-profiler-above 25
+gprofiler --max-processes-runtime-profiler 50 --skip-system-profilers-above 300 --python-pyperf-max-processes 25
 # Result: Only runtime profilers with optimized PyPerf coverage, ~400MB memory
 ```
 
@@ -1178,7 +1178,7 @@ gprofiler --max-processes-runtime-profiler 50 --skip-system-profilers-above 300 
 - `--perf-max-cgroups 0` = **NO system cgroups** (only Docker if specified)
 - `--perf-max-cgroups N` = **Up to N total cgroups** (Docker + others combined)
 - Both perf parameters use **CPU-based selection** (10x weighted over memory)
-- `--skip-pyperf-profiler-above N` = **PyPerf-specific threshold** based on Python process count (not total processes)
+- `--python-pyperf-max-processes N` = **PyPerf-specific threshold** based on Python process count (not total processes)
 - **PyPerf efficiency**: 10-50x more efficient than py-spy for multiple processes
 - **Optimal PyPerf range**: 15-30 Python processes for maximum efficiency
 - **Intelligent fallback**: PyPerf → py-spy when threshold exceeded
@@ -1230,7 +1230,7 @@ gprofiler --max-processes-runtime-profiler 50 --skip-system-profilers-above 300 
 
 7. **Enhanced Docker Container Profiling with Cgroup v1/v2 Support**: Automatic detection of cgroup versions with proper path resolution for both traditional and modern container environments, ensuring compatibility across all deployment scenarios.
 
-8. **PyPerf-Specific Threshold Optimization (`--skip-pyperf-profiler-above`)**: Independent threshold control for PyPerf (eBPF Python profiler) separate from generic system profilers, enabling optimal Python process coverage with 10-50x efficiency gains over py-spy.
+8. **PyPerf-Specific Threshold Optimization (`--python-pyperf-max-processes`)**: Independent threshold control for PyPerf (eBPF Python profiler) separate from generic system profilers, enabling optimal Python process coverage with 10-50x efficiency gains over py-spy.
 
 9. **Production Guard Rails**: Multi-layered safety system with hard process limits, graceful perf disabling, and elimination of dangerous system-wide profiling fallbacks, providing robust protection against resource exhaustion in production environments.
 

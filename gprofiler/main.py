@@ -303,7 +303,7 @@ class GProfiler:
                 if total_processes > self._profiler_state.max_system_processes_for_system_profilers:
                     skip_system_profilers = True
                     logger.warning(
-                        f"Skipping system profilers (perf, PyPerf) - {total_processes} processes exceed threshold "
+                        f"Skipping system profilers (perf) - {total_processes} processes exceed threshold "
                         f"of {self._profiler_state.max_system_processes_for_system_profilers}. "
                         f"Runtime profilers (py-spy, Java, etc.) will continue normally."
                     )
@@ -705,15 +705,6 @@ def parse_cmd_args() -> configargparse.Namespace:
         "When exceeded, prevents perf profiler from starting to reduce resource usage on busy systems. "
         "PyPerf has its own threshold via --skip-pyperf-profiler-above. "
         "Runtime profilers (py-spy, Java, etc.) continue normally with --max-processes limiting. Default: %(default)s",
-    )
-    parser.add_argument(
-        "--skip-pyperf-profiler-above",
-        dest="max_python_processes_for_pyperf",
-        type=positive_integer,
-        default=0,
-        help="Skip PyPerf (eBPF Python profiler) when Python processes exceed this threshold (0=unlimited). "
-        "When exceeded, prevents PyPerf from starting but allows py-spy fallback for Python profiling. "
-        "This provides fine-grained control over PyPerf resource usage independent of system profilers. Default: %(default)s",
     )
     parser.add_argument(
         "--rootless",
