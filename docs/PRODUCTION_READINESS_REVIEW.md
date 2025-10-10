@@ -1101,12 +1101,14 @@ All critical reliability issues have been systematically addressed:
 6. **PID Error Rate**: Should remain under 50/day
 7. **py-spy Parsing Error Rate**: Should remain under 100/day
 8. **Python Process Coverage**: Should maintain >95% coverage
-9. **Invalid PID Crashes**: Should remain at 0
-10. **Subprocess Count**: Monitor for leaks
-11. **Disk Usage**: Should remain under 20GB/day
-12. **Profiling Coverage**: Ensure adequate process coverage
-13. **Heartbeat Command History**: Should stay capped at 1000 entries
-14. **Restart Success Rate**: Should maintain >95% success rate
+9. **PyPerf Efficiency**: Monitor PyPerf vs py-spy usage ratio
+10. **PyPerf Threshold Hits**: Track when PyPerf falls back to py-spy
+11. **Invalid PID Crashes**: Should remain at 0
+12. **Subprocess Count**: Monitor for leaks
+13. **Disk Usage**: Should remain under 20GB/day
+14. **Profiling Coverage**: Ensure adequate process coverage
+15. **Heartbeat Command History**: Should stay capped at 1000 entries
+16. **Restart Success Rate**: Should maintain >95% success rate
 
 ### Alert Thresholds
 - Active memory usage > 1GB
@@ -1117,6 +1119,8 @@ All critical reliability issues have been systematically addressed:
 - PID error rate > 100/day
 - py-spy parsing error rate > 200/day
 - Python process coverage < 90%
+- PyPerf efficiency ratio < 80% (too much py-spy fallback)
+- PyPerf threshold hits > 50/day (may need threshold adjustment)
 - Any invalid PID crashes
 - Subprocess growth rate > 10/minute
 - Any return of OOM events
@@ -1130,12 +1134,17 @@ All critical reliability issues have been systematically addressed:
    - Yes → Use `--perf-use-cgroups` with appropriate limits
    - No → Use `--skip-system-profilers-above N`
 
-2. **What type of perf insights do you need?**
+2. **How many Python processes do you have?**
+   - **1-30 Python processes** → Use `--skip-pyperf-profiler-above 30` (PyPerf optimal range)
+   - **30+ Python processes** → Use `--skip-pyperf-profiler-above 25` (conservative with py-spy fallback)
+   - **Mixed workload** → Use `--skip-pyperf-profiler-above 25 --skip-system-profilers-above 300`
+
+3. **What type of perf insights do you need?**
    - **All system activity** → `--perf-max-cgroups N` (includes services, containers, etc.)
    - **Only container focus** → `--perf-max-docker-containers N --perf-max-cgroups 0`
    - **Mixed approach** → `--perf-max-docker-containers X --perf-max-cgroups Y`
 
-3. **Always limit runtime profilers:**
+4. **Always limit runtime profilers:**
    - Use `--max-processes-runtime-profiler N` (recommended: 30-50)
 
 ### Quick Commands
@@ -1144,27 +1153,35 @@ All critical reliability issues have been systematically addressed:
 gprofiler --max-processes-runtime-profiler 50 --perf-use-cgroups --perf-max-cgroups 30
 # Result: Top 30 cgroups by CPU (services, containers, etc.)
 
+# Python-heavy microservices (RECOMMENDED for Python workloads)
+gprofiler --max-processes-runtime-profiler 10 --skip-pyperf-profiler-above 30 --perf-use-cgroups --perf-max-docker-containers 8
+# Result: PyPerf handles up to 30 Python processes (100% coverage), top 8 containers via perf
+
 # Container-focused troubleshooting (pure container view)
 gprofiler --max-processes-runtime-profiler 50 --perf-use-cgroups --perf-max-docker-containers 20 --perf-max-cgroups 0
 # Result: ONLY top 20 Docker containers by CPU, no system noise
 
-# Memory-constrained (balanced approach)
-gprofiler --max-processes-runtime-profiler 30 --perf-use-cgroups --perf-max-cgroups 15 --perf-max-docker-containers 8
-# Result: 8 containers + up to 7 other cgroups = 15 total
+# Memory-constrained with PyPerf optimization (balanced approach)
+gprofiler --max-processes-runtime-profiler 30 --skip-pyperf-profiler-above 20 --perf-use-cgroups --perf-max-cgroups 10 --perf-max-docker-containers 5
+# Result: PyPerf handles 20 Python processes + 5 containers + 5 other cgroups, <600MB memory
 
 # Production guard rails (recommended for production)
-gprofiler --max-processes-runtime-profiler 20 --skip-system-profilers-above 500 --perf-use-cgroups --perf-max-cgroups 0 --perf-max-docker-containers 1
-# Result: Multi-layered safety, 1 container max, hard process limits
+gprofiler --max-processes-runtime-profiler 20 --skip-system-profilers-above 500 --skip-pyperf-profiler-above 15 --perf-use-cgroups --perf-max-cgroups 0 --perf-max-docker-containers 1
+# Result: Multi-layered safety, conservative PyPerf threshold, 1 container max, hard process limits
 
-# Minimal resources (no perf data)
-gprofiler --max-processes-runtime-profiler 50 --skip-system-profilers-above 300
-# Result: Only runtime profilers, ~400MB memory
+# Minimal resources (no perf data, Python-optimized)
+gprofiler --max-processes-runtime-profiler 50 --skip-system-profilers-above 300 --skip-pyperf-profiler-above 25
+# Result: Only runtime profilers with optimized PyPerf coverage, ~400MB memory
 ```
 
 ### ⚠️ Critical Parameter Interaction
 - `--perf-max-cgroups 0` = **NO system cgroups** (only Docker if specified)
 - `--perf-max-cgroups N` = **Up to N total cgroups** (Docker + others combined)
-- Both parameters use **CPU-based selection** (10x weighted over memory)
+- Both perf parameters use **CPU-based selection** (10x weighted over memory)
+- `--skip-pyperf-profiler-above N` = **PyPerf-specific threshold** based on Python process count (not total processes)
+- **PyPerf efficiency**: 10-50x more efficient than py-spy for multiple processes
+- **Optimal PyPerf range**: 15-30 Python processes for maximum efficiency
+- **Intelligent fallback**: PyPerf → py-spy when threshold exceeded
 
 ### Operational Runbooks
 - Memory spike investigation procedures
@@ -1213,10 +1230,12 @@ gprofiler --max-processes-runtime-profiler 50 --skip-system-profilers-above 300
 
 7. **Enhanced Docker Container Profiling with Cgroup v1/v2 Support**: Automatic detection of cgroup versions with proper path resolution for both traditional and modern container environments, ensuring compatibility across all deployment scenarios.
 
-8. **Production Guard Rails**: Multi-layered safety system with hard process limits, graceful perf disabling, and elimination of dangerous system-wide profiling fallbacks, providing robust protection against resource exhaustion in production environments.
+8. **PyPerf-Specific Threshold Optimization (`--skip-pyperf-profiler-above`)**: Independent threshold control for PyPerf (eBPF Python profiler) separate from generic system profilers, enabling optimal Python process coverage with 10-50x efficiency gains over py-spy.
+
+9. **Production Guard Rails**: Multi-layered safety system with hard process limits, graceful perf disabling, and elimination of dangerous system-wide profiling fallbacks, providing robust protection against resource exhaustion in production environments.
 
 These improvements build upon the existing reliability foundation, further enhancing gProfiler's production readiness with:
-- **17 total reliability metrics** showing significant improvements (up from 15)
+- **18 total reliability metrics** showing significant improvements (up from 17)
 - **96% memory reduction** in idle mode (2.8GB → 500-800MB and 50-100MB idle)
 - **Multi-layered memory management** addressing all leak sources
 - **Comprehensive error handling** covering all edge cases
@@ -1224,6 +1243,7 @@ These improvements build upon the existing reliability foundation, further enhan
 - **Resource cleanup optimization** for sustained operations
 - **Universal cgroup compatibility** supporting both v1 and v2 environments
 - **Production-grade safety** with multiple guard rails and no dangerous fallbacks
+- **Optimized Python profiling** with PyPerf-specific resource management
 
 ---
 
