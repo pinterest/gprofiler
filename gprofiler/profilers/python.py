@@ -649,8 +649,6 @@ class PythonProfiler(ProfilerInterface):
                 raise Exception(f"PyPerf is supported only on x86_64 (and not on this arch {get_arch()})")
             python_mode = "pyspy"
 
-        logger.debug(f"Initializing Python profiler with python_pyperf_max_processes={python_pyperf_max_processes}")
-
         if python_mode in ("auto", "pyperf"):
             self._ebpf_profiler = self._create_ebpf_profiler(
                 frequency,
