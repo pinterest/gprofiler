@@ -57,6 +57,7 @@ from gprofiler.gprofiler_types import ProcessToProfileData, UserArgs, integers_l
 from gprofiler.heartbeat import DynamicGProfilerManager, HeartbeatClient
 from gprofiler.hw_metrics import HWMetricsMonitor, HWMetricsMonitorBase, NoopHWMetricsMonitor
 from gprofiler.log import RemoteLogsHandler, initial_root_logger_setup
+from gprofiler.metrics_handler import ErrorMetricsHandler
 from gprofiler.memory_manager import MemoryManager
 from gprofiler.merge import concatenate_from_external_file, concatenate_profiles, merge_profiles
 from gprofiler.metadata import ProfileMetadata
@@ -870,6 +871,25 @@ def parse_cmd_args() -> configargparse.Namespace:
         help="Disable sending logs to server",
     )
 
+    # Error metrics options
+    metrics_options = parser.add_argument_group("error metrics")
+    metrics_options.add_argument(
+        "--enable-error-metrics",
+        action="store_true",
+        default=False,
+        help="Enable sending error metrics to websocket-based metrics service",
+    )
+    metrics_options.add_argument(
+        "--metrics-server-url",
+        type=str,
+        help="WebSocket URL for the metrics service (e.g., wss://metrics.company.com/ws)",
+    )
+    metrics_options.add_argument(
+        "--metrics-auth-token",
+        type=str,
+        help="Authentication token for the metrics service",
+    )
+
     parser.add_argument(
         "--disable-container-names",
         action="store_false",
@@ -1087,6 +1107,9 @@ def parse_cmd_args() -> configargparse.Namespace:
         if not args.service_name:
             parser.error("--enable-heartbeat-server requires --service-name to be provided")
 
+    if args.enable_error_metrics and not args.metrics_server_url:
+        parser.error("--enable-error-metrics requires --metrics-server-url to be provided")
+
     return args
 
 
@@ -1251,6 +1274,20 @@ def main() -> None:
         if _should_send_logs(args)
         else None
     )
+    
+    # Create error metrics handler if enabled
+    error_metrics_handler = None
+    if args.enable_error_metrics:
+        if not args.metrics_server_url:
+            logger.error("--metrics-server-url is required when --enable-error-metrics is enabled")
+            sys.exit(1)
+        
+        error_metrics_handler = ErrorMetricsHandler(
+            metrics_server_url=args.metrics_server_url,
+            service_name=args.service_name or "gprofiler",
+            auth_token=args.metrics_auth_token,
+        )
+    
     global logger
     logger = initial_root_logger_setup(
         logging.DEBUG if args.verbose else logging.INFO,
@@ -1258,6 +1295,7 @@ def main() -> None:
         args.log_rotate_max_size,
         args.log_rotate_backup_count,
         remote_logs_handler,
+        error_metrics_handler,
     )
 
     warn_about_deprecated_args(args)
@@ -1433,6 +1471,13 @@ def main() -> None:
     except Exception:
         logger.exception("Unexpected error occurred")
         sys.exit(1)
+    finally:
+        # Clean up error metrics handler
+        if 'error_metrics_handler' in locals() and error_metrics_handler is not None:
+            try:
+                error_metrics_handler.close()
+            except Exception:
+                pass  # Don't let cleanup errors mask the original issue
 
     usage_logger.log_run()
 
