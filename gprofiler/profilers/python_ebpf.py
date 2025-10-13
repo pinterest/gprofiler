@@ -93,7 +93,7 @@ class PythonEbpfProfiler(ProfilerBase):
         user_stacks_pages: Optional[int] = None,
         verbose: bool,
         min_duration: int = 10,
-        max_python_processes_for_pyperf: int = 0,
+        python_skip_pyperf_profiler_above: int = 0,
     ):
         super().__init__(frequency, duration, profiler_state, min_duration)
         self.process: Optional[Popen] = None
@@ -105,7 +105,7 @@ class PythonEbpfProfiler(ProfilerBase):
         self._metadata = python.PythonMetadata(self._profiler_state.stop_event)
         self._verbose = verbose
         self._pyperf_staticx_tmpdir: Optional[Path] = None
-        self._max_python_processes_for_pyperf = max_python_processes_for_pyperf
+        self._python_skip_pyperf_profiler_above = python_skip_pyperf_profiler_above
         if os.environ.get("TMPDIR", None) is not None:
             # We want to create a new level of hirerachy in our current staticx tempdir.
             self._pyperf_staticx_tmpdir = Path(os.environ["TMPDIR"]) / ("pyperf_" + random_prefix())
@@ -137,19 +137,19 @@ class PythonEbpfProfiler(ProfilerBase):
         Check if PyPerf should be skipped due to too many Python processes.
         This provides PyPerf-specific resource management independent of system profiler logic.
         """
-        if self._max_python_processes_for_pyperf <= 0:
+        if self._python_skip_pyperf_profiler_above <= 0:
             return False  # No threshold set, don't skip
         
         python_process_count = self._count_python_processes()
-        should_skip = python_process_count > self._max_python_processes_for_pyperf
+        should_skip = python_process_count > self._python_skip_pyperf_profiler_above
         
         if should_skip:
             logger.info(
                 f"Skipping PyPerf - {python_process_count} Python processes exceed threshold "
-                f"of {self._max_python_processes_for_pyperf}. py-spy fallback will be used for Python profiling."
+                f"of {self._python_skip_pyperf_profiler_above}. py-spy fallback will be used for Python profiling."
             )
         else:
-            logger.debug(f"PyPerf: Python process count {python_process_count} (threshold: {self._max_python_processes_for_pyperf})")
+            logger.debug(f"PyPerf: Python process count {python_process_count} (threshold: {self._python_skip_pyperf_profiler_above})")
         
         return should_skip
 
