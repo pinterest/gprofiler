@@ -463,7 +463,7 @@ gprofiler --max-processes-runtime-profiler 50 --perf-use-cgroups --perf-max-dock
 # Result: ~600MB memory usage, ONLY top 20 Docker containers
 
 # Python-heavy workload: Optimized PyPerf + limited perf
-gprofiler --max-processes-runtime-profiler 50 --python-pyperf-max-processes 50 --perf-use-cgroups --perf-max-cgroups 15
+gprofiler --max-processes-runtime-profiler 50 --python-skip-pyperf-profiler-above 50 --perf-use-cgroups --perf-max-cgroups 15
 # Result: PyPerf handles up to 50 Python processes efficiently, perf covers top 15 cgroups
 
 # Don't need perf data: Minimal approach  
@@ -474,15 +474,15 @@ gprofiler --max-processes-runtime-profiler 50 --skip-system-profilers-above 300
 ### Memory-Constrained Systems (2GB RAM)
 ```bash
 # Conservative: Mixed cgroups and containers with PyPerf optimization
-gprofiler --max-processes-runtime-profiler 30 --python-pyperf-max-processes 20 --perf-use-cgroups --perf-max-cgroups 10 --perf-max-docker-containers 5
+gprofiler --max-processes-runtime-profiler 30 --python-skip-pyperf-profiler-above 20 --perf-use-cgroups --perf-max-cgroups 10 --perf-max-docker-containers 5
 # Result: PyPerf handles 20 Python processes + 5 containers + 5 other cgroups = optimized coverage, <600MB memory
 
 # Container-focused: Only Docker containers with PyPerf
-gprofiler --max-processes-runtime-profiler 25 --python-pyperf-max-processes 25 --perf-use-cgroups --perf-max-docker-containers 10 --perf-max-cgroups 0
+gprofiler --max-processes-runtime-profiler 25 --python-skip-pyperf-profiler-above 25 --perf-use-cgroups --perf-max-docker-containers 10 --perf-max-cgroups 0
 # Result: PyPerf covers all Python + top 10 containers, <500MB memory
 
 # Python-optimized: Maximize Python coverage, minimal perf
-gprofiler --max-processes-runtime-profiler 40 --python-pyperf-max-processes 35 --skip-system-profilers-above 250
+gprofiler --max-processes-runtime-profiler 40 --python-skip-pyperf-profiler-above 35 --skip-system-profilers-above 250
 # Result: Excellent Python coverage with PyPerf, perf only on lighter systems
 ```
 
@@ -545,7 +545,7 @@ dmesg | tail -100 | grep -i bpf
 - `gprofiler/profilers/perf.py`: Added `_is_system_profiler = True` marker
 - `gprofiler/profilers/python_ebpf.py`: ~~Added `_is_system_profiler = True` marker~~ **REMOVED** (now has independent threshold)
 
-### Solution 4: PyPerf-Specific Threshold (`--python-pyperf-max-processes`) - OPTIMIZED eBPF CONTROL
+### Solution 4: PyPerf-Specific Threshold (`--python-skip-pyperf-profiler-above`) - OPTIMIZED eBPF CONTROL
 
 **Issue**: PyPerf (eBPF Python profiler) was grouped with generic system profilers, but it has fundamentally different performance characteristics:
 - **PyPerf efficiency**: 10-50x more efficient than py-spy for multiple processes
@@ -578,13 +578,13 @@ class PythonEbpfProfiler(ProfilerBase):
 **Configuration Examples:**
 ```bash
 # Fine-grained control: PyPerf handles up to 50 Python processes, perf skipped at 300 total
-gprofiler --python-pyperf-max-processes 50 --skip-system-profilers-above 300
+gprofiler --python-skip-pyperf-profiler-above 50 --skip-system-profilers-above 300
 
 # PyPerf-only threshold (optimal for Python-heavy workloads)
-gprofiler --python-pyperf-max-processes 25 --max-processes-runtime-profiler 10
+gprofiler --python-skip-pyperf-profiler-above 25 --max-processes-runtime-profiler 10
 
 # Conservative approach for resource-constrained systems
-gprofiler --python-pyperf-max-processes 15 --skip-system-profilers-above 200
+gprofiler --python-skip-pyperf-profiler-above 15 --skip-system-profilers-above 200
 ```
 
 **Performance Benefits:**
@@ -597,7 +597,7 @@ OLD (generic system skip):
 └─ Efficiency: py-spy overhead = 10 × 100μs = 1000μs per sample
 
 NEW (PyPerf-specific skip):  
-├─ --python-pyperf-max-processes 30
+├─ --python-skip-pyperf-profiler-above 30
 ├─ Result: PyPerf profiles ALL 25 processes (100% coverage)
 └─ Efficiency: PyPerf overhead = Fixed 50μs per sample (20x better)
 ```
@@ -621,7 +621,7 @@ def start(self) -> None:
 | **31+ (threshold=30)** | py-spy (top 10) | 32% | ~50MB | 0.5% | ⭐⭐⭐ |
 
 **Files Modified:**
-- `gprofiler/main.py`: Added `--python-pyperf-max-processes` CLI argument
+- `gprofiler/main.py`: Added `--python-skip-pyperf-profiler-above` CLI argument
 - `gprofiler/profilers/python_ebpf.py`: Removed generic system profiler marking, added Python-specific threshold logic
 - `gprofiler/profilers/python.py`: Enhanced Python profiler coordinator with intelligent fallback
 
