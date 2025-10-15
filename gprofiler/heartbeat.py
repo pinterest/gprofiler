@@ -35,6 +35,7 @@ from gprofiler.metadata.application_identifiers import ApplicationIdentifiers
 from gprofiler.metadata.enrichment import EnrichmentOptions
 from gprofiler.metadata.metadata_collector import get_static_metadata
 from gprofiler.metadata.system_metadata import get_hostname
+from gprofiler.metrics_publisher import MetricsHandler, NoopMetricsHandler
 from gprofiler.profiler_state import ProfilerState
 from gprofiler.profilers.factory import get_profilers
 from gprofiler.profilers.profiler_base import NoopProfiler
@@ -422,6 +423,20 @@ class DynamicGProfilerManager:
         if hasattr(args, "tool_perfspect_path") and args.tool_perfspect_path:
             perfspect_path = Path(args.tool_perfspect_path)
         
+        # Initialize metrics handler if enabled
+        metrics_handler = None
+        if getattr(args, 'enable_publish_metrics', False):
+            metrics_handler = MetricsHandler(
+                server_url=args.metrics_server_url,
+                service_name=args.service_name or "gprofiler",
+                batch_size=getattr(args, 'metrics_batch_size', 10),
+                batch_timeout=getattr(args, 'metrics_batch_timeout', 5.0),
+            )
+            logger.info(f"Metrics publishing enabled in heartbeat mode - connecting to {args.metrics_server_url}")
+        else:
+            # Use no-op handler when disabled
+            metrics_handler = NoopMetricsHandler()
+        
         return GProfiler(
             output_dir=getattr(args, 'output_dir', None),
             flamegraph=getattr(args, 'flamegraph', True),
@@ -446,6 +461,7 @@ class DynamicGProfilerManager:
             heartbeat_file_path=heartbeat_file_path,
             perfspect_path=perfspect_path,
             perfspect_duration=getattr(args, "tool_perfspect_duration", 60),
+            metrics_handler=metrics_handler,
         )
     
     def _run_profiler(self, gprofiler: 'GProfiler', continuous: bool, duration: int, command_id: str):
