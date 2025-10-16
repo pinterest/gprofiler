@@ -60,7 +60,7 @@ class PythonEbpfProfiler(ProfilerBase):
     _GET_FS_OFFSET_RESOURCE = "python/pyperf/get_fs_offset"
     _GET_STACK_OFFSET_RESOURCE = "python/pyperf/get_stack_offset"
     _EVENTS_BUFFER_PAGES = 256  # 1mb and needs to be physically contiguous
-    _is_system_profiler = True  # Mark as system profiler for startup filtering
+    # ❌ REMOVED: _is_system_profiler = True  # PyPerf now has its own skip logic
     
     def _should_limit_processes(self) -> bool:
         """eBPF Python profiler is system-wide and should not limit processes."""
@@ -93,6 +93,7 @@ class PythonEbpfProfiler(ProfilerBase):
         user_stacks_pages: Optional[int] = None,
         verbose: bool,
         min_duration: int = 10,
+        python_skip_pyperf_profiler_above: int = 0,
     ):
         super().__init__(frequency, duration, profiler_state, min_duration)
         self.process: Optional[Popen] = None
@@ -104,9 +105,53 @@ class PythonEbpfProfiler(ProfilerBase):
         self._metadata = python.PythonMetadata(self._profiler_state.stop_event)
         self._verbose = verbose
         self._pyperf_staticx_tmpdir: Optional[Path] = None
+        self._python_skip_pyperf_profiler_above = python_skip_pyperf_profiler_above
         if os.environ.get("TMPDIR", None) is not None:
             # We want to create a new level of hirerachy in our current staticx tempdir.
             self._pyperf_staticx_tmpdir = Path(os.environ["TMPDIR"]) / ("pyperf_" + random_prefix())
+
+    def _count_python_processes(self) -> int:
+        """
+        Count Python processes using the same detection logic as py-spy.
+        This ensures consistent counting between PyPerf skip logic and py-spy process selection.
+        """
+        try:
+            from gprofiler.utils import pgrep_maps, pgrep_exe
+            from granulate_utils.python import DETECTED_PYTHON_PROCESSES_REGEX
+            from gprofiler.platform import is_windows
+            
+            if is_windows():
+                # Windows: Use executable name matching
+                all_processes = [x for x in pgrep_exe("python")]
+            else:
+                # Linux: Use memory map scanning (same as py-spy)
+                all_processes = [x for x in pgrep_maps(DETECTED_PYTHON_PROCESSES_REGEX)]
+            
+            return len(all_processes)
+        except Exception as e:
+            logger.warning(f"Could not count Python processes for PyPerf skip logic: {e}")
+            return 0
+
+    def should_skip_due_to_python_threshold(self) -> bool:
+        """
+        Check if PyPerf should be skipped due to too many Python processes.
+        This provides PyPerf-specific resource management independent of system profiler logic.
+        """
+        if self._python_skip_pyperf_profiler_above <= 0:
+            return False  # No threshold set, don't skip
+        
+        python_process_count = self._count_python_processes()
+        should_skip = python_process_count > self._python_skip_pyperf_profiler_above
+        
+        if should_skip:
+            logger.info(
+                f"Skipping PyPerf - {python_process_count} Python processes exceed threshold "
+                f"of {self._python_skip_pyperf_profiler_above}. py-spy fallback will be used for Python profiling."
+            )
+        else:
+            logger.debug(f"PyPerf: Python process count {python_process_count} (threshold: {self._python_skip_pyperf_profiler_above})")
+        
+        return should_skip
 
     @classmethod
     def _check_output(cls, process: Popen, output_path: Path) -> None:
