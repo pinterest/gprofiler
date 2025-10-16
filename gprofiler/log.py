@@ -20,8 +20,11 @@ import re
 import sys
 import time
 from logging import LogRecord
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional, TYPE_CHECKING
 from urllib.parse import urlparse
+
+if TYPE_CHECKING:
+    from gprofiler.metrics_handler import ErrorMetricsHandler
 
 from glogger.extra_adapter import ExtraAdapter
 from glogger.handler import BatchRequestsHandler
@@ -143,6 +146,7 @@ def initial_root_logger_setup(
     rotate_max_bytes: int,
     rotate_backup_count: int,
     remote_logs_handler: Optional[RemoteLogsHandler],
+    error_metrics_handler: Optional["ErrorMetricsHandler"] = None,
 ) -> logging.LoggerAdapter:
     logger_adapter = get_logger_adapter("gprofiler")
     logger_adapter.setLevel(logging.DEBUG)
@@ -164,5 +168,8 @@ def initial_root_logger_setup(
 
     if remote_logs_handler is not None:
         logger_adapter.logger.addHandler(remote_logs_handler)
+
+    if error_metrics_handler is not None:
+        logger_adapter.logger.addHandler(error_metrics_handler)
 
     return logger_adapter
