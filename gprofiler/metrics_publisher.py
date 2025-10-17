@@ -48,6 +48,33 @@ PROFILER_COMPONENT_PREFIX = "profiler_"
 NONE_CYCLE_FALLBACK = "none"
 EMPTY_ERROR_MESSAGE_FALLBACK = "No error message provided"
 
+# Error type constants
+ERROR_TYPE_PROFILER_FAILURE = "profiler_failure"
+ERROR_TYPE_PERF_FAILURE = "perf_failure"
+ERROR_TYPE_PROFILING_RUN_FAILURE = "profiling_run_failure"
+ERROR_TYPE_UPLOAD_TIMEOUT = "upload_timeout"
+ERROR_TYPE_API_ERROR = "api_error"
+ERROR_TYPE_REQUEST_EXCEPTION = "request_exception"
+
+# Component constants
+COMPONENT_SYSTEM_PROFILER = "system_profiler"
+COMPONENT_API_CLIENT = "api_client"
+COMPONENT_GPROFILER_MAIN = "gprofiler_main"
+
+# Severity constants
+SEVERITY_ERROR = "error"
+SEVERITY_WARNING = "warning"
+SEVERITY_CRITICAL = "critical"
+SEVERITY_INFO = "info"
+
+# Error message constants
+ERROR_MSG_PROFILER_FAILURE = "profiling failed"
+ERROR_MSG_PERF_FAILURE = "Running perf failed"
+ERROR_MSG_PROFILING_RUN_FAILURE = "Profiling run failed"
+ERROR_MSG_UPLOAD_TIMEOUT = "Upload of profile to server timed out"
+ERROR_MSG_API_ERROR = "API error"
+ERROR_MSG_REQUEST_EXCEPTION = "Request exception during profile upload"
+
 # Security/robustness limits
 MAX_SANITIZED_STRING_LENGTH = 200
 MAX_TAG_KEY_LENGTH = 50
@@ -64,12 +91,76 @@ CATEGORY_GENERAL = "general"
 
 # Export for external access
 __all__ = [
-    "MetricsHandler", 
+    "MetricsHandler",
     "NoopMetricsHandler",
     "METRIC_BASE_NAME",
     "METRIC_TYPE_COUNTER",  # ← Expose the metric type constant
-    "DEFAULT_METRIC_VALUE"
+    "DEFAULT_METRIC_VALUE",
+    # Error type constants
+    "ERROR_TYPE_PROFILER_FAILURE",
+    "ERROR_TYPE_PERF_FAILURE",
+    "ERROR_TYPE_PROFILING_RUN_FAILURE",
+    "ERROR_TYPE_UPLOAD_TIMEOUT",
+    "ERROR_TYPE_API_ERROR",
+    "ERROR_TYPE_REQUEST_EXCEPTION",
+    # Component constants
+    "COMPONENT_SYSTEM_PROFILER",
+    "COMPONENT_API_CLIENT",
+    "COMPONENT_GPROFILER_MAIN",
+    # Severity constants
+    "SEVERITY_ERROR",
+    "SEVERITY_WARNING",
+    "SEVERITY_CRITICAL",
+    "SEVERITY_INFO",
+    # Error message constants
+    "ERROR_MSG_PROFILER_FAILURE",
+    "ERROR_MSG_PERF_FAILURE",
+    "ERROR_MSG_PROFILING_RUN_FAILURE",
+    "ERROR_MSG_UPLOAD_TIMEOUT",
+    "ERROR_MSG_API_ERROR", 
+    "ERROR_MSG_REQUEST_EXCEPTION",
+    # Utility functions
+    "get_current_method_name",
 ]
+
+
+def get_current_method_name() -> str:
+    """
+    Get the name of the calling method/function for better error context.
+    
+    Returns:
+        Name of the calling method/function, or 'unknown_method' if not determinable
+    """
+    import inspect
+    
+    try:
+        # Get the current frame
+        current_frame = inspect.currentframe()
+        if current_frame is None:
+            return "unknown_method"
+        
+        # Go up the call stack:
+        # Frame 0: get_current_method_name()
+        # Frame 1: The send_error_metric call site
+        # Frame 2: The actual method we want to identify
+        caller_frame = current_frame.f_back.f_back if current_frame.f_back else None
+        if caller_frame is None:
+            return "unknown_method"
+        
+        method_name = caller_frame.f_code.co_name
+        
+        # Try to get class name for better context
+        if "self" in caller_frame.f_locals:
+            class_name = caller_frame.f_locals["self"].__class__.__name__
+            return f"{class_name}.{method_name}"
+        
+        return method_name
+        
+    except Exception:
+        return "unknown_method"
+    finally:
+        # Clean up frame references to avoid memory leaks
+        del current_frame
 
 
 def metric_mapping(**mappings):

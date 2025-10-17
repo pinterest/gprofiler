@@ -58,7 +58,16 @@ from gprofiler.heartbeat import DynamicGProfilerManager, HeartbeatClient
 from gprofiler.hw_metrics import HWMetricsMonitor, HWMetricsMonitorBase, NoopHWMetricsMonitor
 from gprofiler.log import RemoteLogsHandler, initial_root_logger_setup
 from gprofiler.memory_manager import MemoryManager
-from gprofiler.metrics_publisher import MetricsHandler, NoopMetricsHandler, METRIC_BASE_NAME
+from gprofiler.metrics_publisher import (
+    MetricsHandler, NoopMetricsHandler, METRIC_BASE_NAME,
+    ERROR_TYPE_PROFILER_FAILURE, ERROR_TYPE_PERF_FAILURE, ERROR_TYPE_PROFILING_RUN_FAILURE,
+    ERROR_TYPE_UPLOAD_TIMEOUT, ERROR_TYPE_API_ERROR, ERROR_TYPE_REQUEST_EXCEPTION,
+    COMPONENT_SYSTEM_PROFILER, COMPONENT_API_CLIENT, COMPONENT_GPROFILER_MAIN,
+    SEVERITY_ERROR, SEVERITY_WARNING, SEVERITY_CRITICAL,
+    ERROR_MSG_PROFILER_FAILURE, ERROR_MSG_PERF_FAILURE, ERROR_MSG_PROFILING_RUN_FAILURE,
+    ERROR_MSG_UPLOAD_TIMEOUT, ERROR_MSG_API_ERROR, ERROR_MSG_REQUEST_EXCEPTION,
+    get_current_method_name,
+)
 from gprofiler.merge import concatenate_from_external_file, concatenate_profiles, merge_profiles
 from gprofiler.metadata import ProfileMetadata
 from gprofiler.metadata.application_identifiers import ApplicationIdentifiers
@@ -389,10 +398,14 @@ class GProfiler:
                 # Report profiler failure to metrics server
                 if self._metrics_handler:
                     self._metrics_handler.send_error_metric(
-                        error_type="profiler_failure",
-                        error_message=f"{future_name} profiling failed",
+                        error_type=ERROR_TYPE_PROFILER_FAILURE,
+                        error_message=f"{future_name} {ERROR_MSG_PROFILER_FAILURE}",
                         component=f"profiler_{future_name}",
-                        severity="error",
+                        severity=SEVERITY_ERROR,
+                        extra_tags={
+                            "method_name": get_current_method_name(),
+                            "profiler_name": future_name,
+                        },
                     )
 
         local_end_time = local_start_time + datetime.timedelta(seconds=(time.monotonic() - monotonic_start_time))
@@ -406,10 +419,13 @@ class GProfiler:
             # Report critical perf failure to metrics server
             if self._metrics_handler:
                 self._metrics_handler.send_error_metric(
-                    error_type="perf_failure",
-                    error_message="Running perf failed",
-                    component="system_profiler",
-                    severity="critical",
+                    error_type=ERROR_TYPE_PERF_FAILURE,
+                    error_message=ERROR_MSG_PERF_FAILURE,
+                    component=COMPONENT_SYSTEM_PROFILER,
+                    severity=SEVERITY_CRITICAL,
+                    extra_tags={
+                        "method_name": get_current_method_name(),
+                    },
                 )
             raise
         metadata = (
@@ -516,10 +532,13 @@ class GProfiler:
                     # Report profiling run failure to metrics server
                     if self._metrics_handler:
                         self._metrics_handler.send_error_metric(
-                            error_type="profiling_run_failure",
-                            error_message="Profiling run failed",
-                            component="gprofiler_main",
-                            severity="error",
+                            error_type=ERROR_TYPE_PROFILING_RUN_FAILURE,
+                            error_message=ERROR_MSG_PROFILING_RUN_FAILURE,
+                            component=COMPONENT_GPROFILER_MAIN,
+                            severity=SEVERITY_ERROR,
+                            extra_tags={
+                                "method_name": get_current_method_name(),
+                            },
                         )
                 self._usage_logger.log_cycle()
 
@@ -583,28 +602,38 @@ def _submit_profile_logged(
         logger.error("Upload of profile to server timed out.")
         if metrics_handler:
             metrics_handler.send_error_metric(
-                error_type="upload_timeout",
-                error_message="Upload of profile to server timed out",
-                component="api_client",
-                severity="warning",
+                error_type=ERROR_TYPE_UPLOAD_TIMEOUT,
+                error_message=ERROR_MSG_UPLOAD_TIMEOUT,
+                component=COMPONENT_API_CLIENT,
+                severity=SEVERITY_WARNING,
+                extra_tags={
+                    "method_name": get_current_method_name(),
+                },
             )
     except APIError as e:
         logger.error(f"Error occurred sending profile to server: {e}")
         if metrics_handler:
             metrics_handler.send_error_metric(
-                error_type="api_error",
-                error_message=f"API error: {e}",
-                component="api_client",
-                severity="error",
+                error_type=ERROR_TYPE_API_ERROR,
+                error_message=f"{ERROR_MSG_API_ERROR}: {e}",
+                component=COMPONENT_API_CLIENT,
+                severity=SEVERITY_ERROR,
+                extra_tags={
+                    "method_name": get_current_method_name(),
+                    "api_error_details": str(e),
+                },
             )
     except RequestException:
         logger.exception("Error occurred sending profile to server")
         if metrics_handler:
             metrics_handler.send_error_metric(
-                error_type="request_exception",
-                error_message="Request exception during profile upload",
-                component="api_client",
-                severity="error",
+                error_type=ERROR_TYPE_REQUEST_EXCEPTION,
+                error_message=ERROR_MSG_REQUEST_EXCEPTION,
+                component=COMPONENT_API_CLIENT,
+                severity=SEVERITY_ERROR,
+                extra_tags={
+                    "method_name": get_current_method_name(),
+                },
             )
     else:
         logger.info("Successfully uploaded profiling data to the server")
