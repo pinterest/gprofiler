@@ -58,7 +58,7 @@ from gprofiler.heartbeat import DynamicGProfilerManager, HeartbeatClient
 from gprofiler.hw_metrics import HWMetricsMonitor, HWMetricsMonitorBase, NoopHWMetricsMonitor
 from gprofiler.log import RemoteLogsHandler, initial_root_logger_setup
 from gprofiler.memory_manager import MemoryManager
-from gprofiler.metrics_publisher import MetricsHandler, NoopMetricsHandler
+from gprofiler.metrics_publisher import MetricsHandler, NoopMetricsHandler, METRIC_BASE_NAME
 from gprofiler.merge import concatenate_from_external_file, concatenate_profiles, merge_profiles
 from gprofiler.metadata import ProfileMetadata
 from gprofiler.metadata.application_identifiers import ApplicationIdentifiers
@@ -384,7 +384,6 @@ class GProfiler:
                 result = future.result()
                 process_profiles.update(result)
             except Exception:
-                error_timestamp = time.time()  # Capture when error occurred
                 future_name = future.name  # type: ignore # hack, add the profiler's name to the Future object
                 logger.exception(f"{future_name} profiling failed")
                 # Report profiler failure to metrics server
@@ -394,7 +393,6 @@ class GProfiler:
                         error_message=f"{future_name} profiling failed",
                         component=f"profiler_{future_name}",
                         severity="error",
-                        error_timestamp=error_timestamp
                     )
 
         local_end_time = local_start_time + datetime.timedelta(seconds=(time.monotonic() - monotonic_start_time))
@@ -402,7 +400,6 @@ class GProfiler:
         try:
             system_result = system_future.result()            
         except Exception:
-            error_timestamp = time.time()  # Capture when error occurred
             logger.critical(
                 "Running perf failed; consider running gProfiler with '--perf-mode disabled' to avoid using perf",
             )
@@ -413,7 +410,6 @@ class GProfiler:
                     error_message="Running perf failed",
                     component="system_profiler",
                     severity="critical",
-                    error_timestamp=error_timestamp
                 )
             raise
         metadata = (
@@ -516,7 +512,6 @@ class GProfiler:
                 try:
                     self._snapshot()
                 except Exception:
-                    error_timestamp = time.time()  # Capture when error occurred
                     logger.exception("Profiling run failed!")
                     # Report profiling run failure to metrics server
                     if self._metrics_handler:
@@ -525,7 +520,6 @@ class GProfiler:
                             error_message="Profiling run failed",
                             component="gprofiler_main",
                             severity="error",
-                            error_timestamp=error_timestamp
                         )
                 self._usage_logger.log_cycle()
 
@@ -586,7 +580,6 @@ def _submit_profile_logged(
             gpid,
         )
     except Timeout:
-        error_timestamp = time.time()  # Capture when error occurred
         logger.error("Upload of profile to server timed out.")
         if metrics_handler:
             metrics_handler.send_error_metric(
@@ -594,10 +587,8 @@ def _submit_profile_logged(
                 error_message="Upload of profile to server timed out",
                 component="api_client",
                 severity="warning",
-                error_timestamp=error_timestamp
             )
     except APIError as e:
-        error_timestamp = time.time()  # Capture when error occurred
         logger.error(f"Error occurred sending profile to server: {e}")
         if metrics_handler:
             metrics_handler.send_error_metric(
@@ -605,10 +596,8 @@ def _submit_profile_logged(
                 error_message=f"API error: {e}",
                 component="api_client",
                 severity="error",
-                error_timestamp=error_timestamp
             )
     except RequestException:
-        error_timestamp = time.time()  # Capture when error occurred
         logger.exception("Error occurred sending profile to server")
         if metrics_handler:
             metrics_handler.send_error_metric(
@@ -616,7 +605,6 @@ def _submit_profile_logged(
                 error_message="Request exception during profile upload",
                 component="api_client",
                 severity="error",
-                error_timestamp=error_timestamp
             )
     else:
         logger.info("Successfully uploaded profiling data to the server")
@@ -1357,7 +1345,7 @@ def main() -> None:
     if args.enable_publish_metrics:
         metrics_handler = MetricsHandler(
             server_url=args.metrics_server_url,
-            service_name=args.service_name or "gprofiler",
+            service_name=args.service_name or METRIC_BASE_NAME,
             batch_size=args.metrics_batch_size,
             batch_timeout=args.metrics_batch_timeout,
         )

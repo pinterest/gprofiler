@@ -35,7 +35,7 @@ from gprofiler.metadata.application_identifiers import ApplicationIdentifiers
 from gprofiler.metadata.enrichment import EnrichmentOptions
 from gprofiler.metadata.metadata_collector import get_static_metadata
 from gprofiler.metadata.system_metadata import get_hostname
-from gprofiler.metrics_publisher import MetricsHandler, NoopMetricsHandler
+from gprofiler.metrics_publisher import MetricsHandler, NoopMetricsHandler, METRIC_BASE_NAME
 from gprofiler.profiler_state import ProfilerState
 from gprofiler.profilers.factory import get_profilers
 from gprofiler.profilers.profiler_base import NoopProfiler
@@ -428,7 +428,7 @@ class DynamicGProfilerManager:
         if getattr(args, 'enable_publish_metrics', False):
             metrics_handler = MetricsHandler(
                 server_url=args.metrics_server_url,
-                service_name=args.service_name or "gprofiler",
+                service_name=args.service_name or METRIC_BASE_NAME,
                 batch_size=getattr(args, 'metrics_batch_size', 10),
                 batch_timeout=getattr(args, 'metrics_batch_timeout', 5.0),
             )
