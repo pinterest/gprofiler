@@ -56,6 +56,30 @@ The default profiling frequency is *11 hertz*. Using higher frequency will lead 
 
 For each profiling session (each profiling duration), gProfiler produces outputs (writing local files and/or uploading the results to the Granulate Performance Studio).
 
+### How Frequency & Duration Apply to Different Profilers
+
+**Per-Process Profilers** (async-profiler, py-spy):
+- Each target process gets its own dedicated sampling at the specified frequency
+- More processes = more total samples and higher overhead
+- **Example**: With 10 Java processes at 11Hz, async-profiler generates ~6,600 samples total
+
+**System-Wide Profilers** (perf, PyPerf):
+- Single sampling rate shared across all target processes  
+- Samples distributed based on CPU usage
+- **Example**: With 10 Java processes at 11Hz, perf generates ~660 samples total (distributed among processes)
+
+### Application Impact During Profiling
+
+| **Profiler** | **Interrupt Type** | **Application Impact** | **Overhead** |
+|--------------|-------------------|------------------------|--------------|
+| **perf** | Hardware PMU → NMI | ✅ **Transparent** (no pause) | Very Low |
+| **async-profiler** | SIGPROF → Signal handler | ✅ **Cooperative** (no pause) | Very Low |
+| **PyPerf** | eBPF → Kernel probes | ✅ **Kernel-level** (no pause) | Very Low |
+| **py-spy** | ptrace() → Process suspension | ❌ **Pauses process** (~100μs per sample) | Low |
+| **rbspy** | ptrace() → Process suspension | ❌ **Pauses process** (~100μs per sample) | Low |
+
+**Key Insight**: Hardware/software interrupts for sampling ≠ interrupting (pausing) the target process. Most profilers collect data without stopping your application.
+
 ### Java profiling options
 
 * `--no-java` or `--java-mode disabled`: Disable profilers for Java.
