@@ -19,7 +19,6 @@ try:
         try:
             return _get_hostname_or_none()
         except Exception:
-            # Fallback if the imported function fails at runtime
             import socket
             try:
                 return socket.gethostname()
@@ -158,7 +157,6 @@ class MetricsHandler:
             
         self.server_url = server_url
         self.service_name = service_name
-        self.hostname = get_hostname_or_none() or "unknown"
         self.logger = logging.getLogger(f"{__name__}.MetricsHandler")
         
         # Parse server URL
@@ -225,10 +223,12 @@ class MetricsHandler:
 
     def build_enriched_tags(self, severity: str, category: str, user_tags: Dict[str, Any]) -> Dict[str, str]:
         """Build enriched tags with system context + user tags."""
+        current_hostname = get_hostname_or_none() or "unknown"
+        
         tags = {
             "service": self.service_name,
-            "hostname": self.hostname,
-            "component": category,  # Keep "component" as tag name for consistency with existing metrics
+            "hostname": current_hostname,
+            "component": category,
             "severity": severity,
             "os_type": platform.system().lower(),
             "python_version": f"{platform.python_version_tuple()[0]}.{platform.python_version_tuple()[1]}",
