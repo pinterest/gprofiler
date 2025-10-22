@@ -60,12 +60,13 @@ from gprofiler.log import RemoteLogsHandler, initial_root_logger_setup
 from gprofiler.memory_manager import MemoryManager
 from gprofiler.metrics_publisher import (
     MetricsHandler, NoopMetricsHandler, METRIC_BASE_NAME,
-    ERROR_TYPE_PROFILER_FAILURE, ERROR_TYPE_PERF_FAILURE, ERROR_TYPE_PROFILING_RUN_FAILURE,
-    ERROR_TYPE_UPLOAD_TIMEOUT, ERROR_TYPE_API_ERROR, ERROR_TYPE_REQUEST_EXCEPTION,
+    ERROR_TYPE_PROCESS_PROFILER_FAILURE, ERROR_TYPE_PERF_FAILURE, ERROR_TYPE_PROFILING_RUN_FAILURE,
+    ERROR_TYPE_UPLOAD_ERROR, ERROR_TYPE_API_ERROR, ERROR_TYPE_REQUEST_EXCEPTION,
     COMPONENT_SYSTEM_PROFILER, COMPONENT_API_CLIENT, COMPONENT_GPROFILER_MAIN,
     SEVERITY_ERROR, SEVERITY_WARNING, SEVERITY_CRITICAL,
-    ERROR_MSG_PROFILER_FAILURE, ERROR_MSG_PERF_FAILURE, ERROR_MSG_PROFILING_RUN_FAILURE,
-    ERROR_MSG_UPLOAD_TIMEOUT, ERROR_MSG_API_ERROR, ERROR_MSG_REQUEST_EXCEPTION,
+    ERROR_MSG_PROCESS_PROFILER_FAILURE, ERROR_MSG_PERF_FAILURE, ERROR_MSG_PROFILING_RUN_FAILURE,
+    ERROR_MSG_UPLOAD_ERROR, ERROR_MSG_API_ERROR, ERROR_MSG_REQUEST_EXCEPTION,
+    ERROR_CATEGORY_UPLOAD_TIMEOUT,
     get_current_method_name,
 )
 from gprofiler.merge import concatenate_from_external_file, concatenate_profiles, merge_profiles
@@ -398,9 +399,9 @@ class GProfiler:
                 # Report profiler failure to metrics server
                 if self._metrics_handler:
                     self._metrics_handler.send_error_metric(
-                        error_type=ERROR_TYPE_PROFILER_FAILURE,
-                        error_message=f"{future_name} {ERROR_MSG_PROFILER_FAILURE}",
-                        component=f"profiler_{future_name}",
+                        error_type=ERROR_TYPE_PROCESS_PROFILER_FAILURE,
+                        error_message=ERROR_MSG_PROCESS_PROFILER_FAILURE,
+                        category=f"profiler_{future_name}",
                         severity=SEVERITY_ERROR,
                         extra_tags={
                             "method_name": get_current_method_name(),
@@ -421,7 +422,7 @@ class GProfiler:
                 self._metrics_handler.send_error_metric(
                     error_type=ERROR_TYPE_PERF_FAILURE,
                     error_message=ERROR_MSG_PERF_FAILURE,
-                    component=COMPONENT_SYSTEM_PROFILER,
+                    category=COMPONENT_SYSTEM_PROFILER,
                     severity=SEVERITY_CRITICAL,
                     extra_tags={
                         "method_name": get_current_method_name(),
@@ -534,7 +535,7 @@ class GProfiler:
                         self._metrics_handler.send_error_metric(
                             error_type=ERROR_TYPE_PROFILING_RUN_FAILURE,
                             error_message=ERROR_MSG_PROFILING_RUN_FAILURE,
-                            component=COMPONENT_GPROFILER_MAIN,
+                            category=COMPONENT_GPROFILER_MAIN,
                             severity=SEVERITY_ERROR,
                             extra_tags={
                                 "method_name": get_current_method_name(),
@@ -602,12 +603,13 @@ def _submit_profile_logged(
         logger.error("Upload of profile to server timed out.")
         if metrics_handler:
             metrics_handler.send_error_metric(
-                error_type=ERROR_TYPE_UPLOAD_TIMEOUT,
-                error_message=ERROR_MSG_UPLOAD_TIMEOUT,
-                component=COMPONENT_API_CLIENT,
+                error_type=ERROR_TYPE_UPLOAD_ERROR,
+                error_message=ERROR_MSG_UPLOAD_ERROR,
+                category=COMPONENT_API_CLIENT,
                 severity=SEVERITY_WARNING,
                 extra_tags={
                     "method_name": get_current_method_name(),
+                    "error_category": ERROR_CATEGORY_UPLOAD_TIMEOUT,
                 },
             )
     except APIError as e:
@@ -615,12 +617,11 @@ def _submit_profile_logged(
         if metrics_handler:
             metrics_handler.send_error_metric(
                 error_type=ERROR_TYPE_API_ERROR,
-                error_message=f"{ERROR_MSG_API_ERROR}: {e}",
-                component=COMPONENT_API_CLIENT,
+                error_message=ERROR_MSG_API_ERROR,
+                category=COMPONENT_API_CLIENT,
                 severity=SEVERITY_ERROR,
                 extra_tags={
                     "method_name": get_current_method_name(),
-                    "api_error_details": str(e),
                 },
             )
     except RequestException:
@@ -629,7 +630,7 @@ def _submit_profile_logged(
             metrics_handler.send_error_metric(
                 error_type=ERROR_TYPE_REQUEST_EXCEPTION,
                 error_message=ERROR_MSG_REQUEST_EXCEPTION,
-                component=COMPONENT_API_CLIENT,
+                category=COMPONENT_API_CLIENT,
                 severity=SEVERITY_ERROR,
                 extra_tags={
                     "method_name": get_current_method_name(),
@@ -964,24 +965,12 @@ def parse_cmd_args() -> configargparse.Namespace:
         "--enable-publish-metrics",
         action="store_true",
         default=False,
-        help="Enable publishing error metrics to WebSocket-based metrics server",
+        help="Enable publishing error metrics to MetricAgent (Goku)",
     )
     metrics_options.add_argument(
         "--metrics-server-url",
         type=str,
-        help="WebSocket URL for the metrics service (e.g., wss://metrics.company.com/ws)",
-    )
-    metrics_options.add_argument(
-        "--metrics-batch-size",
-        type=int,
-        default=10,
-        help="Number of metrics to batch before sending (default: 10)",
-    )
-    metrics_options.add_argument(
-        "--metrics-batch-timeout",
-        type=float,
-        default=5.0,
-        help="Timeout in seconds for sending metrics batch (default: 5.0)",
+        help="TCP URL for MetricAgent service (e.g., tcp://localhost:18126)",
     )
 
     continuous_command_parser = parser.add_argument_group("continuous")
@@ -1376,8 +1365,6 @@ def main() -> None:
         metrics_handler = MetricsHandler(
             server_url=args.metrics_server_url,
             service_name=args.service_name or METRIC_BASE_NAME,
-            batch_size=args.metrics_batch_size,
-            batch_timeout=args.metrics_batch_timeout,
         )
         logger.info(f"Metrics publishing enabled - connecting to {args.metrics_server_url}")
     else:
@@ -1501,7 +1488,7 @@ def main() -> None:
                 verify=args.verify,
             )
 
-            # Create dynamic profiler manager
+            # Create dynamic profiler manager  
             manager = DynamicGProfilerManager(args, heartbeat_client)
             manager.heartbeat_interval = args.heartbeat_interval
 

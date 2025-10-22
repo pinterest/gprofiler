@@ -423,16 +423,14 @@ class DynamicGProfilerManager:
         if hasattr(args, "tool_perfspect_path") and args.tool_perfspect_path:
             perfspect_path = Path(args.tool_perfspect_path)
         
-        # Initialize metrics handler if enabled
+        # Initialize metrics handler if enabled (singleton pattern ensures single instance)
         metrics_handler = None
         if getattr(args, 'enable_publish_metrics', False):
             metrics_handler = MetricsHandler(
                 server_url=args.metrics_server_url,
                 service_name=args.service_name or METRIC_BASE_NAME,
-                batch_size=getattr(args, 'metrics_batch_size', 10),
-                batch_timeout=getattr(args, 'metrics_batch_timeout', 5.0),
             )
-            logger.info(f"Metrics publishing enabled in heartbeat mode - connecting to {args.metrics_server_url}")
+            logger.info(f"Metrics publishing enabled in heartbeat mode - using singleton instance")
         else:
             # Use no-op handler when disabled
             metrics_handler = NoopMetricsHandler()
