@@ -35,7 +35,13 @@ from gprofiler.metadata.application_identifiers import ApplicationIdentifiers
 from gprofiler.metadata.enrichment import EnrichmentOptions
 from gprofiler.metadata.metadata_collector import get_static_metadata
 from gprofiler.metadata.system_metadata import get_hostname
-from gprofiler.metrics_publisher import MetricsHandler, NoopMetricsHandler, METRIC_BASE_NAME
+from gprofiler.metrics_publisher import (
+    MetricsHandler, 
+    NoopMetricsHandler, 
+    METRIC_BASE_NAME,
+    RESPONSE_TYPE_SUCCESS,
+    RESPONSE_TYPE_FAILURE
+)
 from gprofiler.profiler_state import ProfilerState
 from gprofiler.profilers.factory import get_profilers
 from gprofiler.profilers.profiler_base import NoopProfiler
@@ -52,7 +58,8 @@ logger = logging.getLogger(__name__)
 class HeartbeatClient:
     """Client for sending heartbeats to the server and receiving profiling commands"""
     
-    def __init__(self, api_server: str, service_name: str, server_token: str, verify: bool = True):
+    def __init__(self, api_server: str, service_name: str, server_token: str, verify: bool = True,
+                 metrics_handler: Optional[MetricsHandler] = None):
         self.api_server = api_server.rstrip('/')
         self.service_name = service_name
         self.server_token = server_token
@@ -63,6 +70,7 @@ class HeartbeatClient:
         self.executed_command_ids: set = set()  # Track executed command IDs for idempotency (in-memory)
         self.max_command_history = 1000  # Limit command history to prevent memory growth
         self.session = requests.Session()
+        self.metrics_handler = metrics_handler  # For error-budget metrics
         
         # Set up authentication headers
         if self.server_token:
@@ -103,6 +111,13 @@ class HeartbeatClient:
             
             if response.status_code == 200:
                 result = response.json()
+                # Emit success metric
+                if self.metrics_handler:
+                    self.metrics_handler.send_heartbeat_metric(
+                        response_type=RESPONSE_TYPE_SUCCESS,
+                        method_name='send_heartbeat'
+                    )
+                
                 if result.get("success") and result.get("profiling_command"):
                     logger.info(f"Received profiling command from server: {result.get('command_id')}")
                     return result
@@ -111,10 +126,24 @@ class HeartbeatClient:
                     return None
             else:
                 logger.warning(f"Heartbeat failed with status {response.status_code}: {response.text}")
+                # Emit failure metric
+                if self.metrics_handler:
+                    self.metrics_handler.send_heartbeat_metric(
+                        response_type=RESPONSE_TYPE_FAILURE,
+                        method_name='send_heartbeat',
+                        extra_tags={'status_code': response.status_code}
+                    )
                 return None
                 
         except Exception as e:
             logger.error(f"Failed to send heartbeat: {e}")
+            # Emit failure metric
+            if self.metrics_handler:
+                self.metrics_handler.send_heartbeat_metric(
+                    response_type=RESPONSE_TYPE_FAILURE,
+                    method_name='send_heartbeat',
+                    extra_tags={'error': str(e)}
+                )
             return None
     
     def send_command_completion(self, command_id: str, status: str, execution_time: Optional[int] = None, 

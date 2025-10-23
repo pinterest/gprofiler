@@ -71,6 +71,13 @@ ERROR_MSG_REQUEST_EXCEPTION = "network request failed"
 # Error category constants for granular classification
 ERROR_CATEGORY_UPLOAD_TIMEOUT = "upload_timeout"
 
+# Error budget metric constants (for CustomSR formula)
+ERROR_BUDGET_METRIC_NAME = "error-budget.counters"
+ERROR_BUDGET_UUID = "b8200070-42b8-46c8-8725-b68989952131"  # UUID for error-budget metrics
+RESPONSE_TYPE_SUCCESS = "success"
+RESPONSE_TYPE_FAILURE = "failure"
+RESPONSE_TYPE_IGNORED_FAILURE = "ignored_failure"
+
 # Export all constants for external use
 __all__ = [
     "MetricsHandler", "NoopMetricsHandler", "get_current_method_name",
@@ -81,7 +88,8 @@ __all__ = [
     "SEVERITY_ERROR", "SEVERITY_WARNING", "SEVERITY_CRITICAL",
     "ERROR_MSG_PROCESS_PROFILER_FAILURE", "ERROR_MSG_PERF_FAILURE", "ERROR_MSG_PROFILING_RUN_FAILURE",
     "ERROR_MSG_UPLOAD_ERROR", "ERROR_MSG_API_ERROR", "ERROR_MSG_REQUEST_EXCEPTION",
-    "ERROR_CATEGORY_UPLOAD_TIMEOUT"
+    "ERROR_CATEGORY_UPLOAD_TIMEOUT",
+    "ERROR_BUDGET_METRIC_NAME", "ERROR_BUDGET_UUID", "RESPONSE_TYPE_SUCCESS", "RESPONSE_TYPE_FAILURE", "RESPONSE_TYPE_IGNORED_FAILURE"
 ]
 
 
@@ -251,6 +259,59 @@ class MetricsHandler:
         """Send formatted message to MetricAgent via TCP."""
         with socket.create_connection((self.host, self.port), timeout=5.0) as sock:
             sock.sendall(message.encode('utf-8') + b'\n')
+    
+    def send_heartbeat_metric(
+        self,
+        response_type: str,
+        method_name: str,
+        value: int = 1,
+        extra_tags: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """
+        Send error-budget metric for CustomSR formula tracking.
+        
+        Metric format:
+            error-budget.counters.<UUID>{response_type=<type>, method_name=<name>}
+        
+        Args:
+            response_type: Response type - 'success', 'failure', or 'ignored_failure'
+                          Use RESPONSE_TYPE_* constants
+            method_name: Name of the method being tracked (e.g., 'send_heartbeat')
+            value: Metric value (default: 1 for counter increment)
+            extra_tags: Additional tags to include (optional)
+        
+        Example:
+            send_heartbeat_metric(
+                response_type=RESPONSE_TYPE_SUCCESS,
+                method_name='send_heartbeat'
+            )
+        """
+        try:
+            # Build tags - response_type and method_name are REQUIRED
+            tags = {
+                "response_type": response_type,
+                "method_name": method_name,
+                "service": self.service_name,
+                "hostname": get_hostname_or_none() or "unknown",
+            }
+            
+            # Add extra tags if provided
+            if extra_tags:
+                tags.update({k: str(v) for k, v in extra_tags.items()})
+            
+            # Build metric name with UUID suffix
+            metric_name = f"{ERROR_BUDGET_METRIC_NAME}.{ERROR_BUDGET_UUID}"
+            
+            # Format message in Goku protocol
+            epoch = int(time.time())
+            tag_string = " ".join(f"{k}={v}" for k, v in tags.items())
+            message = f"put {metric_name} {epoch} {value} {tag_string}"
+            
+            # Send metric
+            self.send_metric(message)
+            self.logger.debug(f"Sent error-budget metric: {response_type}/{method_name}")
+        except Exception as e:
+            self.logger.warning(f"Error-budget metric send failed: {e}")
 
     def _add_runtime_context(self, tags: Dict[str, str]) -> None:
         """Add gProfiler runtime context to tags (run_id, cycle_id)."""
@@ -268,5 +329,10 @@ class NoopMetricsHandler:
     
     def send_error_metric(self, error_type: str, error_message: str, category: str, 
                          severity: str = "error", extra_tags: Optional[Dict[str, Any]] = None) -> None:
+        """Do nothing - metrics are disabled."""
+        pass
+    
+    def send_heartbeat_metric(self, response_type: str, method_name: str, 
+                             value: int = 1, extra_tags: Optional[Dict[str, Any]] = None) -> None:
         """Do nothing - metrics are disabled."""
         pass
