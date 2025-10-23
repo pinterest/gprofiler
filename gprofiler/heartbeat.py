@@ -111,9 +111,9 @@ class HeartbeatClient:
             
             if response.status_code == 200:
                 result = response.json()
-                # Emit success metric
+                # Emit success metric (SLI tracking)
                 if self.metrics_handler:
-                    self.metrics_handler.send_heartbeat_metric(
+                    self.metrics_handler.send_sli_metric(
                         response_type=RESPONSE_TYPE_SUCCESS,
                         method_name='send_heartbeat'
                     )
@@ -126,9 +126,9 @@ class HeartbeatClient:
                     return None
             else:
                 logger.warning(f"Heartbeat failed with status {response.status_code}: {response.text}")
-                # Emit failure metric
+                # Emit failure metric (SLI tracking)
                 if self.metrics_handler:
-                    self.metrics_handler.send_heartbeat_metric(
+                    self.metrics_handler.send_sli_metric(
                         response_type=RESPONSE_TYPE_FAILURE,
                         method_name='send_heartbeat',
                         extra_tags={'status_code': response.status_code}
@@ -137,9 +137,9 @@ class HeartbeatClient:
                 
         except Exception as e:
             logger.error(f"Failed to send heartbeat: {e}")
-            # Emit failure metric
+            # Emit failure metric (SLI tracking)
             if self.metrics_handler:
-                self.metrics_handler.send_heartbeat_metric(
+                self.metrics_handler.send_sli_metric(
                     response_type=RESPONSE_TYPE_FAILURE,
                     method_name='send_heartbeat',
                     extra_tags={'error': str(e)}

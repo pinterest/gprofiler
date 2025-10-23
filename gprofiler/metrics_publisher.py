@@ -132,13 +132,14 @@ class MetricsHandler:
     _lock = threading.Lock()
     _initialized = False
     
-    def __new__(cls, server_url: str = None, service_name: str = None, **kwargs):
+    def __new__(cls, server_url: str = None, service_name: str = None, sli_metric_uuid: str = None, **kwargs):
         """
         Singleton pattern - ensure only one instance exists.
         
         Args:
             server_url: MetricAgent URL (only used on first instantiation)
             service_name: Service name for tagging (only used on first instantiation)
+            sli_metric_uuid: UUID for SLI metrics (only used on first instantiation)
             **kwargs: Ignored for backward compatibility
         """
         if cls._instance is None:
@@ -147,13 +148,14 @@ class MetricsHandler:
                     cls._instance = super().__new__(cls)
         return cls._instance
     
-    def __init__(self, server_url: str = None, service_name: str = None, **kwargs):
+    def __init__(self, server_url: str = None, service_name: str = None, sli_metric_uuid: str = None, **kwargs):
         """
         Initialize metrics handler (only once due to singleton pattern).
         
         Args:
             server_url: MetricAgent URL (e.g., 'tcp://localhost:18126')
             service_name: Service name for tagging
+            sli_metric_uuid: UUID for SLI metrics (optional, if not provided SLI metrics are disabled)
             **kwargs: Ignored for backward compatibility
         """
         # Only initialize once
@@ -165,6 +167,7 @@ class MetricsHandler:
             
         self.server_url = server_url
         self.service_name = service_name
+        self.sli_metric_uuid = sli_metric_uuid  # Can be None - SLI metrics disabled if not set
         self.logger = logging.getLogger(f"{__name__}.MetricsHandler")
         
         # Parse server URL
@@ -260,7 +263,7 @@ class MetricsHandler:
         with socket.create_connection((self.host, self.port), timeout=5.0) as sock:
             sock.sendall(message.encode('utf-8') + b'\n')
     
-    def send_heartbeat_metric(
+    def send_sli_metric(
         self,
         response_type: str,
         method_name: str,
@@ -268,7 +271,13 @@ class MetricsHandler:
         extra_tags: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
-        Send error-budget metric for CustomSR formula tracking.
+        Send SLI (Service Level Indicator) metric for error-budget tracking via CustomSR formula.
+        
+        Requirements:
+            1. Metrics must be enabled (--enable-publish-metrics)
+            2. SLI metric UUID must be configured (--sli-metric-uuid)
+        
+        If either requirement is not met, this method silently returns (SLI metrics disabled).
         
         Metric format:
             error-budget.counters.<UUID>{response_type=<type>, method_name=<name>}
@@ -281,11 +290,17 @@ class MetricsHandler:
             extra_tags: Additional tags to include (optional)
         
         Example:
-            send_heartbeat_metric(
+            send_sli_metric(
                 response_type=RESPONSE_TYPE_SUCCESS,
                 method_name='send_heartbeat'
             )
         """
+        # Check if SLI metric UUID is configured
+        # (Metrics handler is already enabled if this method is called on a real handler)
+        if not self.sli_metric_uuid:
+            # SLI metrics disabled - UUID not configured
+            return
+        
         try:
             # Build tags - response_type and method_name are REQUIRED
             tags = {
@@ -299,8 +314,8 @@ class MetricsHandler:
             if extra_tags:
                 tags.update({k: str(v) for k, v in extra_tags.items()})
             
-            # Build metric name with UUID suffix
-            metric_name = f"{ERROR_BUDGET_METRIC_NAME}.{ERROR_BUDGET_UUID}"
+            # Build metric name with UUID suffix (configurable per environment)
+            metric_name = f"{ERROR_BUDGET_METRIC_NAME}.{self.sli_metric_uuid}"
             
             # Format message in Goku protocol
             epoch = int(time.time())
@@ -309,9 +324,9 @@ class MetricsHandler:
             
             # Send metric
             self.send_metric(message)
-            self.logger.debug(f"Sent error-budget metric: {response_type}/{method_name}")
+            self.logger.debug(f"Sent SLI metric (error-budget): {response_type}/{method_name}")
         except Exception as e:
-            self.logger.warning(f"Error-budget metric send failed: {e}")
+            self.logger.warning(f"SLI metric send failed: {e}")
 
     def _add_runtime_context(self, tags: Dict[str, str]) -> None:
         """Add gProfiler runtime context to tags (run_id, cycle_id)."""
@@ -332,7 +347,7 @@ class NoopMetricsHandler:
         """Do nothing - metrics are disabled."""
         pass
     
-    def send_heartbeat_metric(self, response_type: str, method_name: str, 
-                             value: int = 1, extra_tags: Optional[Dict[str, Any]] = None) -> None:
-        """Do nothing - metrics are disabled."""
+    def send_sli_metric(self, response_type: str, method_name: str, 
+                       value: int = 1, extra_tags: Optional[Dict[str, Any]] = None) -> None:
+        """Do nothing - SLI metrics are disabled."""
         pass

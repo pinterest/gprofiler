@@ -972,6 +972,12 @@ def parse_cmd_args() -> configargparse.Namespace:
         type=str,
         help="TCP URL for MetricAgent service (e.g., tcp://localhost:18126)",
     )
+    metrics_options.add_argument(
+        "--sli-metric-uuid",
+        type=str,
+        default=None,
+        help="UUID for SLI metrics (required for SLI tracking via error-budget counters, configurable per environment)",
+    )
 
     continuous_command_parser = parser.add_argument_group("continuous")
     continuous_command_parser.add_argument(
@@ -1365,8 +1371,12 @@ def main() -> None:
         metrics_handler = MetricsHandler(
             server_url=args.metrics_server_url,
             service_name=args.service_name or METRIC_BASE_NAME,
+            sli_metric_uuid=args.sli_metric_uuid,
         )
-        logger.info(f"Metrics publishing enabled - connecting to {args.metrics_server_url}")
+        if args.sli_metric_uuid:
+            logger.info(f"Metrics publishing enabled - connecting to {args.metrics_server_url} (SLI metric UUID: {args.sli_metric_uuid})")
+        else:
+            logger.info(f"Metrics publishing enabled - connecting to {args.metrics_server_url} (SLI metrics disabled - no UUID configured)")
     else:
         # Use no-op handler when disabled
         metrics_handler = NoopMetricsHandler()
