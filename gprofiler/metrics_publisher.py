@@ -241,6 +241,7 @@ class MetricsHandler:
             "hostname": current_hostname,
             "component": category,
             "severity": severity,
+            "metric_type": "counter",
             "os_type": platform.system().lower(),
             "python_version": f"{platform.python_version_tuple()[0]}.{platform.python_version_tuple()[1]}",
         }
@@ -306,6 +307,7 @@ class MetricsHandler:
             tags = {
                 "response_type": response_type,
                 "method_name": method_name,
+                "metric_type": "counter",
                 "service": self.service_name,
                 "hostname": get_hostname_or_none() or "unknown",
             }

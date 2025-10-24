@@ -145,7 +145,6 @@ class GProfiler:
         heartbeat_file_path: Optional[Path] = None,
         perfspect_path: Optional[Path] = None,
         perfspect_duration: int = 60,
-        metrics_handler: Optional[MetricsHandler] = None,
     ):
         self._output_dir = output_dir
         self._flamegraph = flamegraph
@@ -164,7 +163,6 @@ class GProfiler:
         self._gpid = ""
         self._controller_process = controller_process
         self._duration = duration
-        self._metrics_handler = metrics_handler
         self._external_metadata_path = external_metadata_path
         self._heartbeat_file_path = heartbeat_file_path
         self._collect_hw_metrics = collect_hw_metrics
@@ -396,9 +394,10 @@ class GProfiler:
             except Exception:
                 future_name = future.name  # type: ignore # hack, add the profiler's name to the Future object
                 logger.exception(f"{future_name} profiling failed")
-                # Report profiler failure to metrics server
-                if self._metrics_handler:
-                    self._metrics_handler.send_error_metric(
+                # Report profiler failure to metrics server using singleton
+                metrics_handler = MetricsHandler.get_instance()
+                if metrics_handler:
+                    metrics_handler.send_error_metric(
                         error_type=ERROR_TYPE_PROCESS_PROFILER_FAILURE,
                         error_message=ERROR_MSG_PROCESS_PROFILER_FAILURE,
                         category=f"profiler_{future_name}",
@@ -417,9 +416,10 @@ class GProfiler:
             logger.critical(
                 "Running perf failed; consider running gProfiler with '--perf-mode disabled' to avoid using perf",
             )
-            # Report critical perf failure to metrics server
-            if self._metrics_handler:
-                self._metrics_handler.send_error_metric(
+            # Report critical perf failure to metrics server using singleton
+            metrics_handler = MetricsHandler.get_instance()
+            if metrics_handler:
+                metrics_handler.send_error_metric(
                     error_type=ERROR_TYPE_PERF_FAILURE,
                     error_message=ERROR_MSG_PERF_FAILURE,
                     category=COMPONENT_SYSTEM_PROFILER,
@@ -483,7 +483,7 @@ class GProfiler:
             self._generate_output_files(merged_result, local_start_time, local_end_time)
 
         if self._profiler_api_client:
-            self._gpid = _submit_profile_logged(
+            self._gpid =             _submit_profile_logged(
                 self._profiler_api_client,
                 local_start_time,
                 local_end_time,
@@ -492,7 +492,6 @@ class GProfiler:
                 self._spawn_time,
                 metrics,
                 self._gpid,
-                self._metrics_handler,
             )
         if time.monotonic() - self._last_diagnostics > DIAGNOSTICS_INTERVAL_S:
             self._last_diagnostics = time.monotonic()
@@ -530,9 +529,10 @@ class GProfiler:
                     self._snapshot()
                 except Exception:
                     logger.exception("Profiling run failed!")
-                    # Report profiling run failure to metrics server
-                    if self._metrics_handler:
-                        self._metrics_handler.send_error_metric(
+                    # Report profiling run failure to metrics server using singleton
+                    metrics_handler = MetricsHandler.get_instance()
+                    if metrics_handler:
+                        metrics_handler.send_error_metric(
                             error_type=ERROR_TYPE_PROFILING_RUN_FAILURE,
                             error_message=ERROR_MSG_PROFILING_RUN_FAILURE,
                             category=COMPONENT_GPROFILER_MAIN,
@@ -587,7 +587,6 @@ def _submit_profile_logged(
     spawn_time: float,
     metrics: "Metrics",
     gpid: str,
-    metrics_handler: Optional[MetricsHandler] = None,
 ) -> str:
     try:
         response_dict = client.submit_profile(
@@ -601,6 +600,7 @@ def _submit_profile_logged(
         )
     except Timeout:
         logger.error("Upload of profile to server timed out.")
+        metrics_handler = MetricsHandler.get_instance()
         if metrics_handler:
             metrics_handler.send_error_metric(
                 error_type=ERROR_TYPE_UPLOAD_ERROR,
@@ -614,6 +614,7 @@ def _submit_profile_logged(
             )
     except APIError as e:
         logger.error(f"Error occurred sending profile to server: {e}")
+        metrics_handler = MetricsHandler.get_instance()
         if metrics_handler:
             metrics_handler.send_error_metric(
                 error_type=ERROR_TYPE_API_ERROR,
@@ -626,6 +627,7 @@ def _submit_profile_logged(
             )
     except RequestException:
         logger.exception("Error occurred sending profile to server")
+        metrics_handler = MetricsHandler.get_instance()
         if metrics_handler:
             metrics_handler.send_error_metric(
                 error_type=ERROR_TYPE_REQUEST_EXCEPTION,
@@ -1496,7 +1498,6 @@ def main() -> None:
                 service_name=args.service_name,
                 server_token=args.server_token,
                 verify=args.verify,
-                metrics_handler=metrics_handler,
             )
 
             # Create dynamic profiler manager  
@@ -1536,7 +1537,6 @@ def main() -> None:
                 heartbeat_file_path=heartbeat_file_path,
                 perfspect_path=perfspect_path,
                 perfspect_duration=getattr(args, "tool_perfspect_duration", None),
-                metrics_handler=metrics_handler,
             )
             logger.info("gProfiler initialized and ready to start profiling")
             

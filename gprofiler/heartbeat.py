@@ -58,8 +58,7 @@ logger = logging.getLogger(__name__)
 class HeartbeatClient:
     """Client for sending heartbeats to the server and receiving profiling commands"""
     
-    def __init__(self, api_server: str, service_name: str, server_token: str, verify: bool = True,
-                 metrics_handler: Optional[MetricsHandler] = None):
+    def __init__(self, api_server: str, service_name: str, server_token: str, verify: bool = True):
         self.api_server = api_server.rstrip('/')
         self.service_name = service_name
         self.server_token = server_token
@@ -70,7 +69,6 @@ class HeartbeatClient:
         self.executed_command_ids: set = set()  # Track executed command IDs for idempotency (in-memory)
         self.max_command_history = 1000  # Limit command history to prevent memory growth
         self.session = requests.Session()
-        self.metrics_handler = metrics_handler  # For error-budget metrics
         
         # Set up authentication headers
         if self.server_token:
@@ -111,9 +109,10 @@ class HeartbeatClient:
             
             if response.status_code == 200:
                 result = response.json()
-                # Emit success metric (SLI tracking)
-                if self.metrics_handler:
-                    self.metrics_handler.send_sli_metric(
+                # Emit success metric (SLI tracking) using singleton
+                metrics_handler = MetricsHandler.get_instance()
+                if metrics_handler:
+                    metrics_handler.send_sli_metric(
                         response_type=RESPONSE_TYPE_SUCCESS,
                         method_name='send_heartbeat'
                     )
@@ -126,9 +125,10 @@ class HeartbeatClient:
                     return None
             else:
                 logger.warning(f"Heartbeat failed with status {response.status_code}: {response.text}")
-                # Emit failure metric (SLI tracking)
-                if self.metrics_handler:
-                    self.metrics_handler.send_sli_metric(
+                # Emit failure metric (SLI tracking) using singleton
+                metrics_handler = MetricsHandler.get_instance()
+                if metrics_handler:
+                    metrics_handler.send_sli_metric(
                         response_type=RESPONSE_TYPE_FAILURE,
                         method_name='send_heartbeat',
                         extra_tags={'status_code': response.status_code}
@@ -137,9 +137,10 @@ class HeartbeatClient:
                 
         except Exception as e:
             logger.error(f"Failed to send heartbeat: {e}")
-            # Emit failure metric (SLI tracking)
-            if self.metrics_handler:
-                self.metrics_handler.send_sli_metric(
+            # Emit failure metric (SLI tracking) using singleton
+            metrics_handler = MetricsHandler.get_instance()
+            if metrics_handler:
+                metrics_handler.send_sli_metric(
                     response_type=RESPONSE_TYPE_FAILURE,
                     method_name='send_heartbeat',
                     extra_tags={'error': str(e)}
@@ -488,7 +489,6 @@ class DynamicGProfilerManager:
             heartbeat_file_path=heartbeat_file_path,
             perfspect_path=perfspect_path,
             perfspect_duration=getattr(args, "tool_perfspect_duration", 60),
-            metrics_handler=metrics_handler,
         )
     
     def _run_profiler(self, gprofiler: 'GProfiler', continuous: bool, duration: int, command_id: str):
