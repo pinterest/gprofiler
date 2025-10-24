@@ -46,9 +46,7 @@ METRIC_VALUE = 1  # Counter increment
 ERROR_TYPE_PROCESS_PROFILER_FAILURE = "process_profiler_failure"
 ERROR_TYPE_PERF_FAILURE = "perf_failure" 
 ERROR_TYPE_PROFILING_RUN_FAILURE = "profiling_run_failure"
-ERROR_TYPE_UPLOAD_ERROR = "upload_error"
-ERROR_TYPE_API_ERROR = "api_error"
-ERROR_TYPE_REQUEST_EXCEPTION = "request_exception"
+ERROR_TYPE_UPLOAD_ERROR = "upload_error"  # Consolidated for all upload-related errors
 
 # Component constants
 COMPONENT_SYSTEM_PROFILER = "system_profiler"
@@ -65,11 +63,11 @@ ERROR_MSG_PROCESS_PROFILER_FAILURE = "process profiler crashed or failed"
 ERROR_MSG_PERF_FAILURE = "perf command failed"
 ERROR_MSG_PROFILING_RUN_FAILURE = "profiling cycle failed"
 ERROR_MSG_UPLOAD_ERROR = "profile upload failed"
-ERROR_MSG_API_ERROR = "API server returned error"
-ERROR_MSG_REQUEST_EXCEPTION = "network request failed"
 
-# Error category constants for granular classification
+# Error category constants for granular upload error classification
 ERROR_CATEGORY_UPLOAD_TIMEOUT = "upload_timeout"
+ERROR_CATEGORY_UPLOAD_API_ERROR = "upload_api_error"
+ERROR_CATEGORY_UPLOAD_REQUEST_EXCEPTION = "upload_request_exception"
 
 # Error budget metric constants (for CustomSR formula)
 ERROR_BUDGET_METRIC_NAME = "error-budget.counters"
@@ -82,13 +80,12 @@ RESPONSE_TYPE_IGNORED_FAILURE = "ignored_failure"
 __all__ = [
     "MetricsHandler", "NoopMetricsHandler", "get_current_method_name",
     "METRIC_BASE_NAME", "ERROR_TYPE_PROCESS_PROFILER_FAILURE", "ERROR_TYPE_PERF_FAILURE",
-    "ERROR_TYPE_PROFILING_RUN_FAILURE", "ERROR_TYPE_UPLOAD_ERROR", 
-    "ERROR_TYPE_API_ERROR", "ERROR_TYPE_REQUEST_EXCEPTION",
+    "ERROR_TYPE_PROFILING_RUN_FAILURE", "ERROR_TYPE_UPLOAD_ERROR",
     "COMPONENT_SYSTEM_PROFILER", "COMPONENT_API_CLIENT", "COMPONENT_GPROFILER_MAIN",
     "SEVERITY_ERROR", "SEVERITY_WARNING", "SEVERITY_CRITICAL",
     "ERROR_MSG_PROCESS_PROFILER_FAILURE", "ERROR_MSG_PERF_FAILURE", "ERROR_MSG_PROFILING_RUN_FAILURE",
-    "ERROR_MSG_UPLOAD_ERROR", "ERROR_MSG_API_ERROR", "ERROR_MSG_REQUEST_EXCEPTION",
-    "ERROR_CATEGORY_UPLOAD_TIMEOUT",
+    "ERROR_MSG_UPLOAD_ERROR",
+    "ERROR_CATEGORY_UPLOAD_TIMEOUT", "ERROR_CATEGORY_UPLOAD_API_ERROR", "ERROR_CATEGORY_UPLOAD_REQUEST_EXCEPTION",
     "ERROR_BUDGET_METRIC_NAME", "ERROR_BUDGET_UUID", "RESPONSE_TYPE_SUCCESS", "RESPONSE_TYPE_FAILURE", "RESPONSE_TYPE_IGNORED_FAILURE"
 ]
 
@@ -132,7 +129,7 @@ class MetricsHandler:
     _lock = threading.Lock()
     _initialized = False
     
-    def __new__(cls, server_url: str = None, service_name: str = None, sli_metric_uuid: str = None, **kwargs):
+    def __new__(cls, server_url: str = None, service_name: str = None, sli_metric_uuid: str = None):
         """
         Singleton pattern - ensure only one instance exists.
         
@@ -140,7 +137,6 @@ class MetricsHandler:
             server_url: MetricAgent URL (only used on first instantiation)
             service_name: Service name for tagging (only used on first instantiation)
             sli_metric_uuid: UUID for SLI metrics (only used on first instantiation)
-            **kwargs: Ignored for backward compatibility
         """
         if cls._instance is None:
             with cls._lock:
@@ -148,7 +144,7 @@ class MetricsHandler:
                     cls._instance = super().__new__(cls)
         return cls._instance
     
-    def __init__(self, server_url: str = None, service_name: str = None, sli_metric_uuid: str = None, **kwargs):
+    def __init__(self, server_url: str = None, service_name: str = None, sli_metric_uuid: str = None):
         """
         Initialize metrics handler (only once due to singleton pattern).
         
@@ -156,7 +152,6 @@ class MetricsHandler:
             server_url: MetricAgent URL (e.g., 'tcp://localhost:18126')
             service_name: Service name for tagging
             sli_metric_uuid: UUID for SLI metrics (optional, if not provided SLI metrics are disabled)
-            **kwargs: Ignored for backward compatibility
         """
         # Only initialize once
         if self._initialized:
@@ -331,12 +326,26 @@ class MetricsHandler:
             self.logger.warning(f"SLI metric send failed: {e}")
 
     def _add_runtime_context(self, tags: Dict[str, str]) -> None:
-        """Add gProfiler runtime context to tags (run_id, cycle_id)."""
+        """
+        Add gProfiler runtime context to tags for tracking and correlation.
+        
+        Tags added:
+        - run_id: Unique identifier for this gProfiler agent instance (persists across cycles)
+        - cycle_id: Unique identifier for the current profiling cycle (changes each cycle)
+        - run_mode: Deployment context (k8s/container/standalone_executable/local_python)
+        
+        These tags enable:
+        - Correlating metrics across profiling cycles from the same agent instance
+        - Tracking agent lifecycle and troubleshooting agent-specific issues
+        - Understanding deployment patterns and environment-specific error rates
+        """
         try:
             state = get_state()
             if state:
+                # run_id: Identifies this agent instance across its entire lifetime
                 tags["run_id"] = state.run_id
-                tags["cycle_id"] = str(state.cycle_id) if state.cycle_id else "none" 
+                # cycle_id: Identifies the specific profiling cycle when error occurred
+                tags["cycle_id"] = str(state.cycle_id) if state.cycle_id else "none"
         except Exception:
             pass  # Continue without runtime context
 

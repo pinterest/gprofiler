@@ -61,12 +61,12 @@ from gprofiler.memory_manager import MemoryManager
 from gprofiler.metrics_publisher import (
     MetricsHandler, NoopMetricsHandler, METRIC_BASE_NAME,
     ERROR_TYPE_PROCESS_PROFILER_FAILURE, ERROR_TYPE_PERF_FAILURE, ERROR_TYPE_PROFILING_RUN_FAILURE,
-    ERROR_TYPE_UPLOAD_ERROR, ERROR_TYPE_API_ERROR, ERROR_TYPE_REQUEST_EXCEPTION,
+    ERROR_TYPE_UPLOAD_ERROR,
     COMPONENT_SYSTEM_PROFILER, COMPONENT_API_CLIENT, COMPONENT_GPROFILER_MAIN,
     SEVERITY_ERROR, SEVERITY_WARNING, SEVERITY_CRITICAL,
     ERROR_MSG_PROCESS_PROFILER_FAILURE, ERROR_MSG_PERF_FAILURE, ERROR_MSG_PROFILING_RUN_FAILURE,
-    ERROR_MSG_UPLOAD_ERROR, ERROR_MSG_API_ERROR, ERROR_MSG_REQUEST_EXCEPTION,
-    ERROR_CATEGORY_UPLOAD_TIMEOUT,
+    ERROR_MSG_UPLOAD_ERROR,
+    ERROR_CATEGORY_UPLOAD_TIMEOUT, ERROR_CATEGORY_UPLOAD_API_ERROR, ERROR_CATEGORY_UPLOAD_REQUEST_EXCEPTION,
     get_current_method_name,
 )
 from gprofiler.merge import concatenate_from_external_file, concatenate_profiles, merge_profiles
@@ -617,12 +617,13 @@ def _submit_profile_logged(
         metrics_handler = MetricsHandler.get_instance()
         if metrics_handler:
             metrics_handler.send_error_metric(
-                error_type=ERROR_TYPE_API_ERROR,
-                error_message=ERROR_MSG_API_ERROR,
+                error_type=ERROR_TYPE_UPLOAD_ERROR,
+                error_message=ERROR_MSG_UPLOAD_ERROR,
                 category=COMPONENT_API_CLIENT,
                 severity=SEVERITY_ERROR,
                 extra_tags={
                     "method_name": get_current_method_name(),
+                    "error_category": ERROR_CATEGORY_UPLOAD_API_ERROR,
                 },
             )
     except RequestException:
@@ -630,12 +631,13 @@ def _submit_profile_logged(
         metrics_handler = MetricsHandler.get_instance()
         if metrics_handler:
             metrics_handler.send_error_metric(
-                error_type=ERROR_TYPE_REQUEST_EXCEPTION,
-                error_message=ERROR_MSG_REQUEST_EXCEPTION,
+                error_type=ERROR_TYPE_UPLOAD_ERROR,
+                error_message=ERROR_MSG_UPLOAD_ERROR,
                 category=COMPONENT_API_CLIENT,
                 severity=SEVERITY_ERROR,
                 extra_tags={
                     "method_name": get_current_method_name(),
+                    "error_category": ERROR_CATEGORY_UPLOAD_REQUEST_EXCEPTION,
                 },
             )
     else:
