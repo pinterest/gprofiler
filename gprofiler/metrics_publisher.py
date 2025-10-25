@@ -78,7 +78,7 @@ RESPONSE_TYPE_IGNORED_FAILURE = "ignored_failure"
 
 # Export all constants for external use
 __all__ = [
-    "MetricsHandler", "NoopMetricsHandler", "get_current_method_name",
+    "MetricsPublisher", "NoopMetricsPublisher", "get_current_method_name",
     "METRIC_BASE_NAME", "ERROR_TYPE_PROCESS_PROFILER_FAILURE", "ERROR_TYPE_PERF_FAILURE",
     "ERROR_TYPE_PROFILING_RUN_FAILURE", "ERROR_TYPE_UPLOAD_ERROR",
     "COMPONENT_SYSTEM_PROFILER", "COMPONENT_API_CLIENT", "COMPONENT_GPROFILER_MAIN",
@@ -117,9 +117,9 @@ def get_current_method_name() -> str:
         del current_frame
 
 
-class MetricsHandler:
+class MetricsPublisher:
     """
-    Singleton metrics handler for sending error metrics to MetricAgent.
+    Singleton metrics publisher for sending error metrics to MetricAgent.
     
     Ensures only one TCP connection and consistent configuration across
     the entire gProfiler process for maximum resource efficiency.
@@ -129,7 +129,7 @@ class MetricsHandler:
     _lock = threading.Lock()
     _initialized = False
     
-    def __new__(cls, server_url: str = None, service_name: str = None, sli_metric_uuid: str = None):
+    def __new__(cls, server_url: str = None, service_name: str = None, sli_metric_uuid: str = None, enabled: bool = True):
         """
         Singleton pattern - ensure only one instance exists.
         
@@ -137,6 +137,7 @@ class MetricsHandler:
             server_url: MetricAgent URL (only used on first instantiation)
             service_name: Service name for tagging (only used on first instantiation)
             sli_metric_uuid: UUID for SLI metrics (only used on first instantiation)
+            enabled: Whether metrics publishing is enabled (only used on first instantiation)
         """
         if cls._instance is None:
             with cls._lock:
@@ -144,45 +145,60 @@ class MetricsHandler:
                     cls._instance = super().__new__(cls)
         return cls._instance
     
-    def __init__(self, server_url: str = None, service_name: str = None, sli_metric_uuid: str = None):
+    def __init__(self, server_url: str = None, service_name: str = None, sli_metric_uuid: str = None, enabled: bool = True):
         """
         Initialize metrics handler (only once due to singleton pattern).
         
         Args:
-            server_url: MetricAgent URL (e.g., 'tcp://localhost:18126')
-            service_name: Service name for tagging
+            server_url: MetricAgent URL (e.g., 'tcp://localhost:18126') - required if enabled=True
+            service_name: Service name for tagging - required if enabled=True
             sli_metric_uuid: UUID for SLI metrics (optional, if not provided SLI metrics are disabled)
+            enabled: Whether metrics publishing is enabled (if False, all send methods return early)
         """
         # Only initialize once
         if self._initialized:
             return
-            
-        if server_url is None or service_name is None:
-            raise ValueError("server_url and service_name are required for first initialization")
+        
+        self.enabled = enabled  # Controls whether metrics are actually sent
+        
+        # If metrics are disabled, we don't need valid server_url/service_name
+        if enabled:
+            if server_url is None or service_name is None:
+                raise ValueError("server_url and service_name are required when enabled=True")
+        else:
+            # Provide defaults when disabled (won't be used anyway)
+            server_url = server_url or "tcp://localhost:18126"
+            service_name = service_name or "gprofiler"
             
         self.server_url = server_url
         self.service_name = service_name
         self.sli_metric_uuid = sli_metric_uuid  # Can be None - SLI metrics disabled if not set
-        self.logger = logging.getLogger(f"{__name__}.MetricsHandler")
+        self.logger = logging.getLogger(f"{__name__}.MetricsPublisher")
         
-        # Parse server URL
+        # Parse server URL (only matters if enabled)
         if server_url.startswith('tcp://'):
             url_parts = server_url[6:].split(':')
             self.host = url_parts[0]
             self.port = int(url_parts[1]) if len(url_parts) > 1 else 18126
         else:
-            raise ValueError(f"Unsupported server URL format: {server_url}")
+            # If disabled, don't raise error for invalid URL
+            if enabled:
+                raise ValueError(f"Unsupported server URL format: {server_url}")
+            else:
+                self.host = "localhost"
+                self.port = 18126
             
         self._initialized = True
-        self.logger.info(f"MetricsHandler singleton initialized: {server_url} for service '{service_name}'")
+        status = "enabled" if enabled else "disabled"
+        self.logger.info(f"MetricsPublisher singleton initialized: {server_url} for service '{service_name}' (metrics {status})")
     
     @classmethod
-    def get_instance(cls) -> Optional['MetricsHandler']:
+    def get_instance(cls) -> Optional['MetricsPublisher']:
         """
         Get the singleton instance if it exists.
         
         Returns:
-            MetricsHandler instance if initialized, None otherwise
+            MetricsPublisher instance if initialized, None otherwise
         """
         return cls._instance
     
@@ -214,6 +230,10 @@ class MetricsHandler:
             severity: Error severity level (e.g., SEVERITY_ERROR)
             extra_tags: Additional tags to include
         """
+        # Guard: Skip if metrics publishing is disabled
+        if not self.enabled:
+            return
+        
         try:
             metric_name = self.decorate_metric_name(category, error_type)
             tags = self.build_enriched_tags(severity, category, extra_tags or {})
@@ -291,8 +311,11 @@ class MetricsHandler:
                 method_name='send_heartbeat'
             )
         """
+        # Guard: Skip if metrics publishing is disabled
+        if not self.enabled:
+            return
+        
         # Check if SLI metric UUID is configured
-        # (Metrics handler is already enabled if this method is called on a real handler)
         if not self.sli_metric_uuid:
             # SLI metrics disabled - UUID not configured
             return
@@ -350,8 +373,8 @@ class MetricsHandler:
             pass  # Continue without runtime context
 
 
-class NoopMetricsHandler:
-    """No-op metrics handler when metrics are disabled."""
+class NoopMetricsPublisher:
+    """No-op metrics publisher when metrics are disabled."""
     
     def send_error_metric(self, error_type: str, error_message: str, category: str, 
                          severity: str = "error", extra_tags: Optional[Dict[str, Any]] = None) -> None:

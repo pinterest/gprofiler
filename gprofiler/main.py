@@ -59,7 +59,7 @@ from gprofiler.hw_metrics import HWMetricsMonitor, HWMetricsMonitorBase, NoopHWM
 from gprofiler.log import RemoteLogsHandler, initial_root_logger_setup
 from gprofiler.memory_manager import MemoryManager
 from gprofiler.metrics_publisher import (
-    MetricsHandler, NoopMetricsHandler, METRIC_BASE_NAME,
+    MetricsPublisher, METRIC_BASE_NAME,
     ERROR_TYPE_PROCESS_PROFILER_FAILURE, ERROR_TYPE_PERF_FAILURE, ERROR_TYPE_PROFILING_RUN_FAILURE,
     ERROR_TYPE_UPLOAD_ERROR,
     COMPONENT_SYSTEM_PROFILER, COMPONENT_API_CLIENT, COMPONENT_GPROFILER_MAIN,
@@ -395,18 +395,16 @@ class GProfiler:
                 future_name = future.name  # type: ignore # hack, add the profiler's name to the Future object
                 logger.exception(f"{future_name} profiling failed")
                 # Report profiler failure to metrics server using singleton
-                metrics_handler = MetricsHandler.get_instance()
-                if metrics_handler:
-                    metrics_handler.send_error_metric(
-                        error_type=ERROR_TYPE_PROCESS_PROFILER_FAILURE,
-                        error_message=ERROR_MSG_PROCESS_PROFILER_FAILURE,
-                        category=f"profiler_{future_name}",
-                        severity=SEVERITY_ERROR,
-                        extra_tags={
-                            "method_name": get_current_method_name(),
-                            "profiler_name": future_name,
-                        },
-                    )
+                MetricsPublisher.get_instance().send_error_metric(
+                    error_type=ERROR_TYPE_PROCESS_PROFILER_FAILURE,
+                    error_message=ERROR_MSG_PROCESS_PROFILER_FAILURE,
+                    category=f"profiler_{future_name}",
+                    severity=SEVERITY_ERROR,
+                    extra_tags={
+                        "method_name": get_current_method_name(),
+                        "profiler_name": future_name,
+                    },
+                )
 
         local_end_time = local_start_time + datetime.timedelta(seconds=(time.monotonic() - monotonic_start_time))
 
@@ -417,17 +415,15 @@ class GProfiler:
                 "Running perf failed; consider running gProfiler with '--perf-mode disabled' to avoid using perf",
             )
             # Report critical perf failure to metrics server using singleton
-            metrics_handler = MetricsHandler.get_instance()
-            if metrics_handler:
-                metrics_handler.send_error_metric(
-                    error_type=ERROR_TYPE_PERF_FAILURE,
-                    error_message=ERROR_MSG_PERF_FAILURE,
-                    category=COMPONENT_SYSTEM_PROFILER,
-                    severity=SEVERITY_CRITICAL,
-                    extra_tags={
-                        "method_name": get_current_method_name(),
-                    },
-                )
+            MetricsPublisher.get_instance().send_error_metric(
+                error_type=ERROR_TYPE_PERF_FAILURE,
+                error_message=ERROR_MSG_PERF_FAILURE,
+                category=COMPONENT_SYSTEM_PROFILER,
+                severity=SEVERITY_CRITICAL,
+                extra_tags={
+                    "method_name": get_current_method_name(),
+                },
+            )
             raise
         metadata = (
             get_current_metadata(cast(ProfileMetadata, self._static_metadata))
@@ -530,17 +526,15 @@ class GProfiler:
                 except Exception:
                     logger.exception("Profiling run failed!")
                     # Report profiling run failure to metrics server using singleton
-                    metrics_handler = MetricsHandler.get_instance()
-                    if metrics_handler:
-                        metrics_handler.send_error_metric(
-                            error_type=ERROR_TYPE_PROFILING_RUN_FAILURE,
-                            error_message=ERROR_MSG_PROFILING_RUN_FAILURE,
-                            category=COMPONENT_GPROFILER_MAIN,
-                            severity=SEVERITY_ERROR,
-                            extra_tags={
-                                "method_name": get_current_method_name(),
-                            },
-                        )
+                    MetricsPublisher.get_instance().send_error_metric(
+                        error_type=ERROR_TYPE_PROFILING_RUN_FAILURE,
+                        error_message=ERROR_MSG_PROFILING_RUN_FAILURE,
+                        category=COMPONENT_GPROFILER_MAIN,
+                        severity=SEVERITY_ERROR,
+                        extra_tags={
+                            "method_name": get_current_method_name(),
+                        },
+                    )
                 self._usage_logger.log_cycle()
 
                 # Calculate snapshot duration and remaining wait time
@@ -600,46 +594,40 @@ def _submit_profile_logged(
         )
     except Timeout:
         logger.error("Upload of profile to server timed out.")
-        metrics_handler = MetricsHandler.get_instance()
-        if metrics_handler:
-            metrics_handler.send_error_metric(
-                error_type=ERROR_TYPE_UPLOAD_ERROR,
-                error_message=ERROR_MSG_UPLOAD_ERROR,
-                category=COMPONENT_API_CLIENT,
-                severity=SEVERITY_WARNING,
-                extra_tags={
-                    "method_name": get_current_method_name(),
-                    "error_category": ERROR_CATEGORY_UPLOAD_TIMEOUT,
-                },
-            )
+        MetricsPublisher.get_instance().send_error_metric(
+            error_type=ERROR_TYPE_UPLOAD_ERROR,
+            error_message=ERROR_MSG_UPLOAD_ERROR,
+            category=COMPONENT_API_CLIENT,
+            severity=SEVERITY_WARNING,
+            extra_tags={
+                "method_name": get_current_method_name(),
+                "error_category": ERROR_CATEGORY_UPLOAD_TIMEOUT,
+            },
+        )
     except APIError as e:
         logger.error(f"Error occurred sending profile to server: {e}")
-        metrics_handler = MetricsHandler.get_instance()
-        if metrics_handler:
-            metrics_handler.send_error_metric(
-                error_type=ERROR_TYPE_UPLOAD_ERROR,
-                error_message=ERROR_MSG_UPLOAD_ERROR,
-                category=COMPONENT_API_CLIENT,
-                severity=SEVERITY_ERROR,
-                extra_tags={
-                    "method_name": get_current_method_name(),
-                    "error_category": ERROR_CATEGORY_UPLOAD_API_ERROR,
-                },
-            )
+        MetricsPublisher.get_instance().send_error_metric(
+            error_type=ERROR_TYPE_UPLOAD_ERROR,
+            error_message=ERROR_MSG_UPLOAD_ERROR,
+            category=COMPONENT_API_CLIENT,
+            severity=SEVERITY_ERROR,
+            extra_tags={
+                "method_name": get_current_method_name(),
+                "error_category": ERROR_CATEGORY_UPLOAD_API_ERROR,
+            },
+        )
     except RequestException:
         logger.exception("Error occurred sending profile to server")
-        metrics_handler = MetricsHandler.get_instance()
-        if metrics_handler:
-            metrics_handler.send_error_metric(
-                error_type=ERROR_TYPE_UPLOAD_ERROR,
-                error_message=ERROR_MSG_UPLOAD_ERROR,
-                category=COMPONENT_API_CLIENT,
-                severity=SEVERITY_ERROR,
-                extra_tags={
-                    "method_name": get_current_method_name(),
-                    "error_category": ERROR_CATEGORY_UPLOAD_REQUEST_EXCEPTION,
-                },
-            )
+        MetricsPublisher.get_instance().send_error_metric(
+            error_type=ERROR_TYPE_UPLOAD_ERROR,
+            error_message=ERROR_MSG_UPLOAD_ERROR,
+            category=COMPONENT_API_CLIENT,
+            severity=SEVERITY_ERROR,
+            extra_tags={
+                "method_name": get_current_method_name(),
+                "error_category": ERROR_CATEGORY_UPLOAD_REQUEST_EXCEPTION,
+            },
+        )
     else:
         logger.info("Successfully uploaded profiling data to the server")
         return cast(str, response_dict.get("gpid", ""))
@@ -1369,21 +1357,21 @@ def main() -> None:
         remote_logs_handler,
     )
 
-    # Initialize metrics handler if enabled
-    metrics_handler = None
+    # Initialize metrics publisher (always initialized, enabled flag controls behavior)
+    metrics_publisher = MetricsPublisher(
+        server_url=args.metrics_server_url or "tcp://localhost:18126",
+        service_name=args.service_name or METRIC_BASE_NAME,
+        sli_metric_uuid=args.sli_metric_uuid,
+        enabled=args.enable_publish_metrics,
+    )
+    
     if args.enable_publish_metrics:
-        metrics_handler = MetricsHandler(
-            server_url=args.metrics_server_url,
-            service_name=args.service_name or METRIC_BASE_NAME,
-            sli_metric_uuid=args.sli_metric_uuid,
-        )
         if args.sli_metric_uuid:
             logger.info(f"Metrics publishing enabled - connecting to {args.metrics_server_url} (SLI metric UUID: {args.sli_metric_uuid})")
         else:
             logger.info(f"Metrics publishing enabled - connecting to {args.metrics_server_url} (SLI metrics disabled - no UUID configured)")
     else:
-        # Use no-op handler when disabled
-        metrics_handler = NoopMetricsHandler()
+        logger.info("Metrics publishing disabled")
 
     warn_about_deprecated_args(args)
     setup_env(args.disable_core_files, args.pid_file)
@@ -1559,12 +1547,12 @@ def main() -> None:
         logger.exception("Unexpected error occurred")
         sys.exit(1)
     finally:
-        # Clean up metrics handler
-        if 'metrics_handler' in locals() and hasattr(metrics_handler, 'flush_and_close'):
+        # Clean up metrics publisher
+        if 'metrics_publisher' in locals() and hasattr(metrics_publisher, 'flush_and_close'):
             try:
-                metrics_handler.flush_and_close()
+                metrics_publisher.flush_and_close()
             except Exception as e:
-                logger.warning(f"Error during metrics handler cleanup: {e}")
+                logger.warning(f"Error during metrics publisher cleanup: {e}")
 
     usage_logger.log_run()
 
