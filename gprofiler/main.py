@@ -58,6 +58,17 @@ from gprofiler.heartbeat import DynamicGProfilerManager, HeartbeatClient
 from gprofiler.hw_metrics import HWMetricsMonitor, HWMetricsMonitorBase, NoopHWMetricsMonitor
 from gprofiler.log import RemoteLogsHandler, initial_root_logger_setup
 from gprofiler.memory_manager import MemoryManager
+from gprofiler.metrics_publisher import (
+    MetricsPublisher, METRIC_BASE_NAME,
+    ERROR_TYPE_PROCESS_PROFILER_FAILURE, ERROR_TYPE_PERF_FAILURE, ERROR_TYPE_PROFILING_RUN_FAILURE,
+    ERROR_TYPE_UPLOAD_ERROR,
+    COMPONENT_SYSTEM_PROFILER, COMPONENT_API_CLIENT, COMPONENT_GPROFILER_MAIN,
+    SEVERITY_ERROR, SEVERITY_WARNING, SEVERITY_CRITICAL,
+    ERROR_MSG_PROCESS_PROFILER_FAILURE, ERROR_MSG_PERF_FAILURE, ERROR_MSG_PROFILING_RUN_FAILURE,
+    ERROR_MSG_UPLOAD_ERROR,
+    ERROR_CATEGORY_UPLOAD_TIMEOUT, ERROR_CATEGORY_UPLOAD_API_ERROR, ERROR_CATEGORY_UPLOAD_REQUEST_EXCEPTION,
+    get_current_method_name,
+)
 from gprofiler.merge import concatenate_from_external_file, concatenate_profiles, merge_profiles
 from gprofiler.metadata import ProfileMetadata
 from gprofiler.metadata.application_identifiers import ApplicationIdentifiers
@@ -383,6 +394,17 @@ class GProfiler:
             except Exception:
                 future_name = future.name  # type: ignore # hack, add the profiler's name to the Future object
                 logger.exception(f"{future_name} profiling failed")
+                # Report profiler failure to metrics server using singleton
+                MetricsPublisher.get_instance().send_error_metric(
+                    error_type=ERROR_TYPE_PROCESS_PROFILER_FAILURE,
+                    error_message=ERROR_MSG_PROCESS_PROFILER_FAILURE,
+                    category=f"profiler_{future_name}",
+                    severity=SEVERITY_ERROR,
+                    extra_tags={
+                        "method_name": get_current_method_name(),
+                        "profiler_name": future_name,
+                    },
+                )
 
         local_end_time = local_start_time + datetime.timedelta(seconds=(time.monotonic() - monotonic_start_time))
 
@@ -391,6 +413,16 @@ class GProfiler:
         except Exception:
             logger.critical(
                 "Running perf failed; consider running gProfiler with '--perf-mode disabled' to avoid using perf",
+            )
+            # Report critical perf failure to metrics server using singleton
+            MetricsPublisher.get_instance().send_error_metric(
+                error_type=ERROR_TYPE_PERF_FAILURE,
+                error_message=ERROR_MSG_PERF_FAILURE,
+                category=COMPONENT_SYSTEM_PROFILER,
+                severity=SEVERITY_CRITICAL,
+                extra_tags={
+                    "method_name": get_current_method_name(),
+                },
             )
             raise
         metadata = (
@@ -447,7 +479,7 @@ class GProfiler:
             self._generate_output_files(merged_result, local_start_time, local_end_time)
 
         if self._profiler_api_client:
-            self._gpid = _submit_profile_logged(
+            self._gpid =             _submit_profile_logged(
                 self._profiler_api_client,
                 local_start_time,
                 local_end_time,
@@ -493,6 +525,16 @@ class GProfiler:
                     self._snapshot()
                 except Exception:
                     logger.exception("Profiling run failed!")
+                    # Report profiling run failure to metrics server using singleton
+                    MetricsPublisher.get_instance().send_error_metric(
+                        error_type=ERROR_TYPE_PROFILING_RUN_FAILURE,
+                        error_message=ERROR_MSG_PROFILING_RUN_FAILURE,
+                        category=COMPONENT_GPROFILER_MAIN,
+                        severity=SEVERITY_ERROR,
+                        extra_tags={
+                            "method_name": get_current_method_name(),
+                        },
+                    )
                 self._usage_logger.log_cycle()
 
                 # Calculate snapshot duration and remaining wait time
@@ -552,10 +594,40 @@ def _submit_profile_logged(
         )
     except Timeout:
         logger.error("Upload of profile to server timed out.")
+        MetricsPublisher.get_instance().send_error_metric(
+            error_type=ERROR_TYPE_UPLOAD_ERROR,
+            error_message=ERROR_MSG_UPLOAD_ERROR,
+            category=COMPONENT_API_CLIENT,
+            severity=SEVERITY_WARNING,
+            extra_tags={
+                "method_name": get_current_method_name(),
+                "error_category": ERROR_CATEGORY_UPLOAD_TIMEOUT,
+            },
+        )
     except APIError as e:
         logger.error(f"Error occurred sending profile to server: {e}")
+        MetricsPublisher.get_instance().send_error_metric(
+            error_type=ERROR_TYPE_UPLOAD_ERROR,
+            error_message=ERROR_MSG_UPLOAD_ERROR,
+            category=COMPONENT_API_CLIENT,
+            severity=SEVERITY_ERROR,
+            extra_tags={
+                "method_name": get_current_method_name(),
+                "error_category": ERROR_CATEGORY_UPLOAD_API_ERROR,
+            },
+        )
     except RequestException:
         logger.exception("Error occurred sending profile to server")
+        MetricsPublisher.get_instance().send_error_metric(
+            error_type=ERROR_TYPE_UPLOAD_ERROR,
+            error_message=ERROR_MSG_UPLOAD_ERROR,
+            category=COMPONENT_API_CLIENT,
+            severity=SEVERITY_ERROR,
+            extra_tags={
+                "method_name": get_current_method_name(),
+                "error_category": ERROR_CATEGORY_UPLOAD_REQUEST_EXCEPTION,
+            },
+        )
     else:
         logger.info("Successfully uploaded profiling data to the server")
         return cast(str, response_dict.get("gpid", ""))
@@ -879,6 +951,26 @@ def parse_cmd_args() -> configargparse.Namespace:
         help="gProfiler won't gather the container names of processes that run in containers",
     )
 
+    # Metrics publishing options
+    metrics_options = parser.add_argument_group("metrics publishing")
+    metrics_options.add_argument(
+        "--enable-publish-metrics",
+        action="store_true",
+        default=False,
+        help="Enable publishing error metrics to MetricAgent (Goku)",
+    )
+    metrics_options.add_argument(
+        "--metrics-server-url",
+        type=str,
+        help="TCP URL for MetricAgent service (e.g., tcp://localhost:18126)",
+    )
+    metrics_options.add_argument(
+        "--sli-metric-uuid",
+        type=str,
+        default=None,
+        help="UUID for SLI metrics (required for SLI tracking via error-budget counters, configurable per environment)",
+    )
+
     continuous_command_parser = parser.add_argument_group("continuous")
     continuous_command_parser.add_argument(
         "--continuous", "-c", action="store_true", dest="continuous", help="Run in continuous mode"
@@ -1088,6 +1180,9 @@ def parse_cmd_args() -> configargparse.Namespace:
         if not args.service_name:
             parser.error("--enable-heartbeat-server requires --service-name to be provided")
 
+    if args.enable_publish_metrics and not args.metrics_server_url:
+        parser.error("--enable-publish-metrics requires --metrics-server-url to be provided")
+
     return args
 
 
@@ -1252,6 +1347,7 @@ def main() -> None:
         if _should_send_logs(args)
         else None
     )
+
     global logger
     logger = initial_root_logger_setup(
         logging.DEBUG if args.verbose else logging.INFO,
@@ -1260,6 +1356,22 @@ def main() -> None:
         args.log_rotate_backup_count,
         remote_logs_handler,
     )
+
+    # Initialize metrics publisher (always initialized, enabled flag controls behavior)
+    metrics_publisher = MetricsPublisher(
+        server_url=args.metrics_server_url or "tcp://localhost:18126",
+        service_name=args.service_name or METRIC_BASE_NAME,
+        sli_metric_uuid=args.sli_metric_uuid,
+        enabled=args.enable_publish_metrics,
+    )
+    
+    if args.enable_publish_metrics:
+        if args.sli_metric_uuid:
+            logger.info(f"Metrics publishing enabled - connecting to {args.metrics_server_url} (SLI metric UUID: {args.sli_metric_uuid})")
+        else:
+            logger.info(f"Metrics publishing enabled - connecting to {args.metrics_server_url} (SLI metrics disabled - no UUID configured)")
+    else:
+        logger.info("Metrics publishing disabled")
 
     warn_about_deprecated_args(args)
     setup_env(args.disable_core_files, args.pid_file)
@@ -1378,7 +1490,7 @@ def main() -> None:
                 verify=args.verify,
             )
 
-            # Create dynamic profiler manager
+            # Create dynamic profiler manager  
             manager = DynamicGProfilerManager(args, heartbeat_client)
             manager.heartbeat_interval = args.heartbeat_interval
 
@@ -1434,6 +1546,13 @@ def main() -> None:
     except Exception:
         logger.exception("Unexpected error occurred")
         sys.exit(1)
+    finally:
+        # Clean up metrics publisher
+        if 'metrics_publisher' in locals() and hasattr(metrics_publisher, 'flush_and_close'):
+            try:
+                metrics_publisher.flush_and_close()
+            except Exception as e:
+                logger.warning(f"Error during metrics publisher cleanup: {e}")
 
     usage_logger.log_run()
 
