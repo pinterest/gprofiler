@@ -446,8 +446,6 @@ class DynamicGProfilerManager:
         if hasattr(args, "tool_perfspect_path") and args.tool_perfspect_path:
             perfspect_path = Path(args.tool_perfspect_path)
         
-        # Metrics publisher already initialized in main.py - no need to initialize here
-        
         return GProfiler(
             output_dir=getattr(args, 'output_dir', None),
             flamegraph=getattr(args, 'flamegraph', True),
