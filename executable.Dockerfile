@@ -10,6 +10,8 @@ ARG AP_BUILDER_CENTOS
 ARG AP_BUILDER_ALPINE
 ARG AP_CENTOS_MIN
 ARG BURN_BUILDER_GOLANG
+ARG PERFSPECT_BUILDER_GOLANG
+ARG PERFSPECT_BUILDER_UBUNTU
 ARG GPROFILER_BUILDER
 ARG PYPERF_BUILDER_UBUNTU
 ARG DOTNET_BUILDER
@@ -66,6 +68,26 @@ RUN ./libunwind_build.sh
 
 COPY scripts/perf_build.sh .
 RUN ./perf_build.sh
+
+# perfspect
+FROM perfspect-tools:local AS perfspect-tools
+
+FROM golang${PERFSPECT_BUILDER_GOLANG} AS perfspect-builder
+WORKDIR /tmp
+
+RUN mkdir /prebuilt
+RUN mkdir /prebuilt/tools
+
+COPY --from=perfspect-tools /bin/ /prebuilt/tools
+COPY --from=perfspect-tools /oss_source.tgz /prebuilt/
+COPY --from=perfspect-tools /oss_source.tgz.md5 /prebuilt/
+
+# install jq as it is used in the Makefile to create the manifest
+RUN apt-get update
+RUN apt-get install -y jq
+
+COPY scripts/perfspect_build.sh .
+RUN ./perfspect_build.sh
 
 # phpspy
 FROM ubuntu${PHPSPY_BUILDER_UBUNTU} as phpspy-builder
@@ -239,6 +261,7 @@ COPY --from=bcc-build /bpf_get_stack_offset/get_stack_offset gprofiler/resources
 COPY --from=pyspy-builder /tmp/py-spy/py-spy gprofiler/resources/python/py-spy
 COPY --from=rbspy-builder /tmp/rbspy/rbspy gprofiler/resources/ruby/rbspy
 COPY --from=perf-builder /perf gprofiler/resources/perf
+COPY --from=perfspect-builder /tmp/perfspect/perfspect gprofiler/resources/perfspect/perfspect
 
 COPY --from=dotnet-builder /usr/share/dotnet/host gprofiler/resources/dotnet/host
 COPY --from=dotnet-builder /tmp/dotnet/deps gprofiler/resources/dotnet/shared/Microsoft.NETCore.App/6.0.7

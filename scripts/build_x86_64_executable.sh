@@ -52,12 +52,17 @@ DOTNET_BUILDER=@sha256:525ce79a6f545131df515ce34f7ee086eb18e4d707eff9676b2678f2f
 AP_CENTOS_MIN=:6
 # burn - golang:1.16.3
 BURN_BUILDER_GOLANG=@sha256:f7d3519759ba6988a2b73b5874b17c5958ac7d0aa48a8b1d84d66ef25fa345f1
+# perfspect - golang:1.25 (newer version to fix Debian Buster repository issues)
+PERFSPECT_BUILDER_GOLANG=@sha256:516827db2015144cf91e042d1b6a3aca574d013a4705a6fdc4330444d47169d5
 # bcc & gprofiler - centos:7
 # CentOS 7 image is used to grab an old version of `glibc` during `pyinstaller` bundling.
 # this will allow the executable to run on older versions of the kernel, eventually leading to the executable running on a wider range of machines.
 GPROFILER_BUILDER=@sha256:be65f488b7764ad3638f236b7b515b3678369a5124c47b8d32916d6487418ea4
 # node-package-builder-glibc - centos/devtoolset-7-toolchain-centos7:latest
 NODE_PACKAGE_BUILDER_GLIBC=centos/devtoolset-7-toolchain-centos7@sha256:24d4c230cb1fe8e68cefe068458f52f69a1915dd6f6c3ad18aa37c2b8fa3e4e1
+
+# Build PerfSpect tools first
+"$(dirname "$0")/build_perfspect_tools.sh"
 
 mkdir -p build/x86_64
 docker buildx build -f executable.Dockerfile --output type=local,dest=build/x86_64/ \
@@ -70,6 +75,7 @@ docker buildx build -f executable.Dockerfile --output type=local,dest=build/x86_
     --build-arg AP_BUILDER_ALPINE=$AP_BUILDER_ALPINE \
     --build-arg AP_CENTOS_MIN=$AP_CENTOS_MIN \
     --build-arg BURN_BUILDER_GOLANG=$BURN_BUILDER_GOLANG \
+    --build-arg PERFSPECT_BUILDER_GOLANG=$PERFSPECT_BUILDER_GOLANG \
     --build-arg GPROFILER_BUILDER=$GPROFILER_BUILDER \
     --build-arg DOTNET_BUILDER=$DOTNET_BUILDER \
     --build-arg NODE_PACKAGE_BUILDER_MUSL=$AP_BUILDER_ALPINE \
