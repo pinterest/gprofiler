@@ -35,8 +35,6 @@ CENTOS7_VERSION=@sha256:43964203bf5d7fe38c6fca6166ac89e4c095e2b0c0a28f6c7c678a13
 CENTOS8_VERSION=@sha256:a27fd8080b517143cbbbab9dfb7c8571c40d67d534bbdee55bd6c473f432b177
 # golang 1.16.3
 GOLANG_VERSION=@sha256:f7d3519759ba6988a2b73b5874b17c5958ac7d0aa48a8b1d84d66ef25fa345f1
-# perfspect - golang:1.25 (newer version to fix Debian Buster repository issues)
-PERFSPECT_BUILDER_GOLANG=@sha256:516827db2015144cf91e042d1b6a3aca574d013a4705a6fdc4330444d47169d5
 # alpine 3.14.2
 ALPINE_VERSION=@sha256:b06a5cf61b2956088722c4f1b9a6f71dfe95f0b1fe285d44195452b8a1627de7
 # dotnet builder - mcr.microsoft.com/dotnet/sdk:6.0.428-1-focal
@@ -45,7 +43,7 @@ DOTNET_BUILDER=@sha256:525ce79a6f545131df515ce34f7ee086eb18e4d707eff9676b2678f2f
 NODE_PACKAGE_BUILDER_GLIBC=build-prepare
 
 # Build PerfSpect tools first
-"$(dirname "$0")/build_perfspect_tools.sh"
+"$(dirname "$0")/build_perfspect.sh" --strategy=build --arch=aarch64
 
 mkdir -p build/aarch64
 docker buildx build --platform=linux/arm64 \
@@ -58,7 +56,6 @@ docker buildx build --platform=linux/arm64 \
     --build-arg AP_BUILDER_ALPINE=$ALPINE_VERSION \
     --build-arg AP_CENTOS_MIN=$CENTOS7_VERSION \
     --build-arg BURN_BUILDER_GOLANG=$GOLANG_VERSION \
-    --build-arg PERFSPECT_BUILDER_GOLANG=$PERFSPECT_BUILDER_GOLANG \
     --build-arg GPROFILER_BUILDER=$CENTOS8_VERSION \
     --build-arg DOTNET_BUILDER=$DOTNET_BUILDER \
     --build-arg NODE_PACKAGE_BUILDER_MUSL=$ALPINE_VERSION \
