@@ -11,13 +11,12 @@ from threading import Event, RLock, Thread
 from typing import Optional, Tuple, Union
 
 from gprofiler.log import get_logger_adapter
-from gprofiler.utils import start_process, reap_process
+from gprofiler.utils import TEMPORARY_STORAGE_PATH, TemporaryDirectoryWithMode, start_process, reap_process
 
 logger = get_logger_adapter(__name__)
 
 DEFAULT_POLLING_INTERVAL_SECONDS = 5
 STOP_TIMEOUT_SECONDS = 2
-PERFSPECT_DATA_DIRECTORY = "/tmp/perfspect_data"
 
 
 @dataclass
@@ -71,15 +70,15 @@ class HWMetricsMonitor(HWMetricsMonitorBase):
         self._perfspect_path: Optional[Path] = perfspect_path
         self._perfspect_duration = perfspect_duration
 
-        self._ps_raw_csv_filename = PERFSPECT_DATA_DIRECTORY + "/" + platform.node() + "_metrics.csv"
-        self._ps_summary_csv_filename = PERFSPECT_DATA_DIRECTORY + "/" + platform.node() + "_metrics_summary.csv"
-        self._ps_summary_html_filename = PERFSPECT_DATA_DIRECTORY + "/" + platform.node() + "_metrics_summary.html"
-        self._ps_latest_csv_filename = PERFSPECT_DATA_DIRECTORY + "/" + platform.node() + "_metrics_summary_latest.csv"
+        self._temporary_dir = TemporaryDirectoryWithMode(dir=TEMPORARY_STORAGE_PATH, mode=0o755)
+        self.storage_dir = self._temporary_dir.name
+        self._ps_raw_csv_filename = self.storage_dir + "/" + platform.node() + "_metrics.csv"
+        self._ps_summary_csv_filename = self.storage_dir + "/" + platform.node() + "_metrics_summary.csv"
+        self._ps_summary_html_filename = self.storage_dir + "/" + platform.node() + "_metrics_summary.html"
+        self._ps_latest_csv_filename = self.storage_dir + "/" + platform.node() + "_metrics_summary_latest.csv"
         self._ps_latest_html_filename = (
-            PERFSPECT_DATA_DIRECTORY + "/" + platform.node() + "_metrics_summary_latest.html"
+            self.storage_dir + "/" + platform.node() + "_metrics_summary_latest.html"
         )
-
-        self._cleanup()
 
     def start(self) -> None:
         if (
@@ -98,7 +97,7 @@ class HWMetricsMonitor(HWMetricsMonitorBase):
             "--duration",
             str(self._perfspect_duration),
             "--output",
-            PERFSPECT_DATA_DIRECTORY,
+            self.storage_dir,
         ]
 
         try:
@@ -145,29 +144,23 @@ class HWMetricsMonitor(HWMetricsMonitorBase):
         stderr = stderr.decode() if isinstance(stderr, bytes) else stderr
 
         assert self._ps_process is None  # means we're not running
-        self._cleanup()
+        self._cleanup_temporary_directory()
         return exit_status, stdout, stderr
 
     def is_running(self) -> bool:
         """Check if the PerfSpect process is currently running."""
         return self._ps_process is not None
 
-    def _cleanup(self) -> None:
-        # Remove the directory if it exists
-        # and create a new one
-        # to avoid any conflicts
-        # with the old data
-        # and to ensure that the directory is empty
-        # before starting the new process
-        if not os.path.exists(PERFSPECT_DATA_DIRECTORY):
-            os.makedirs(PERFSPECT_DATA_DIRECTORY)
-        else:
-            if os.path.exists(self._ps_raw_csv_filename):
-                os.remove(self._ps_raw_csv_filename)
-            if os.path.exists(self._ps_summary_csv_filename):
-                os.remove(self._ps_summary_csv_filename)
-            if os.path.exists(self._ps_summary_html_filename):
-                os.remove(self._ps_summary_html_filename)
+    def _cleanup_temporary_directory(self) -> None:
+        """Clean up the temporary directory used for PerfSpect output."""
+        if hasattr(self, '_temporary_dir') and self._temporary_dir is not None:
+            try:
+                self._temporary_dir.cleanup()
+                logger.debug("Temporary directory cleaned up successfully")
+            except (OSError, AttributeError) as e:
+                logger.warning("Error cleaning up temporary directory", error=str(e))
+            finally:
+                self._temporary_dir = None
 
     def _get_hw_metrics_dict(self) -> Optional[dict]:
         summary_dict = {}
