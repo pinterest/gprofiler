@@ -113,8 +113,10 @@ if [[ "$BUILD_STRATEGY" == "build" ]]; then
     cd ..
 elif [[ "$BUILD_STRATEGY" == "download" ]]; then
     if [[ "$ARCH" != "x86_64" ]]; then
-        echo "Error: Download strategy only supports x86_64 architecture. Use --strategy=build for other architectures."
-        exit 1
+        echo "Download strategy is not supported for architecture '$ARCH'. Only x86_64 is supported for downloads."
+        echo "Removing perfspect binary from gprofiler resources to avoid accidental usage."
+        sed -i '/COPY perfspect\/perfspect gprofiler\/resources\/perfspect\/perfspect/d' executable.Dockerfile
+        exit 0
     fi
 
     curl -L -o perfspect.tgz "https://github.com/intel/PerfSpect/releases/download/$VERSION/perfspect.tgz"
