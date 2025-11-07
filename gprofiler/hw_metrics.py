@@ -103,9 +103,16 @@ class HWMetricsMonitor(HWMetricsMonitorBase):
         try:
             process = start_process(ps_cmd)
             self._ps_process = process
-            logger.debug("PerfSpect process started successfully", pid=process.pid)
+            logger.info("PerfSpect process started successfully",
+                        pid=process.pid,
+                        command=" ".join(ps_cmd),
+                        output_dir=self.storage_dir)
+
         except (OSError, ValueError) as e:
-            logger.error("Failed to start PerfSpect process", error=str(e))
+            logger.error("Failed to start PerfSpect process",
+                         error=str(e),
+                         command=" ".join(ps_cmd),
+                         output_dir=self.storage_dir)
             raise
 
     def stop(self) -> None:
@@ -132,6 +139,17 @@ class HWMetricsMonitor(HWMetricsMonitorBase):
             
             try:
                 exit_status, stdout, stderr = reap_process(self._ps_process)
+                
+                # Log any captured output if there was an error
+                if exit_status != 0:
+                    stdout_str = stdout.decode() if isinstance(stdout, bytes) else stdout
+                    stderr_str = stderr.decode() if isinstance(stderr, bytes) else stderr
+                    logger.error("PerfSpect process terminated with error",
+                                 pid=self._ps_process.pid,
+                                 exit_status=exit_status,
+                                 stdout=stdout_str.strip() if stdout_str else "(empty)",
+                                 stderr=stderr_str.strip() if stderr_str else "(empty)")
+                
             except (OSError, ValueError) as e:
                 logger.warning("Error during PerfSpect process termination", error=str(e))
                 # Try to get the exit status anyway
@@ -149,7 +167,50 @@ class HWMetricsMonitor(HWMetricsMonitorBase):
 
     def is_running(self) -> bool:
         """Check if the PerfSpect process is currently running."""
-        return self._ps_process is not None
+        if self._ps_process is None:
+            return False
+        
+        # Check if process has terminated (zombie/defunct state)
+        return_code = self._ps_process.poll()
+        if return_code is not None:
+            # Process has terminated - capture any output before logging
+            self._capture_process_output(return_code)
+            return False
+        
+        return True
+
+    def _capture_process_output(self, return_code: int) -> None:
+        """Capture and log output from the terminated PerfSpect process."""
+        if self._ps_process is None:
+            return
+
+        pid = self._ps_process.pid
+        stdout_data = ""
+        stderr_data = ""
+
+        try:
+            # Try to read any remaining stdout/stderr
+            if self._ps_process.stdout:
+                try:
+                    stdout_data = self._ps_process.stdout.read().decode('utf-8', errors='replace')
+                except (OSError, ValueError, UnicodeDecodeError) as e:
+                    logger.debug(f"Could not read stdout: {e}")
+            
+            if self._ps_process.stderr:
+                try:
+                    stderr_data = self._ps_process.stderr.read().decode('utf-8', errors='replace')
+                except (OSError, ValueError, UnicodeDecodeError) as e:
+                    logger.debug(f"Could not read stderr: {e}")
+
+            # Log the process termination with captured output
+            logger.error("PerfSpect process terminated unexpectedly",
+                         pid=pid,
+                         return_code=return_code,
+                         stdout=stdout_data.strip() if stdout_data else "(empty)",
+                         stderr=stderr_data.strip() if stderr_data else "(empty)")
+                
+        except (OSError, ValueError) as e:
+            logger.warning(f"Error capturing PerfSpect process output: {e}")
 
     def _cleanup_temporary_directory(self) -> None:
         """Clean up the temporary directory used for PerfSpect output."""
