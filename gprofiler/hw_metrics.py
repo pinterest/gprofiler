@@ -3,12 +3,17 @@ import gzip
 import os
 import platform
 import shutil
-import subprocess  # nosec B404
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+from subprocess import Popen
 from threading import Event, RLock, Thread
-from typing import Optional
+from typing import Optional, Tuple, Union
+
+from gprofiler.log import get_logger_adapter
+from gprofiler.utils import start_process, reap_process
+
+logger = get_logger_adapter(__name__)
 
 DEFAULT_POLLING_INTERVAL_SECONDS = 5
 STOP_TIMEOUT_SECONDS = 2
@@ -62,7 +67,7 @@ class HWMetricsMonitor(HWMetricsMonitorBase):
         self._stop_event = stop_event
         self._thread: Optional[Thread] = None
         self._lock = RLock()
-        self._ps_process: Optional[subprocess.Popen[bytes]] = None
+        self._ps_process: Optional[Popen] = None
         self._perfspect_path: Optional[Path] = perfspect_path
         self._perfspect_duration = perfspect_duration
 
@@ -82,8 +87,11 @@ class HWMetricsMonitor(HWMetricsMonitorBase):
             or not os.path.isfile(self._perfspect_path)
             or not os.access(self._perfspect_path, os.X_OK)
         ):
-            return None
+            logger.debug("PerfSpect not available - path not found or not executable")
+            return
 
+        logger.info("Starting hardware metrics collection with PerfSpect")
+        
         ps_cmd = [
             str(self._perfspect_path),
             "metrics",
@@ -93,14 +101,56 @@ class HWMetricsMonitor(HWMetricsMonitorBase):
             PERFSPECT_DATA_DIRECTORY,
         ]
 
-        self._ps_process = subprocess.Popen(ps_cmd, stdout=subprocess.PIPE)
+        try:
+            process = start_process(ps_cmd)
+            self._ps_process = process
+            logger.debug("PerfSpect process started successfully", pid=process.pid)
+        except (OSError, ValueError) as e:
+            logger.error("Failed to start PerfSpect process", error=str(e))
+            raise
 
     def stop(self) -> None:
-        if self._ps_process:
-            self._ps_process.terminate()
-
-        self._cleanup()
+        exit_status, stdout, stderr = self._terminate()
+        if exit_status is not None:
+            logger.info(
+                "Finished hardware metrics collection with PerfSpect",
+                exit_status=exit_status,
+                stdout=stdout,
+                stderr=stderr
+            )
         self._thread = None
+
+    def _terminate(self) -> Tuple[Optional[int], str, str]:
+        """Terminate the PerfSpect process and return exit status, stdout, stderr."""
+        exit_status: Optional[int] = None
+        stdout: Union[str, bytes] = ""
+        stderr: Union[str, bytes] = ""
+
+        if self.is_running():
+            assert self._ps_process is not None  # for mypy
+            logger.debug("Terminating PerfSpect process", pid=self._ps_process.pid)
+            self._ps_process.terminate()  # okay to call even if process is already dead
+            
+            try:
+                exit_status, stdout, stderr = reap_process(self._ps_process)
+            except (OSError, ValueError) as e:
+                logger.warning("Error during PerfSpect process termination", error=str(e))
+                # Try to get the exit status anyway
+                exit_status = self._ps_process.poll()
+            
+            self._ps_process = None
+
+        # Convert bytes to string if needed
+        stdout = stdout.decode() if isinstance(stdout, bytes) else stdout
+        stderr = stderr.decode() if isinstance(stderr, bytes) else stderr
+
+        assert self._ps_process is None  # means we're not running
+        self._cleanup()
+        return exit_status, stdout, stderr
+
+    def is_running(self) -> bool:
+        """Check if the PerfSpect process is currently running."""
+        return self._ps_process is not None
 
     def _cleanup(self) -> None:
         # Remove the directory if it exists
@@ -123,7 +173,7 @@ class HWMetricsMonitor(HWMetricsMonitorBase):
         summary_dict = {}
         if os.path.exists(self._ps_summary_csv_filename) and os.path.isfile(self._ps_summary_csv_filename):
             shutil.copy(self._ps_summary_csv_filename, self._ps_latest_csv_filename)
-            with open(self._ps_latest_csv_filename, "r") as f:
+            with open(self._ps_latest_csv_filename, "r", encoding="utf-8") as f:
                 next(f)  # Skip the first line
                 for line in f:
                     csv_data = line.split(",")
