@@ -98,6 +98,7 @@ class HWMetricsMonitor(HWMetricsMonitorBase):
             str(self._perfspect_duration),
             "--output",
             self.storage_dir,
+            "--noroot",
         ]
 
         try:
