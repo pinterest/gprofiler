@@ -36,6 +36,7 @@ This document describes the implementation of a centralized profiling control sy
 - **Process-level and host-level** stop commands
 - **Idempotent command execution** using unique command IDs
 - **Command completion tracking**
+- **PerfSpect integration** for hardware metrics collection
 
 ### ✅ Agent Features  
 - **Heartbeat communication** with configurable intervals
@@ -44,6 +45,8 @@ This document describes the implementation of a centralized profiling control sy
 - **Idempotency** to prevent duplicate command execution
 - **Persistent command tracking** across agent restarts
 - **Graceful error handling** and retry logic
+- **PerfSpect auto-installation** for hardware metrics collection
+- **Hardware metrics integration** with CPU profiling data
 
 ## API Endpoints
 
@@ -64,7 +67,9 @@ POST /api/metrics/profile_request
   "target_hostnames": ["host1", "host2"],
   "pids": [1234, 5678],  // Optional: specific PIDs
   "stop_level": "process",  // "process" or "host" (for stop commands)
-  "additional_args": {}
+  "additional_args": {
+    "enable_perfspect": true  // Optional: enable hardware metrics collection
+  }
 }
 ```
 
@@ -142,6 +147,132 @@ POST /api/metrics/command_completion
   "results_path": "s3://bucket/path/to/results"
 }
 ```
+
+## PerfSpect Hardware Metrics Integration
+
+The heartbeat system supports Intel PerfSpect integration for collecting hardware performance metrics alongside CPU profiling data. This feature enables comprehensive performance analysis by combining software-level profiling with hardware-level metrics.
+
+### Overview
+
+When `enable_perfspect: true` is included in the `additional_args` of a profiling request, the gProfiler agent will:
+
+1. **Auto-install PerfSpect**: Downloads and extracts the latest PerfSpect binary from GitHub releases
+2. **Configure hardware collection**: Enables `--enable-hw-metrics-collection` flag
+3. **Set PerfSpect path**: Configures `--perfspect-path` to the auto-installed binary
+4. **Collect metrics**: Runs PerfSpect alongside CPU profiling to gather hardware metrics
+
+### Agent Behavior
+
+#### Command Processing
+When the agent receives a heartbeat response with `enable_perfspect: true` in the `combined_config`:
+
+```python
+# Agent processes the configuration
+if combined_config.get("enable_perfspect", False):
+    new_args.collect_hw_metrics = True
+    
+    # Auto-install PerfSpect
+    from gprofiler.perfspect_installer import get_or_install_perfspect
+    perfspect_path = get_or_install_perfspect()
+    if perfspect_path:
+        new_args.tool_perfspect_path = str(perfspect_path)
+        logger.info(f"PerfSpect auto-installed at: {perfspect_path}")
+```
+
+#### Installation Process
+1. **Download**: Fetches `perfspect.tgz` from `https://github.com/intel/PerfSpect/releases/latest/download/perfspect.tgz`
+2. **Extract**: Unpacks to `/tmp/gprofiler_perfspect/perfspect/`
+3. **Verify**: Checks binary exists and is executable
+4. **Configure**: Sets path for gProfiler to use
+
+#### Data Collection
+PerfSpect runs with the following command:
+```bash
+/tmp/gprofiler_perfspect/perfspect/perfspect metrics \
+  --duration 60 \
+  --output /tmp/perfspect_data
+```
+
+### Output Files
+
+When PerfSpect is enabled, additional files are generated:
+
+- **Hardware Metrics CSV**: `/tmp/perfspect_data/{hostname}_metrics.csv`
+- **Hardware Summary CSV**: `/tmp/perfspect_data/{hostname}_metrics_summary.csv`
+- **Hardware HTML Report**: `/tmp/perfspect_data/{hostname}_metrics_summary.html`
+- **Latest Metrics**: `/tmp/perfspect_data/{hostname}_metrics_summary_latest.csv`
+- **Latest HTML**: `/tmp/perfspect_data/{hostname}_metrics_summary_latest.html`
+
+### Example Request with PerfSpect
+
+```bash
+curl -X POST http://localhost:8000/api/metrics/profile_request \
+  -H "Content-Type: application/json" \
+  -d '{
+    "service_name": "web-service",
+    "command_type": "start",
+    "duration": 60,
+    "frequency": 11,
+    "profiling_mode": "cpu",
+    "target_hostnames": ["worker-01", "worker-02"],
+    "additional_args": {
+      "enable_perfspect": true
+    }
+  }'
+```
+
+### Combined Config Example
+
+The agent receives the following `combined_config` in heartbeat responses:
+
+```json
+{
+  "duration": 60,
+  "frequency": 11,
+  "continuous": true,
+  "command_type": "start",
+  "profiling_mode": "cpu",
+  "enable_perfspect": true
+}
+```
+
+### Requirements
+
+- **Platform**: Linux x86_64 (PerfSpect requirement)
+- **Permissions**: Root access for hardware performance counter access
+- **Network**: Internet access to download PerfSpect binary
+- **Storage**: ~50MB for PerfSpect installation and data files
+
+### Troubleshooting
+
+#### Common Issues
+
+1. **Permission Denied**: Ensure agent runs with sufficient privileges
+   ```bash
+   sudo ./gprofiler --enable-heartbeat-server ...
+   ```
+
+2. **Download Failures**: Check network connectivity and GitHub access
+   ```bash
+   curl -I https://github.com/intel/PerfSpect/releases/latest/download/perfspect.tgz
+   ```
+
+3. **Binary Not Found**: Verify installation directory permissions
+   ```bash
+   ls -la /tmp/gprofiler_perfspect/perfspect/
+   ```
+
+#### Debug Logging
+
+Enable verbose logging to see PerfSpect installation and execution details:
+```bash
+./gprofiler --enable-heartbeat-server --verbose
+```
+
+Look for log messages:
+- `PerfSpect auto-installed at: /path/to/binary`
+- `Using perfspect path: /path/to/binary`
+- `Failed to auto-install PerfSpect, hardware metrics disabled`
 
 ## Usage Examples
 
@@ -333,12 +464,24 @@ export GPROFILER_SERVER="http://localhost:8080"
    - Check command ID persistence
    - Review heartbeat timing
 
+4. **PerfSpect hardware metrics not working**
+   - Ensure Linux x86_64 platform (PerfSpect requirement)
+   - Verify root/sudo permissions for hardware counters
+   - Check internet connectivity for auto-installation
+   - Look for "PerfSpect auto-installed" or "Failed to auto-install" log messages
+   - Verify `/tmp/gprofiler_perfspect/perfspect/perfspect` binary exists and is executable
+
 ### Debugging
 
 - Enable verbose logging: `--verbose`
 - Check heartbeat logs: `/tmp/gprofiler-heartbeat.log`
 - Monitor backend API logs
 - Use test scripts to isolate issues
+- For PerfSpect issues:
+  - Check PerfSpect installation: `ls -la /tmp/gprofiler_perfspect/perfspect/`
+  - Test PerfSpect manually: `/tmp/gprofiler_perfspect/perfspect/perfspect --help`
+  - Check PerfSpect data directory: `ls -la /tmp/perfspect_data/`
+  - Monitor hardware metrics collection in agent logs
 
 ## Building and Running gProfiler Locally
 
@@ -437,6 +580,19 @@ sudo ./build/x86_64/gprofiler \
   --verbose
 ```
 
+#### Local PerfSpect Testing (Manual)
+
+```bash
+# Test PerfSpect integration manually (Linux x86_64 only)
+sudo ./build/x86_64/gprofiler \
+  --enable-hw-metrics-collection \
+  --perfspect-path /path/to/perfspect \
+  --perfspect-duration 60 \
+  --output-dir /tmp/profiles \
+  --duration 60 \
+  --verbose
+```
+
 ### Command Line Options Explained
 
 ```bash
@@ -456,6 +612,11 @@ sudo ./build/x86_64/gprofiler \
 --api-server URL                  # Heartbeat API server URL
 -o, --output-dir PATH            # Local output directory
 --verbose                        # Enable verbose logging
+
+# PerfSpect Hardware Metrics Options (Linux x86_64 only)
+--enable-hw-metrics-collection    # Enable hardware metrics via PerfSpect
+--perfspect-path PATH            # Path to PerfSpect binary (auto-installed in heartbeat mode)
+--perfspect-duration SECONDS     # PerfSpect collection duration (default: 60)
 ```
 
 ### Development Workflow

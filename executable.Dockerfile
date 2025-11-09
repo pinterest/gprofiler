@@ -239,6 +239,7 @@ COPY --from=bcc-build /bpf_get_stack_offset/get_stack_offset gprofiler/resources
 COPY --from=pyspy-builder /tmp/py-spy/py-spy gprofiler/resources/python/py-spy
 COPY --from=rbspy-builder /tmp/rbspy/rbspy gprofiler/resources/ruby/rbspy
 COPY --from=perf-builder /perf gprofiler/resources/perf
+COPY perfspect/perfspect gprofiler/resources/perfspect/perfspect
 
 COPY --from=dotnet-builder /usr/share/dotnet/host gprofiler/resources/dotnet/host
 COPY --from=dotnet-builder /tmp/dotnet/deps gprofiler/resources/dotnet/shared/Microsoft.NETCore.App/6.0.7

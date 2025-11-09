@@ -42,6 +42,9 @@ DOTNET_BUILDER=@sha256:525ce79a6f545131df515ce34f7ee086eb18e4d707eff9676b2678f2f
 # Take image from build-prepare stage
 NODE_PACKAGE_BUILDER_GLIBC=build-prepare
 
+# Build PerfSpect tools first
+"$(dirname "$0")/build_perfspect.sh" --strategy=download --arch=aarch64
+
 mkdir -p build/aarch64
 docker buildx build --platform=linux/arm64 \
     --build-arg PYSPY_RUST_BUILDER_VERSION=$PYSPY_RUST_VERSION \

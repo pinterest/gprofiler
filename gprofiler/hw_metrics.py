@@ -91,6 +91,7 @@ class HWMetricsMonitor(HWMetricsMonitorBase):
             str(self._perfspect_duration),
             "--output",
             PERFSPECT_DATA_DIRECTORY,
+            "--noroot",
         ]
 
         self._ps_process = subprocess.Popen(ps_cmd, stdout=subprocess.PIPE)

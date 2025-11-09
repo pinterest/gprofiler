@@ -59,6 +59,9 @@ GPROFILER_BUILDER=@sha256:be65f488b7764ad3638f236b7b515b3678369a5124c47b8d32916d
 # node-package-builder-glibc - centos/devtoolset-7-toolchain-centos7:latest
 NODE_PACKAGE_BUILDER_GLIBC=centos/devtoolset-7-toolchain-centos7@sha256:24d4c230cb1fe8e68cefe068458f52f69a1915dd6f6c3ad18aa37c2b8fa3e4e1
 
+# Build PerfSpect tools first
+"$(dirname "$0")/build_perfspect.sh" --strategy=download --arch=x86_64
+
 mkdir -p build/x86_64
 docker buildx build -f executable.Dockerfile --output type=local,dest=build/x86_64/ \
     --build-arg RBSPY_RUST_BUILDER_VERSION=$RBSPY_RUST_BUILDER_VERSION \

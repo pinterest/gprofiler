@@ -16,6 +16,7 @@
 
 import datetime
 import logging
+import os
 import socket
 import threading
 from pathlib import Path
@@ -47,7 +48,7 @@ from gprofiler.profilers.profiler_base import NoopProfiler
 from gprofiler.state import State, init_state, get_state
 from gprofiler.system_metrics import NoopSystemMetricsMonitor, SystemMetricsMonitor, SystemMetricsMonitorBase
 from gprofiler.usage_loggers import NoopUsageLogger
-from gprofiler.utils import TEMPORARY_STORAGE_PATH
+from gprofiler.utils import TEMPORARY_STORAGE_PATH, resource_path
 from gprofiler.hw_metrics import HWMetricsMonitor, HWMetricsMonitorBase, NoopHWMetricsMonitor
 from gprofiler.exceptions import NoProfilersEnabledError
 
@@ -396,6 +397,22 @@ class DynamicGProfilerManager:
         
         # Set continuous mode
         new_args.continuous = combined_config.get("continuous", False)
+        
+        # Handle PerfSpect configuration
+        enable_perfspect = combined_config.get("enable_perfspect", False)
+        if enable_perfspect:
+            new_args.collect_hw_metrics = True
+            
+            # Assume PerfSpect is pre-installed as a resource
+            perfspect_path = resource_path("perfspect/perfspect")
+
+            # Check if PerfSpect binary exists
+            if os.path.exists(perfspect_path) and os.access(perfspect_path, os.X_OK):
+                new_args.tool_perfspect_path = perfspect_path
+                logger.info(f"Using pre-installed PerfSpect at: {perfspect_path}")
+            else:
+                logger.error(f"PerfSpect not found at {perfspect_path}, hardware metrics disabled")
+                new_args.collect_hw_metrics = False
         
         return new_args
     
