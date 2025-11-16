@@ -432,7 +432,7 @@ class DynamicGProfilerManager:
                 logger.info("Perf profiler: enabled restricted mode")
             elif perf_config == "enabled_aggressive":
                 new_args.skip_system_profilers_above = 1500
-                new_args.perf_max_docker_containers = 10
+                new_args.perf_max_docker_containers = 50
                 logger.info("Perf profiler: enabled aggressive mode")
             elif perf_config == "disabled":
                 new_args.perf_mode = "disabled"
@@ -441,11 +441,11 @@ class DynamicGProfilerManager:
             # Handle Pyperf configuration
             pyperf_config = profiler_configs.get("pyperf", "enabled")
             if pyperf_config == "enabled":
-                new_args.python_skip_pyperf_profiler_above = 100
-                new_args.python_mode = "auto"
+                new_args.python_skip_pyperf_profiler_above = 1500
+                new_args.python_mode = "pyperf"
                 logger.info("Pyperf profiler: enabled")
             elif pyperf_config == "disabled":
-                new_args.python_mode = "pyspy"
+                new_args.python_mode = "disabled"
                 logger.info("Pyperf profiler: disabled, using pyspy")
             
             # Handle Pyspy configuration
@@ -456,7 +456,7 @@ class DynamicGProfilerManager:
             elif pyspy_config == "enabled":
                 new_args.python_mode = "pyspy"
                 logger.info("Pyspy profiler: enabled")
-            elif pyspy_config == "disabled":
+            elif pyspy_config == "disabled" and pyperf_config == "disabled":
                 new_args.python_mode = "disabled"
                 logger.info("Pyspy profiler: disabled")
             
