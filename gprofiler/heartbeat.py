@@ -414,6 +414,92 @@ class DynamicGProfilerManager:
                 logger.error(f"PerfSpect not found at {perfspect_path}, hardware metrics disabled")
                 new_args.collect_hw_metrics = False
         
+        # Handle max_processes configuration
+        max_processes = combined_config.get("max_processes", 10)
+        new_args.max_processes_per_profiler = max_processes
+        logger.info(f"Setting max processes per profiler: {max_processes}")
+        
+        # Handle Profiler Configurations
+        profiler_configs = combined_config.get("profiler_configs", {})
+        if profiler_configs:
+            logger.info(f"Applying profiler configurations: {profiler_configs}")
+            
+            # Handle Perf Profiler configuration
+            perf_config = profiler_configs.get("perf", "enabled_restricted")
+            if perf_config == "enabled_restricted":
+                new_args.skip_system_profilers_above = 600
+                new_args.perf_max_docker_containers = 2
+                logger.info("Perf profiler: enabled restricted mode")
+            elif perf_config == "enabled_aggressive":
+                new_args.skip_system_profilers_above = 1500
+                new_args.perf_max_docker_containers = 50
+                logger.info("Perf profiler: enabled aggressive mode")
+            elif perf_config == "disabled":
+                new_args.perf_mode = "disabled"
+                logger.info("Perf profiler: disabled")
+            
+            # Handle Pyperf configuration
+            pyperf_config = profiler_configs.get("pyperf", "enabled")
+            if pyperf_config == "enabled":
+                new_args.python_skip_pyperf_profiler_above = 1500
+                new_args.python_mode = "pyperf"
+                logger.info("Pyperf profiler: enabled")
+            elif pyperf_config == "disabled":
+                new_args.python_mode = "disabled"
+                logger.info("Pyperf profiler: disabled, using pyspy")
+            
+            # Handle Pyspy configuration
+            pyspy_config = profiler_configs.get("pyspy", "enabled_fallback")
+            if pyspy_config == "enabled_fallback":
+                new_args.python_mode = "auto"
+                logger.info("Pyspy profiler: enabled as fallback")
+            elif pyspy_config == "enabled":
+                new_args.python_mode = "pyspy"
+                logger.info("Pyspy profiler: enabled")
+            elif pyspy_config == "disabled" and pyperf_config == "disabled":
+                new_args.python_mode = "disabled"
+                logger.info("Pyspy profiler: disabled")
+            
+            # Handle Java Async Profiler configuration
+            async_profiler_config = profiler_configs.get("async_profiler", "enabled")
+            if async_profiler_config == "disabled":
+                new_args.java_mode = "disabled"
+                logger.info("Java async profiler: disabled")
+            else:
+                logger.info("Java async profiler: enabled")
+            
+            # Handle PHP configuration
+            phpspy_config = profiler_configs.get("phpspy", "enabled")
+            if phpspy_config == "disabled":
+                new_args.php_mode = "disabled"
+                logger.info("PHP profiler: disabled")
+            else:
+                logger.info("PHP profiler: enabled")
+            
+            # Handle Ruby configuration
+            rbspy_config = profiler_configs.get("rbspy", "enabled")
+            if rbspy_config == "disabled":
+                new_args.ruby_mode = "disabled"
+                logger.info("Ruby profiler: disabled")
+            else:
+                logger.info("Ruby profiler: enabled")
+            
+            # Handle .NET configuration
+            dotnet_config = profiler_configs.get("dotnet_trace", "enabled")
+            if dotnet_config == "disabled":
+                new_args.dotnet_mode = "disabled"
+                logger.info(".NET profiler: disabled")
+            else:
+                logger.info(".NET profiler: enabled")
+            
+            # Handle NodeJS configuration
+            nodejs_config = profiler_configs.get("nodejs_perf", "enabled")
+            if nodejs_config == "disabled":
+                new_args.nodejs_mode = "none"
+                logger.info("NodeJS profiler: disabled")
+            else:
+                logger.info("NodeJS profiler: enabled")
+        
         return new_args
     
     def _create_gprofiler_instance(self, args: configargparse.Namespace) -> 'GProfiler':
