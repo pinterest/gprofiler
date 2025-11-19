@@ -120,7 +120,7 @@ def discover_appropriate_perf_event(
             perf_process.start()
             # Use streaming parsing instead of loading all into memory
             perf_output = perf_process.wait_and_script()
-            logger.debug(f"Perf event {event.name} discovery output length: {len(perf_output) if perf_output else 0}")
+            logger.debug(f"Perf event {event.name} discovery: parsing output stream")
             parsed_perf_script = parse_perf_script_from_iterator(perf_output, insert_dso_name=False)
             if len(parsed_perf_script) > 0:
                 logger.debug(f"Perf event {event.name} discovery successful, found {len(parsed_perf_script)} samples")
