@@ -69,6 +69,7 @@ class HeartbeatClient:
         self.executed_command_ids: set = set()  # Track executed command IDs for idempotency (in-memory)
         self.max_command_history = 1000  # Limit command history to prevent memory growth
         self.session = requests.Session()
+        self.containers_names_client = ContainerNamesClient()
         
         # Set up authentication headers
         if self.server_token:
@@ -96,7 +97,8 @@ class HeartbeatClient:
                 "service_name": self.service_name,
                 "last_command_id": self.last_command_id,
                 "status": "active",
-                "timestamp": datetime.datetime.now().isoformat()
+                "timestamp": datetime.datetime.now().isoformat(),
+                **self.containers_names_client.get_k8s_info().to_dict()
             }
             
             url = f"{self.api_server}/api/metrics/heartbeat"
