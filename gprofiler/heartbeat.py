@@ -405,10 +405,12 @@ class DynamicGProfilerManager:
             perf_config = profiler_configs.get("perf", "enabled_restricted")
             if perf_config == "enabled_restricted":
                 new_args.max_system_processes_for_system_profilers = 600
+                new_args.perf_use_cgroups = True
                 new_args.perf_max_docker_containers = 2
                 logger.info("Perf profiler: enabled restricted mode")
             elif perf_config == "enabled_aggressive":
                 new_args.max_system_processes_for_system_profilers = 1500
+                new_args.perf_use_cgroups = True
                 new_args.perf_max_docker_containers = 50
                 logger.info("Perf profiler: enabled aggressive mode")
             elif perf_config == "disabled":
