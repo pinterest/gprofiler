@@ -33,7 +33,7 @@ import humanfriendly
 from granulate_utils.linux.ns import is_root, is_running_in_init_pid
 from granulate_utils.linux.process import is_process_running
 from granulate_utils.metadata.cloud import get_aws_execution_env
-from psutil import NoSuchProcess, Process
+from psutil import NoSuchProcess, Process, process_iter
 from requests import RequestException, Timeout
 
 from gprofiler import __version__
@@ -168,6 +168,8 @@ class GProfiler:
             profiling_mode=profiling_mode,
             container_names_client=container_names_client,
             processes_to_profile=processes_to_profile,
+            max_processes_per_profiler=user_args.get("max_processes_per_profiler", 0),
+            max_system_processes_for_system_profilers=user_args.get("max_system_processes_for_system_profilers", 0),
         )
         self.system_profiler, self.process_profilers = get_profilers(user_args, profiler_state=self._profiler_state)
         self._usage_logger = usage_logger
@@ -280,8 +282,33 @@ class GProfiler:
         self._system_metrics_monitor.start()
         self._hw_metrics_monitor.start()
 
+        # Check if system should skip continuous profilers due to process count
+        skip_system_profilers = False
+        if self._profiler_state.max_system_processes_for_system_profilers > 0:
+            try:
+                total_processes = len(list(process_iter()))
+                if total_processes > self._profiler_state.max_system_processes_for_system_profilers:
+                    skip_system_profilers = True
+                    logger.warning(
+                        f"Skipping system profilers (perf) - {total_processes} processes exceed threshold "
+                        f"of {self._profiler_state.max_system_processes_for_system_profilers}. "
+                        f"Runtime profilers (py-spy, Java, etc.) will continue normally."
+                    )
+                else:
+                    logger.debug(
+                        f"System process count: {total_processes} "
+                        f"(threshold: {self._profiler_state.max_system_processes_for_system_profilers})"
+                    )
+            except Exception as e:
+                logger.warning(f"Could not count system processes, continuing with all profilers: {e}")
+
         for prof in list(self.all_profilers):
             try:
+                # Skip system profilers if threshold exceeded
+                if skip_system_profilers and hasattr(prof, '_is_system_wide_profiler') and prof._is_system_wide_profiler():
+                    logger.info(f"Skipping {prof.__class__.__name__} due to high system process count")
+                    continue
+                    
                 prof.start()
             except Exception:
                 # the SystemProfiler is handled separately - let the user run with '--perf-mode none' if they
@@ -594,6 +621,25 @@ def parse_cmd_args() -> configargparse.Namespace:
         type=integers_list,
         help="Comma separated list of processes that will be filtered to profile,"
         " given multiple times will append pids to one list",
+    )
+    parser.add_argument(
+        "--max-processes-runtime-profiler",
+        dest="max_processes_per_profiler",
+        type=positive_integer,
+        default=0,
+        help="Maximum number of processes to profile per runtime profiler (0=unlimited). "
+        "When exceeded, profiles only the top N processes by CPU usage. "
+        "Does not affect system-wide profilers (perf, eBPF). Default: %(default)s",
+    )
+    parser.add_argument(
+        "--skip-system-profilers-above",
+        dest="max_system_processes_for_system_profilers",
+        type=positive_integer,
+        default=0,
+        help="Skip system-wide profilers (perf only) when total system processes exceed this threshold (0=unlimited). "
+        "When exceeded, prevents perf profiler from starting to reduce resource usage on busy systems. "
+        "PyPerf has its own threshold via --python-skip-pyperf-profiler-above. "
+        "Runtime profilers (py-spy, Java, etc.) continue normally with --max-processes limiting. Default: %(default)s",
     )
     parser.add_argument(
         "--rootless",
