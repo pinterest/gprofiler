@@ -104,14 +104,20 @@ class HeartbeatClient:
             if response.status_code == 200:
                 result = response.json()
                 
-                if result.get("success") and result.get("profiling_command"):
+                # Check if the response indicates success
+                if not result.get("success"):
+                    logger.error(f"Heartbeat returned unsuccessful status: {result}")
+                    return None
+                
+                # Check if there's a profiling command
+                if result.get("profiling_command"):
                     logger.info(f"Received profiling command from server: {result.get('command_id')}")
                     return result
                 else:
                     logger.debug("Heartbeat successful, no pending commands")
                     return None
             else:
-                logger.warning(f"Heartbeat failed with status {response.status_code}: {response.text}")
+                logger.error(f"Heartbeat failed with status {response.status_code}: {response.text}")
                 return None
                 
         except Exception as e:
@@ -216,7 +222,7 @@ class DynamicGProfilerManager:
                     command_id = command_response["command_id"]
                     command_type = profiling_command.get("command_type", "start")
                     
-                    logger.info(f"Received profiling command: {profiling_command}")
+                    logger.debug(f"Processing profiling command: {profiling_command}")
                     
                     # Check for idempotency - skip if command already executed
                     if command_id in self.heartbeat_client.executed_command_ids:
@@ -229,33 +235,33 @@ class DynamicGProfilerManager:
                     
                     logger.info(f"Received {command_type} command: {command_id}")
                     
-                    # Mark command as executed for idempotency
+                    # Validate command type first
+                    if command_type not in ["start", "stop"]:
+                        logger.warning(f"Unknown command type: {command_type}")
+                        # Mark invalid command as executed to prevent retry spam
+                        self.heartbeat_client.mark_command_executed(command_id)
+                        # Report completion for unknown command type
+                        self.heartbeat_client.send_command_completion(
+                            command_id=command_id,
+                            status="failed",
+                            execution_time=0,
+                            error_message=f"Unknown command type: {command_type}",
+                            results_path=None
+                        )
+                        continue
+                    
+                    # Mark valid command as executed for idempotency
                     self.heartbeat_client.mark_command_executed(command_id)
                     self.heartbeat_client.last_command_id = command_id
                     
-                    if command_type == "stop":
-                        # Stop current profiler without starting a new one
-                        logger.info(f"RECEIVED STOP COMMAND for command ID: {command_id}")
-                        logger.info(f"STOP command details: {profiling_command}")
-                        self._stop_current_profiler()
-                        # TODO: important comment to make sure profiler has stopped successful to avoid leak 
-                        # Report completion for stop command
-                        self.heartbeat_client.send_command_completion(
-                            command_id=command_id,
-                            status="completed",
-                            execution_time=0,
-                            error_message=None,
-                            results_path=None
-                        )
-                    elif command_type == "start":
-                        # Stop current profiler if running, then start new one
-                        logger.info("Starting new profiler due to start command")
-                        # TODO: important comment to make sure profiler has stopped successful to avoid leak 
-                        self._stop_current_profiler()
-                        self._start_new_profiler(profiling_command, command_id)
-                        # Note: command completion still needs since it will wait for successful profiling 
-                        # Report command completion to the server
-                        try:
+                    try:
+                        if command_type == "stop":
+                            # Stop current profiler without starting a new one
+                            logger.info(f"Executing STOP command for command ID: {command_id}")
+                            logger.info(f"STOP command details: {profiling_command}")
+                            self._stop_current_profiler()
+                            
+                            # Report completion for stop command
                             self.heartbeat_client.send_command_completion(
                                 command_id=command_id,
                                 status="completed",
@@ -263,16 +269,29 @@ class DynamicGProfilerManager:
                                 error_message=None,
                                 results_path=None
                             )
-                        except Exception as e:
-                            logger.error(f"Failed to report command completion for {command_id}: {e}")
-                    else:
-                        logger.warning(f"Unknown command type: {command_type}")
-                        # Report completion for unknown command type
+                        elif command_type == "start":
+                            # Stop current profiler if running, then start new one
+                            logger.info(f"Executing START command for command ID: {command_id}")
+                            logger.info(f"START command details: {profiling_command}")
+                            self._stop_current_profiler()
+                            self._start_new_profiler(profiling_command, command_id)
+                            
+                            # Report command completion to the server
+                            self.heartbeat_client.send_command_completion(
+                                command_id=command_id,
+                                status="completed",
+                                execution_time=0,
+                                error_message=None,
+                                results_path=None
+                            )
+                    except Exception as e:
+                        logger.error(f"Failed to execute {command_type} command {command_id}: {e}", exc_info=True)
+                        # Report failure to the server
                         self.heartbeat_client.send_command_completion(
                             command_id=command_id,
                             status="failed",
                             execution_time=0,
-                            error_message=f"Unknown command type: {command_type}",
+                            error_message=str(e),
                             results_path=None
                         )
                 

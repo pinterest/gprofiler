@@ -1289,10 +1289,6 @@ def main() -> None:
         
         # Check if heartbeat server mode is enabled FIRST
         if args.enable_heartbeat_server:
-            if not args.upload_results:
-                logger.error("Heartbeat server mode requires --upload-results to be enabled")
-                sys.exit(1)
-
             # Create heartbeat client
             heartbeat_client = HeartbeatClient(
                 api_server=args.api_server,
