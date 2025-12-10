@@ -84,8 +84,8 @@ done
 echo "Using BUILD_STRATEGY: $BUILD_STRATEGY"
 echo "Using ARCH: $ARCH"
 
-VERSION=v3.11.0
-GIT_REV="c0650037f2ac55cbd6bb7032bc0596d0c7393a0c"
+VERSION=v3.12.1
+GIT_REV="cd5bcf2364478092155cb8ef33513a26c6be89a4"
 
 
 # Remove existing perfspect directory if it exists
