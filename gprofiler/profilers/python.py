@@ -386,7 +386,8 @@ class PySpyProfiler(SpawningProcessProfilerBase):
             default=0,
             help="Skip PyPerf (eBPF Python profiler) when Python processes exceed this threshold (0=unlimited). "
             "When exceeded, prevents PyPerf from starting but allows py-spy fallback for Python profiling. "
-            "This provides fine-grained control over PyPerf resource usage independent of system profilers. Default: %(default)s",
+            "This provides fine-grained control over PyPerf resource usage independent of system profilers. "
+            "Default: %(default)s",
         ),
     ],
     supported_profiling_modes=["cpu"],
@@ -488,11 +489,11 @@ class PythonProfiler(ProfilerInterface):
                 # Skip PyPerf but keep py-spy as fallback
                 logger.info("PyPerf skipped due to Python process threshold, falling back to py-spy")
                 self._ebpf_profiler = None
-                
+
                 # Ensure py-spy profiler exists as fallback
                 if self._pyspy_profiler is None:
                     logger.warning("PyPerf skipped but no py-spy fallback available")
-                    
+
         # Start the appropriate profiler
         if self._ebpf_profiler is not None:
             self._ebpf_profiler.start()

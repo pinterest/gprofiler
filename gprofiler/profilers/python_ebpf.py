@@ -101,24 +101,24 @@ class PythonEbpfProfiler(ProfilerBase):
         This ensures consistent counting between PyPerf skip logic and py-spy process selection.
         """
         try:
-            from gprofiler.utils import pgrep_maps, pgrep_exe
-            
+            from gprofiler.utils import pgrep_exe, pgrep_maps
+
             # Count all processes that match Python detection criteria
             python_pattern = "python"
             python_processes = set()
-            
+
             # Check via maps (memory mappings contain libpython)
             try:
                 python_processes.update(pgrep_maps(python_pattern))
             except Exception:
                 pass
-            
+
             # Check via executable name
             try:
                 python_processes.update(pgrep_exe(python_pattern))
             except Exception:
                 pass
-            
+
             return len(python_processes)
         except Exception as e:
             logger.debug(f"Error counting Python processes: {e}")
@@ -131,18 +131,21 @@ class PythonEbpfProfiler(ProfilerBase):
         """
         if self._python_skip_pyperf_profiler_above <= 0:
             return False  # No threshold set, don't skip
-        
+
         python_process_count = self._count_python_processes()
         should_skip = python_process_count > self._python_skip_pyperf_profiler_above
-        
+
         if should_skip:
             logger.info(
                 f"Skipping PyPerf - {python_process_count} Python processes exceed threshold "
                 f"of {self._python_skip_pyperf_profiler_above}. py-spy fallback will be used for Python profiling."
             )
         else:
-            logger.debug(f"PyPerf: Python process count {python_process_count} (threshold: {self._python_skip_pyperf_profiler_above})")
-        
+            logger.debug(
+                f"PyPerf: Python process count {python_process_count} "
+                f"(threshold: {self._python_skip_pyperf_profiler_above})"
+            )
+
         return should_skip
 
     @classmethod

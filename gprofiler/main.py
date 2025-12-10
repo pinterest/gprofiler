@@ -305,10 +305,14 @@ class GProfiler:
         for prof in list(self.all_profilers):
             try:
                 # Skip system profilers if threshold exceeded
-                if skip_system_profilers and hasattr(prof, '_is_system_wide_profiler') and prof._is_system_wide_profiler():
+                if (
+                    skip_system_profilers
+                    and hasattr(prof, "_is_system_wide_profiler")
+                    and prof._is_system_wide_profiler()
+                ):
                     logger.info(f"Skipping {prof.__class__.__name__} due to high system process count")
                     continue
-                    
+
                 prof.start()
             except Exception:
                 # the SystemProfiler is handled separately - let the user run with '--perf-mode none' if they
@@ -1286,7 +1290,7 @@ def main() -> None:
 
         ApplicationIdentifiers.init(enrichment_options)
         set_diagnostics(args.diagnostics)
-        
+
         # Check if heartbeat server mode is enabled FIRST
         if args.enable_heartbeat_server:
             # Create heartbeat client
@@ -1297,7 +1301,7 @@ def main() -> None:
                 verify=args.verify,
             )
 
-            # Create dynamic profiler manager  
+            # Create dynamic profiler manager
             manager = DynamicGProfilerManager(args, heartbeat_client)
             manager.heartbeat_interval = args.heartbeat_interval
 

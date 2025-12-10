@@ -62,14 +62,15 @@ class PerfProcess:
         self._max_cgroups = max_cgroups
         self._pid_args = []
         self._cgroup_args = []
-        
+
         # Determine profiling strategy
         if use_cgroups:
             from gprofiler.utils.cgroup_utils import (
+                get_top_cgroup_names_for_perf,
                 is_cgroup_available,
                 validate_perf_cgroup_support,
-                get_top_cgroup_names_for_perf,
             )
+
             # Use cgroup-based profiling for better reliability
             if is_cgroup_available() and validate_perf_cgroup_support():
                 try:
@@ -78,29 +79,47 @@ class PerfProcess:
                         # Cgroup monitoring requires system-wide mode (-a)
                         self._pid_args.append("-a")
                         self._cgroup_args.extend(["-G", ",".join(top_cgroups)])
-                        logger.info(f"Using cgroup-based profiling with {len(top_cgroups)} top cgroups: {top_cgroups[:3]}{'...' if len(top_cgroups) > 3 else ''}")
+                        logger.info(
+                            f"Using cgroup-based profiling with {len(top_cgroups)} top cgroups: "
+                            f"{top_cgroups[:3]}{'...' if len(top_cgroups) > 3 else ''}"
+                        )
                     else:
                         # Never fall back to system-wide profiling when cgroups are explicitly requested
                         from gprofiler.exceptions import PerfNoSupportedEvent
+
                         if max_docker_containers > 0:
-                            logger.error(f"No Docker containers found for profiling despite --perf-max-docker-containers={max_docker_containers}. "
-                                       "This could indicate cgroup v2 compatibility issues or no running containers. "
-                                       "Perf profiler will be disabled to prevent system-wide profiling.")
-                            raise PerfNoSupportedEvent("Docker container profiling requested but no containers available")
+                            logger.error(
+                                f"No Docker containers found for profiling despite "
+                                f"--perf-max-docker-containers={max_docker_containers}. "
+                                "This could indicate cgroup v2 compatibility issues or no running containers. "
+                                "Perf profiler will be disabled to prevent system-wide profiling."
+                            )
+                            raise PerfNoSupportedEvent(
+                                "Docker container profiling requested but no containers available"
+                            )
                         elif max_cgroups > 0:
-                            logger.error(f"No cgroups found for profiling despite --perf-max-cgroups={max_cgroups}. "
-                                       "This could indicate cgroup compatibility issues or no active cgroups. "
-                                       "Perf profiler will be disabled to prevent system-wide profiling.")
+                            logger.error(
+                                f"No cgroups found for profiling despite --perf-max-cgroups={max_cgroups}. "
+                                "This could indicate cgroup compatibility issues or no active cgroups. "
+                                "Perf profiler will be disabled to prevent system-wide profiling."
+                            )
                             raise PerfNoSupportedEvent("Cgroup profiling requested but no cgroups available")
                         else:
-                            logger.error("Cgroup profiling was requested (--perf-use-cgroups) but no specific limits were set. "
-                                       "Perf profiler will be disabled to prevent system-wide profiling.")
-                            raise PerfNoSupportedEvent("Cgroup profiling requested but no containers or cgroups specified")
+                            logger.error(
+                                "Cgroup profiling was requested (--perf-use-cgroups) but no specific limits were set. "
+                                "Perf profiler will be disabled to prevent system-wide profiling."
+                            )
+                            raise PerfNoSupportedEvent(
+                                "Cgroup profiling requested but no containers or cgroups specified"
+                            )
                 except Exception as e:
                     # Never fall back to system-wide profiling when cgroups are explicitly requested
                     from gprofiler.exceptions import PerfNoSupportedEvent
-                    logger.error(f"Failed to get cgroups for profiling: {e}. "
-                               "Perf profiler will be disabled to prevent system-wide profiling.")
+
+                    logger.error(
+                        f"Failed to get cgroups for profiling: {e}. "
+                        "Perf profiler will be disabled to prevent system-wide profiling."
+                    )
                     raise PerfNoSupportedEvent(f"Cgroup profiling failed: {e}")
         elif processes_to_profile is not None:
             # Traditional PID-based profiling
@@ -109,7 +128,7 @@ class PerfProcess:
         else:
             # System-wide profiling
             self._pid_args.append("-a")
-            
+
         self._extra_args = extra_args
         self._switch_timeout_s = switch_timeout_s
         self._process: Optional[Popen] = None
@@ -130,7 +149,7 @@ class PerfProcess:
                 if arg == "-G" and i + 1 < len(self._cgroup_args):
                     cgroup_arg = self._cgroup_args[i + 1]
                     break
-            
+
             if cgroup_arg:
                 num_cgroups = len(cgroup_arg.split(","))
                 # Add one event per cgroup (perf requirement)
@@ -140,7 +159,7 @@ class PerfProcess:
             else:
                 # Fallback: single event
                 extra_args = ["-e", "cycles"]
-            
+
         return (
             [
                 perf_path(),
