@@ -582,6 +582,7 @@ def _submit_profile_logged(
     metrics: "Metrics",
     gpid: str,
 ) -> str:
+    upload_start = time.monotonic()
     try:
         response_dict = client.submit_profile(
             start_time,
@@ -629,7 +630,13 @@ def _submit_profile_logged(
             },
         )
     else:
-        logger.info("Successfully uploaded profiling data to the server")
+        upload_duration = time.monotonic() - upload_start
+        profile_size_kb = len(profile) / 1024
+        logger.info(
+            f"Successfully uploaded profiling data to the server: "
+            f"profile_start={start_time.isoformat()}, profile_end={end_time.isoformat()}, "
+            f"profile_size={profile_size_kb:.1f}KB, upload_duration={upload_duration:.2f}s"
+        )
         return cast(str, response_dict.get("gpid", ""))
     return ""
 
