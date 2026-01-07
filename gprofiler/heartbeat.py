@@ -474,13 +474,11 @@ class DynamicGProfilerManager:
                     logger.info("Java async profiler: disabled")
                 else:
                     if time_mode == "wall":
-                        new_args.java_async_profiler_mode = "cpu"  # Keep cpu mode for fdtransfer
-                        new_args.java_async_profiler_event = "wall"  # Use wall event for I/O capture
-                        logger.info("Java async profiler: enabled with wall time (event=wall)")
+                        new_args.java_async_profiler_mode = "wall"
+                        logger.info("Java async profiler: enabled with wall time (mode=wall)")
                     else:  # Default to CPU time
                         new_args.java_async_profiler_mode = "cpu"
-                        new_args.java_async_profiler_event = "cpu"  # Use cpu event for CPU-only
-                        logger.info("Java async profiler: enabled with CPU time (event=cpu)")
+                        logger.info("Java async profiler: enabled with CPU time (mode=cpu)")
             else:
                 # Legacy string format for backward compatibility
                 if async_profiler_config == "disabled":

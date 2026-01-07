@@ -163,7 +163,7 @@ JAVA_SAFEMODE_DEFAULT_OPTIONS = [
 ]
 
 
-SUPPORTED_AP_MODES = ["cpu", "itimer", "alloc"]
+SUPPORTED_AP_MODES = ["cpu", "itimer", "wall", "alloc"]
 
 
 # see StackWalkFeatures
@@ -718,10 +718,8 @@ class AsyncProfiledProcess:
         return f",interval={interval}"
 
     def _get_start_cmd(self, interval: int, ap_timeout: int) -> List[str]:
-        # Use event type if set, otherwise fall back to mode for backward compatibility
-        event_type = getattr(self, '_event', self._mode)
         return self._get_base_cmd() + [
-            f"start,event={event_type}"
+            f"start,event={self._mode}"
             f"{self._get_ap_output_args()}{self._get_interval_arg(interval)},"
             f"log={self._log_path_process}"
             f"{f',fdtransfer={self._fdtransfer_path}' if self._mode == 'cpu' else ''}"
@@ -863,16 +861,8 @@ class AsyncProfiledProcess:
             dest="java_async_profiler_mode",
             choices=SUPPORTED_AP_MODES + ["auto"],
             default="auto",
-            help="Select async-profiler's mode: 'cpu' (based on perf_events & fdtransfer), 'itimer' (no perf_events)"
-            " or 'auto' (select 'cpu' if perf_events are available; otherwise 'itimer'). Defaults to '%(default)s'.",
-        ),
-        ProfilerArgument(
-            "--java-async-profiler-event",
-            dest="java_async_profiler_event",
-            choices=["cpu", "wall", "itimer", "alloc"],
-            default="auto",
-            help="Select async-profiler's event type: 'cpu' (CPU-only profiling), 'wall' (wall time including I/O waits),"
-            " 'itimer' (SIGPROF signals), 'alloc' (allocation profiling), or 'auto' (matches mode). Defaults to '%(default)s'.",
+            help="Select async-profiler's mode: 'cpu' (CPU-only profiling), 'wall' (wall time including I/O waits),"
+            " 'itimer' (SIGPROF fallback), 'alloc' (allocation profiling), or 'auto' (select 'cpu' if perf_events are available; otherwise 'itimer'). Defaults to '%(default)s'.",
         ),
         ProfilerArgument(
             "--java-async-profiler-safemode",
@@ -1005,7 +995,6 @@ class JavaProfiler(SpawningProcessProfilerBase):
         profiler_state: ProfilerState,
         java_version_check: bool,
         java_async_profiler_mode: str,
-        java_async_profiler_event: str,
         java_async_profiler_safemode: int,
         java_async_profiler_features: List[str],
         java_async_profiler_args: str,
@@ -1032,7 +1021,6 @@ class JavaProfiler(SpawningProcessProfilerBase):
         if not self._simple_version_check:
             logger.warning("Java version checks are disabled")
         self._init_ap_mode(self._profiler_state.profiling_mode, java_async_profiler_mode)
-        self._init_ap_event(java_async_profiler_event)
         self._ap_safemode = java_async_profiler_safemode
         self._ap_features = java_async_profiler_features
         self._ap_args = java_async_profiler_args
@@ -1074,19 +1062,6 @@ class JavaProfiler(SpawningProcessProfilerBase):
 
         assert ap_mode in SUPPORTED_AP_MODES, f"unexpected ap mode: {ap_mode}"
         self._mode = ap_mode
-
-    def _init_ap_event(self, ap_event: str) -> None:
-        """Initialize async-profiler event type (cpu, wall, itimer, alloc)"""
-        if ap_event == "auto":
-            # Default: match the event to the mode for backward compatibility
-            ap_event = self._mode
-            logger.debug("Auto selected AP event", ap_event=ap_event)
-        
-        # Validate event type
-        supported_events = ["cpu", "wall", "itimer", "alloc"]
-        assert ap_event in supported_events, f"unexpected ap event: {ap_event}, supported: {supported_events}"
-        self._event = ap_event
-        logger.debug("Async profiler event type set", event=ap_event, mode=self._mode)
 
     def _init_java_safemode(self, java_safemode: str) -> None:
         if java_safemode == JAVA_SAFEMODE_ALL:
