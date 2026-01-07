@@ -457,6 +457,10 @@ Secondary detection method for languages without distinct library signatures:
 
 *async-profiler modes: `cpu` (perf_events, CPU-only), `wall` (internal timer, includes I/O waits), `itimer` (SIGPROF signals, fallback)
 
+### Wall Time Profiling Validation
+
+A comprehensive proof-of-concept test application is available in `docs/wall_time_proof_of_concept/` that demonstrates the difference between CPU and wall time profiling. The test validates that wall time profiling successfully captures I/O waits, lock contention, and blocking operations invisible to CPU-only profiling.
+
 ## 🤔 Why These Profilers Over Alternatives?
 
 gProfiler chose specific profilers for production readiness and performance over popular alternatives:
