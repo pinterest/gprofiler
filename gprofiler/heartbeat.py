@@ -461,12 +461,35 @@ class DynamicGProfilerManager:
                 logger.info("Pyspy profiler: disabled")
             
             # Handle Java Async Profiler configuration
-            async_profiler_config = profiler_configs.get("async_profiler", "enabled")
-            if async_profiler_config == "disabled":
-                new_args.java_mode = "disabled"
-                logger.info("Java async profiler: disabled")
+            async_profiler_config = profiler_configs.get("async_profiler", {"enabled": True, "time": "cpu"})
+            
+            # Handle both nested object and legacy string formats
+            if isinstance(async_profiler_config, dict):
+                # New nested object format: {"enabled": true/false, "time": "cpu"/"wall"}
+                is_enabled = async_profiler_config.get("enabled", True)
+                time_mode = async_profiler_config.get("time", "cpu")
+                
+                if not is_enabled:
+                    new_args.java_mode = "disabled"
+                    logger.info("Java async profiler: disabled")
+                else:
+                    if time_mode == "wall":
+                        new_args.java_async_profiler_mode = "wall"
+                        logger.info("Java async profiler: enabled with wall time (mode=wall)")
+                    else:  # Default to CPU time
+                        new_args.java_async_profiler_mode = "cpu"
+                        logger.info("Java async profiler: enabled with CPU time (mode=cpu)")
             else:
-                logger.info("Java async profiler: enabled")
+                # Legacy string format for backward compatibility
+                if async_profiler_config == "disabled":
+                    new_args.java_mode = "disabled"
+                    logger.info("Java async profiler: disabled (legacy format)")
+                elif async_profiler_config == "enabled_wall":
+                    new_args.java_async_profiler_mode = "itimer"
+                    logger.info("Java async profiler: enabled with wall time (legacy format)")
+                else:  # "enabled", "enabled_cpu", or any other value
+                    new_args.java_async_profiler_mode = "cpu"
+                    logger.info("Java async profiler: enabled with CPU time (legacy format)")
             
             # Handle PHP configuration
             phpspy_config = profiler_configs.get("phpspy", "enabled")

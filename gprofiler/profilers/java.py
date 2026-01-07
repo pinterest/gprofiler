@@ -163,7 +163,7 @@ JAVA_SAFEMODE_DEFAULT_OPTIONS = [
 ]
 
 
-SUPPORTED_AP_MODES = ["cpu", "itimer", "alloc"]
+SUPPORTED_AP_MODES = ["cpu", "itimer", "wall", "alloc"]
 
 
 # see StackWalkFeatures
@@ -558,7 +558,7 @@ class AsyncProfiledProcess:
         self._log_path_host = os.path.join(self._storage_dir_host, f"async-profiler-{self.process.pid}.log")
         self._log_path_process = remove_prefix(self._log_path_host, self._process_root)
 
-        assert mode in ("cpu", "itimer", "alloc"), f"unexpected mode: {mode}"
+        assert mode in ("cpu", "itimer", "wall", "alloc"), f"unexpected mode: {mode}"
         self._mode = mode
         self._fdtransfer_path = f"@async-profiler-{process.pid}-{secrets.token_hex(10)}" if mode == "cpu" else None
         self._ap_safemode = ap_safemode
@@ -861,8 +861,8 @@ class AsyncProfiledProcess:
             dest="java_async_profiler_mode",
             choices=SUPPORTED_AP_MODES + ["auto"],
             default="auto",
-            help="Select async-profiler's mode: 'cpu' (based on perf_events & fdtransfer), 'itimer' (no perf_events)"
-            " or 'auto' (select 'cpu' if perf_events are available; otherwise 'itimer'). Defaults to '%(default)s'.",
+            help="Select async-profiler's mode: 'cpu' (CPU-only profiling), 'wall' (wall time including I/O waits),"
+            " 'itimer' (SIGPROF fallback), 'alloc' (allocation profiling), or 'auto' (select 'cpu' if perf_events are available; otherwise 'itimer'). Defaults to '%(default)s'.",
         ),
         ProfilerArgument(
             "--java-async-profiler-safemode",
