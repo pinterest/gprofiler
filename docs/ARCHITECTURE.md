@@ -403,15 +403,20 @@ Secondary detection method for languages without distinct library signatures:
 │  │  • Profiles ALL processes system-wide (-a flag)                         │   │
 │  │  • Cannot cherry-pick processes reliably                                │   │
 │  │  • Command: perf record -a -g -F 11 -o perf.data                       │   │
+│  │  • Event discovery: tries 'cycles' (PMU), falls back to software      │   │
 │  └─────────────────────────────────────────────────────────────────────────┘   │
 │                                    │                                            │
 │                                    ▼                                            │
-│  2. Hardware Sampling                                                           │
+│  2. Time-based Sampling Mechanism                                               │
 │  ┌─────────────────────────────────────────────────────────────────────────┐   │
-│  │  • Uses CPU Performance Monitoring Units (PMU)                          │   │
-│  │  • Hardware interrupts at configured frequency                          │   │
-│  │  • Captures instruction pointer and stack at interrupt                  │   │
+│  │  • Uses time-based sampling at 11Hz frequency (-F 11)                   │   │
+│  │  • Preferred event: PMU 'cycles' (hardware counter)                     │   │
+│  │  • Fallback events: 'cpu-clock', 'task-clock' (software timers)         │   │
+│  │  • Captures instruction pointer and stack at each sample                │   │
 │  │  • Works for any language/runtime (Go, Node.js, C++, etc.)             │   │
+│  │                                                                         │   │
+│  │  Note: This is time-based, NOT event-based PMU sampling                 │   │
+│  │  (e.g., NOT "every N cache misses" but "every 1/11th second")          │   │
 │  └─────────────────────────────────────────────────────────────────────────┘   │
 │                                    │                                            │
 │                                    ▼                                            │
@@ -453,13 +458,46 @@ Secondary detection method for languages without distinct library signatures:
 | **rbspy** | Ruby | ptrace() | Process pause | Low | High |
 | **dotnet-trace** | .NET | EventPipe API | Event streaming | Very Low | High |
 | **phpspy** | PHP | ptrace() | Process pause | Low | Medium |
-| **perf** | All/Native | PMU hardware | Hardware interrupts | Low | High |
+| **perf** | All/Native | PMU/Software timers | Time-based sampling | Low | High |
 
 *async-profiler modes: `cpu` (perf_events, CPU-only), `wall` (internal timer, includes I/O waits), `itimer` (SIGPROF signals, fallback)
 
 ### Wall Time Profiling Validation
 
-A comprehensive proof-of-concept test application is available in `docs/wall_time_proof_of_concept/` that demonstrates the difference between CPU and wall time profiling. The test validates that wall time profiling successfully captures I/O waits, lock contention, and blocking operations invisible to CPU-only profiling.
+A comprehensive proof-of-concept test application is available in `docs/java_profiler_wall_time_proof_of_concept/` that demonstrates the difference between CPU and wall time profiling. The test validates that wall time profiling successfully captures I/O waits, lock contention, and blocking operations invisible to CPU-only profiling.
+
+### Current Perf Implementation vs PMU Event-based Profiling
+
+**Current Implementation (Time-based Sampling):**
+```bash
+# What gprofiler currently runs:
+perf record -a -g -F 11 -o perf.data
+# Samples at 11Hz frequency using 'cycles' PMU event as a timer
+```
+
+**Potential Enhancement (Event-based Sampling):**
+```bash
+# What could be added for PMU event profiling:
+perf record -a -g -e cache-misses -c 1000 -o cache-misses.data
+perf record -a -g -e stalled-cycles-frontend -c 1000 -o stalls.data
+# Samples every N events (e.g., every 1000 cache misses)
+```
+
+**Key Differences:**
+
+| **Current (Time-based)** | **Requested (Event-based)** |
+|--------------------------|------------------------------|
+| Sample every 1/11th second | Sample every N events |
+| Uses `cycles` as timer | Uses specific PMU events |
+| Shows "what's running when" | Shows "what's running when events occur" |
+| Single flamegraph output | Multiple flamegraphs per event type |
+| Available now | Would require implementation |
+
+**Use Cases for Event-based Profiling:**
+- **Cache-miss flamegraphs**: Identify memory-bound code paths
+- **Stall flamegraphs**: Find CPU pipeline inefficiencies  
+- **Branch-miss flamegraphs**: Locate unpredictable code branches
+- **Performance debugging**: Separate CPU-bound vs memory-bound bottlenecks
 
 ## 🤔 Why These Profilers Over Alternatives?
 
