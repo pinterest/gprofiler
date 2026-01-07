@@ -129,12 +129,23 @@ Secondary detection method for languages without distinct library signatures:
 │  └─────────────────────────────────────────────────────────────────────────┘   │
 │                                    │                                            │
 │                                    ▼                                            │
-│  2. Sampling Mechanism                                                          │
+│  2. Sampling Mechanism (Multiple Modes)                                        │
 │  ┌─────────────────────────────────────────────────────────────────────────┐   │
-│  │  • SIGPROF signals at configured frequency (default: 11Hz)              │   │
-│  │  • Captures both Java and native stacks in single sample                │   │
-│  │  • Uses HotSpot-specific APIs for accurate Java stack unwinding         │   │
-│  │  • Can profile JIT compilation stages (_[j], _[i], _[0], _[1])          │   │
+│  │  async-profiler supports different sampling mechanisms:                  │   │
+│  │                                                                         │   │
+│  │  • CPU Mode (event=cpu): Uses perf_events for CPU-only profiling        │   │
+│  │    - Only samples when thread is actively using CPU                     │   │
+│  │    - Misses I/O waits, lock contention, sleep time                      │   │
+│  │                                                                         │   │
+│  │  • Wall Mode (event=wall): Internal timer for wall clock profiling     │   │
+│  │    - Captures all time including I/O waits, blocking operations         │   │
+│  │    - Best for identifying latency and blocking issues                   │   │
+│  │                                                                         │   │
+│  │  • Timer Mode (event=itimer): SIGPROF signals (fallback)               │   │
+│  │    - Uses SIGPROF at configured frequency (default: 11Hz)               │   │
+│  │    - Wall time profiling when perf_events unavailable                   │   │
+│  │                                                                         │   │
+│  │  All modes: Capture Java + native stacks, JIT stages (_[j], _[i])      │   │
 │  └─────────────────────────────────────────────────────────────────────────┘   │
 │                                    │                                            │
 │                                    ▼                                            │
@@ -436,13 +447,15 @@ Secondary detection method for languages without distinct library signatures:
 
 | Profiler | Language | Attachment Method | Interruption Type | Overhead | Accuracy |
 |----------|----------|-------------------|-------------------|----------|----------|
-| **async-profiler** | Java | JVMTI Agent | SIGPROF signals | Very Low | Very High |
+| **async-profiler** | Java | JVMTI Agent | Multiple modes* | Very Low | Very High |
 | **py-spy** | Python | ptrace() | Process pause | Low | High |
 | **PyPerf** | Python | eBPF kernel | Hardware sampling | Very Low | Very High |
 | **rbspy** | Ruby | ptrace() | Process pause | Low | High |
 | **dotnet-trace** | .NET | EventPipe API | Event streaming | Very Low | High |
 | **phpspy** | PHP | ptrace() | Process pause | Low | Medium |
 | **perf** | All/Native | PMU hardware | Hardware interrupts | Low | High |
+
+*async-profiler modes: `cpu` (perf_events, CPU-only), `wall` (internal timer, includes I/O waits), `itimer` (SIGPROF signals, fallback)
 
 ## 🤔 Why These Profilers Over Alternatives?
 
