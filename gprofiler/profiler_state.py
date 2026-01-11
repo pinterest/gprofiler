@@ -27,6 +27,7 @@ class ProfilerState:
     processes_to_profile: Optional[List[Process]]
     max_processes_per_profiler: int
     max_system_processes_for_system_profilers: int
+    spark_controller: Optional[object] = None
 
     def __post_init__(self) -> None:
         self._temporary_dir = TemporaryDirectoryWithMode(dir=self.storage_dir, mode=0o755)

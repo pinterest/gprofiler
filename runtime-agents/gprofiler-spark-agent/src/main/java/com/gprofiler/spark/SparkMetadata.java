@@ -1,0 +1,46 @@
+package com.gprofiler.spark;
+
+import java.lang.management.ManagementFactory;
+import org.json.JSONObject;
+
+public class SparkMetadata {
+
+    public static JSONObject getMetadata() {
+        JSONObject json = new JSONObject();
+
+        // Extract Spark properties
+        String appId = System.getProperty("spark.app.id");
+        String appName = System.getProperty("spark.app.name");
+
+        if (appId != null) {
+            json.put("spark.app.id", appId);
+        }
+        if (appName != null) {
+            json.put("spark.app.name", appName);
+        }
+
+        // Extract PID (Java 8 compatible)
+        String pid = getPid();
+        if (pid != null) {
+            try {
+                json.put("pid", Long.parseLong(pid));
+            } catch (NumberFormatException e) {
+                // Should not happen if getPid works as expected
+                json.put("pid_raw", pid);
+            }
+        }
+
+        return json;
+    }
+
+    private static String getPid() {
+        try {
+            // This returns "pid@hostname"
+            String jvmName = ManagementFactory.getRuntimeMXBean().getName();
+            return jvmName.split("@")[0];
+        } catch (Exception e) {
+            e.printStackTrace();
+            return null;
+        }
+    }
+}

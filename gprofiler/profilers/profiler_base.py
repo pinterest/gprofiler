@@ -271,6 +271,13 @@ class ProcessProfilerBase(ProfilerBase):
                 process for process in processes_to_profile if process in self._profiler_state.processes_to_profile
             ]
             logger.debug(f"{self.__class__.__name__}: processes left after filtering: {len(processes_to_profile)}")
+
+        if self._profiler_state.spark_controller is not None:
+            # We must use the spark controller to filter out spark processes that are not allowed
+            # but we assume the method exists on the object (it is typed as object in ProfilerState to avoid circular imports)
+            if hasattr(self._profiler_state.spark_controller, "filter_processes"):
+                processes_to_profile = self._profiler_state.spark_controller.filter_processes(processes_to_profile)
+                logger.debug(f"{self.__class__.__name__}: processes left after Spark filtering: {len(processes_to_profile)}")
         
         # Apply max_processes_per_profiler limit for runtime profilers (not system-wide profilers)
         if self._should_limit_processes() and self._profiler_state.max_processes_per_profiler > 0:
