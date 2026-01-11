@@ -32,6 +32,26 @@ public class HeartbeatSender {
 
     public static void start() {
         scheduler.scheduleAtFixedRate(HeartbeatSender::sendHeartbeat, 0, INTERVAL_SECONDS, TimeUnit.SECONDS);
+
+        // Start thread consumer
+        Thread consumerThread = new Thread(HeartbeatSender::consumeThreadUpdates, "gprofiler-spark-thread-consumer");
+        consumerThread.setDaemon(true);
+        consumerThread.start();
+    }
+
+    private static void consumeThreadUpdates() {
+        while (true) {
+            try {
+                // Block until a thread update is available
+                Thread t = Agent.threadUpdateQueue.take();
+                sendThreadInfo(t);
+            } catch (InterruptedException e) {
+                // Should not happen, but if interrupted, stop?
+                // Just continue for now, unless we want shutdown logic.
+            } catch (Exception e) {
+                // Ignore errors
+            }
+        }
     }
 
     private static void sendHeartbeat() {
