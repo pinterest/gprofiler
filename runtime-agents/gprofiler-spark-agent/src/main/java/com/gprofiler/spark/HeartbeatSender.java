@@ -3,7 +3,8 @@ package com.gprofiler.spark;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
-import java.net.Socket;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.concurrent.Executors;
@@ -17,8 +18,7 @@ import com.google.gson.JsonObject;
 
 public class HeartbeatSender {
 
-    private static final int PORT = 12345;
-    private static final String HOST = "127.0.0.1";
+    private static final String TARGET_URL = "http://127.0.0.1:12345/spark";
     private static final int INTERVAL_SECONDS = 60;
 
     private static final AtomicBoolean profilingEnabled = new AtomicBoolean(false);
@@ -52,33 +52,25 @@ public class HeartbeatSender {
             JsonObject metadata = SparkMetadata.getMetadata();
             String jsonString = gson.toJson(metadata);
 
-            try (Socket socket = new Socket(HOST, PORT);
-                 OutputStream out = socket.getOutputStream();
-                 BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8))) {
+            String responseBody = post(jsonString);
 
-                out.write((jsonString + "\n").getBytes(StandardCharsets.UTF_8));
-                out.flush();
-
-                // Read response
-                String responseLine = in.readLine();
-                if (responseLine != null) {
-                    try {
-                        JsonObject response = gson.fromJson(responseLine, JsonObject.class);
-                        boolean shouldProfile = false;
-                        if (response.has("profile")) {
-                            shouldProfile = response.get("profile").getAsBoolean();
-                        }
-
-                        if (shouldProfile && !profilingEnabled.get()) {
-                            profilingEnabled.set(true);
-                            // Initial thread dump
-                            sendAllThreads();
-                        } else if (!shouldProfile && profilingEnabled.get()) {
-                            profilingEnabled.set(false);
-                        }
-                    } catch (Exception e) {
-                        // Ignore parse errors
+            if (responseBody != null) {
+                try {
+                    JsonObject response = gson.fromJson(responseBody, JsonObject.class);
+                    boolean shouldProfile = false;
+                    if (response.has("profile")) {
+                        shouldProfile = response.get("profile").getAsBoolean();
                     }
+
+                    if (shouldProfile && !profilingEnabled.get()) {
+                        profilingEnabled.set(true);
+                        // Initial thread dump
+                        sendAllThreads();
+                    } else if (!shouldProfile && profilingEnabled.get()) {
+                        profilingEnabled.set(false);
+                    }
+                } catch (Exception e) {
+                    // Ignore parse errors
                 }
             }
 
@@ -136,12 +128,43 @@ public class HeartbeatSender {
     }
 
     private static void sendPayload(JsonObject payload) {
-        try (Socket socket = new Socket(HOST, PORT);
-             OutputStream out = socket.getOutputStream()) {
-            out.write((gson.toJson(payload) + "\n").getBytes(StandardCharsets.UTF_8));
-            out.flush();
+        try {
+            post(gson.toJson(payload));
         } catch (Exception e) {
             // Ignore
+        }
+    }
+
+    private static String post(String jsonInputString) {
+        HttpURLConnection con = null;
+        try {
+            URL url = new URL(TARGET_URL);
+            con = (HttpURLConnection) url.openConnection();
+            con.setRequestMethod("POST");
+            con.setRequestProperty("Content-Type", "application/json; utf-8");
+            con.setRequestProperty("Accept", "application/json");
+            con.setDoOutput(true);
+
+            try (OutputStream os = con.getOutputStream()) {
+                byte[] input = jsonInputString.getBytes(StandardCharsets.UTF_8);
+                os.write(input, 0, input.length);
+            }
+
+            try (BufferedReader br = new BufferedReader(new InputStreamReader(con.getInputStream(), StandardCharsets.UTF_8))) {
+                StringBuilder response = new StringBuilder();
+                String responseLine = null;
+                while ((responseLine = br.readLine()) != null) {
+                    response.append(responseLine.trim());
+                }
+                return response.toString();
+            }
+
+        } catch (Exception e) {
+            return null;
+        } finally {
+            if (con != null) {
+                con.disconnect();
+            }
         }
     }
 }

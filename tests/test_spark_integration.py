@@ -2,8 +2,8 @@
 import unittest
 import threading
 import time
-import socket
 import json
+import requests
 from unittest.mock import MagicMock
 from psutil import Process
 import random
@@ -45,16 +45,12 @@ class TestSparkIntegration(unittest.TestCase):
             "spark.app.id": app_id,
             "spark.app.name": app_name
         }
+        url = f"http://127.0.0.1:{self.port}/spark"
         for i in range(5):
             try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.connect(("127.0.0.1", self.port))
-                    s.sendall((json.dumps(data) + "\n").encode("utf-8"))
-                    # Receive response
-                    s.settimeout(2.0)
-                    response = s.recv(1024).decode("utf-8")
-                    return json.loads(response)
-            except ConnectionRefusedError:
+                resp = requests.post(url, json=data, timeout=2)
+                return resp.json()
+            except requests.RequestException:
                 time.sleep(0.1)
         raise ConnectionRefusedError("Could not connect to test server")
 
@@ -65,9 +61,8 @@ class TestSparkIntegration(unittest.TestCase):
             "spark.app.id": app_id,
             "threads": threads
         }
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.connect(("127.0.0.1", self.port))
-            s.sendall((json.dumps(data) + "\n").encode("utf-8"))
+        url = f"http://127.0.0.1:{self.port}/spark"
+        requests.post(url, json=data, timeout=2)
 
     def test_filter_processes_and_handshake(self):
         # Allow apps

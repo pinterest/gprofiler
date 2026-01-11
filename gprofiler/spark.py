@@ -1,8 +1,8 @@
 import json
 import logging
-import socket
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, List, Optional, Set
 
 from psutil import Process
@@ -11,6 +11,33 @@ from gprofiler.client import ProfilerAPIClient
 from gprofiler.log import get_logger_adapter
 
 logger = get_logger_adapter(__name__)
+
+
+class SparkRequestHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        # Silence default logging
+        pass
+
+    def do_POST(self):
+        if self.path != "/spark":
+            self.send_error(404)
+            return
+
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length).decode("utf-8")
+
+            response_data = self.server.controller._process_message(body)
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+
+            if response_data:
+                self.wfile.write(json.dumps(response_data).encode("utf-8"))
+        except Exception as e:
+            logger.error(f"SparkRequestHandler error: {e}")
+            self.send_error(500)
 
 
 class SparkController:
@@ -33,11 +60,12 @@ class SparkController:
         self._server_thread: Optional[threading.Thread] = None
         self._poller_thread: Optional[threading.Thread] = None
         self._cleanup_thread: Optional[threading.Thread] = None
+        self._httpd: Optional[ThreadingHTTPServer] = None
 
     def start(self) -> None:
         self._stop_event.clear()
 
-        self._server_thread = threading.Thread(target=self._run_server, name="SparkSocketServer", daemon=True)
+        self._server_thread = threading.Thread(target=self._run_server, name="SparkHTTPServer", daemon=True)
         self._server_thread.start()
 
         if self._client:
@@ -51,47 +79,19 @@ class SparkController:
 
     def stop(self) -> None:
         self._stop_event.set()
+        if self._httpd:
+            self._httpd.shutdown()
         logger.info("SparkController stopping...")
 
     def _run_server(self) -> None:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                s.bind(("127.0.0.1", self._port))
-                s.listen(5)
-                s.settimeout(1.0)
-
-                while not self._stop_event.is_set():
-                    try:
-                        conn, _ = s.accept()
-                        threading.Thread(target=self._handle_client, args=(conn,), daemon=True).start()
-                    except socket.timeout:
-                        continue
-                    except Exception as e:
-                        if not self._stop_event.is_set():
-                            logger.error(f"Spark socket server error: {e}")
-            except Exception as e:
-                logger.error(f"Failed to bind/listen on Spark port {self._port}: {e}")
-
-    def _handle_client(self, conn: socket.socket) -> None:
-        with conn:
-            conn.settimeout(5.0)
-            buffer = ""
-            try:
-                while not self._stop_event.is_set():
-                    data = conn.recv(4096)
-                    if not data:
-                        break
-                    buffer += data.decode("utf-8")
-
-                    while "\n" in buffer:
-                        line, buffer = buffer.split("\n", 1)
-                        if line.strip():
-                            response = self._process_message(line)
-                            if response:
-                                conn.sendall((json.dumps(response) + "\n").encode("utf-8"))
-            except Exception:
-                pass
+        try:
+            self._httpd = ThreadingHTTPServer(("127.0.0.1", self._port), SparkRequestHandler)
+            # Inject controller reference so handler can access it
+            self._httpd.controller = self
+            self._httpd.serve_forever()
+        except Exception as e:
+            if not self._stop_event.is_set():
+                logger.error(f"Failed to start Spark HTTP server on port {self._port}: {e}")
 
     def _process_message(self, message: str) -> Optional[Dict]:
         try:
@@ -108,7 +108,7 @@ class SparkController:
             if msg_type == "thread_info":
                 threads_array = data.get("threads", [])
                 self._update_threads(pid, app_id, threads_array)
-                return None # No response needed for thread info?
+                return {} # Empty JSON response is fine
 
             # Heartbeat handling
             is_allowed = False
@@ -118,7 +118,7 @@ class SparkController:
             with self._registry_lock:
                 entry = self._registry.get(pid, {"app_id": app_id, "threads": {}})
                 entry["last_heartbeat"] = time.time()
-                entry["app_id"] = app_id # Update in case it changed? Unlikely
+                entry["app_id"] = app_id
                 self._registry[pid] = entry
 
             return {"profile": is_allowed}
