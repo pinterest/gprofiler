@@ -22,7 +22,7 @@ class SparkController:
     def __init__(self, port: int = 12345, client: Optional[ProfilerAPIClient] = None):
         self._port = port
         self._client = client
-        # Map PID -> {"app_id": str, "last_heartbeat": float}
+        # Map PID -> {"app_id": str, "last_heartbeat": float, "threads": {tid: name}}
         self._registry: Dict[int, Dict] = {}
         self._registry_lock = threading.Lock()
 
@@ -51,10 +51,6 @@ class SparkController:
 
     def stop(self) -> None:
         self._stop_event.set()
-        # Connect to self to unblock accept() if needed, or just let daemon threads die.
-        # Since we use setDaemon(True), we can just let them die when main process exits,
-        # but for clean shutdown we might want to close the socket.
-        # For now, rely on daemon threads.
         logger.info("SparkController stopping...")
 
     def _run_server(self) -> None:
@@ -63,7 +59,7 @@ class SparkController:
             try:
                 s.bind(("127.0.0.1", self._port))
                 s.listen(5)
-                s.settimeout(1.0)  # Check stop event every second
+                s.settimeout(1.0)
 
                 while not self._stop_event.is_set():
                     try:
@@ -83,7 +79,7 @@ class SparkController:
             buffer = ""
             try:
                 while not self._stop_event.is_set():
-                    data = conn.recv(1024)
+                    data = conn.recv(4096)
                     if not data:
                         break
                     buffer += data.decode("utf-8")
@@ -91,25 +87,64 @@ class SparkController:
                     while "\n" in buffer:
                         line, buffer = buffer.split("\n", 1)
                         if line.strip():
-                            self._process_message(line)
+                            response = self._process_message(line)
+                            if response:
+                                conn.sendall((json.dumps(response) + "\n").encode("utf-8"))
             except Exception:
                 pass
 
-    def _process_message(self, message: str) -> None:
+    def _process_message(self, message: str) -> Optional[Dict]:
         try:
             data = json.loads(message)
+            msg_type = data.get("type", "heartbeat")
             pid = data.get("pid")
             app_id = data.get("spark.app.id")
 
-            if pid and app_id:
-                with self._registry_lock:
-                    self._registry[int(pid)] = {
-                        "app_id": app_id,
-                        "last_heartbeat": time.time()
-                    }
-                    # logger.debug(f"Received Spark heartbeat: PID={pid}, AppID={app_id}")
+            if not (pid and app_id):
+                return None
+
+            pid = int(pid)
+
+            if msg_type == "thread_info":
+                threads_array = data.get("threads", [])
+                self._update_threads(pid, app_id, threads_array)
+                return None # No response needed for thread info?
+
+            # Heartbeat handling
+            is_allowed = False
+            with self._allowed_apps_lock:
+                is_allowed = app_id in self._allowed_apps
+
+            with self._registry_lock:
+                entry = self._registry.get(pid, {"app_id": app_id, "threads": {}})
+                entry["last_heartbeat"] = time.time()
+                entry["app_id"] = app_id # Update in case it changed? Unlikely
+                self._registry[pid] = entry
+
+            return {"profile": is_allowed}
+
         except Exception as e:
-            logger.warning(f"Failed to parse Spark heartbeat: {e}")
+            logger.warning(f"Failed to parse Spark message: {e}")
+            return None
+
+    def _update_threads(self, pid: int, app_id: str, threads_array: List[Dict]) -> None:
+        with self._registry_lock:
+            if pid not in self._registry:
+                # Should have received heartbeat first, but just in case
+                self._registry[pid] = {
+                    "app_id": app_id,
+                    "last_heartbeat": time.time(),
+                    "threads": {}
+                }
+
+            threads_map = self._registry[pid].get("threads", {})
+            for t in threads_array:
+                tid = t.get("tid")
+                name = t.get("name")
+                if tid is not None and name:
+                    threads_map[tid] = name
+
+            self._registry[pid]["threads"] = threads_map
 
     def _run_backend_poller(self) -> None:
         while not self._stop_event.is_set():
@@ -118,7 +153,6 @@ class SparkController:
                     allowed = self._client.get_spark_allowed_apps()
                     with self._allowed_apps_lock:
                         self._allowed_apps = set(allowed)
-                    # logger.debug(f"Updated allowed Spark apps: {self._allowed_apps}")
             except Exception as e:
                 logger.warning(f"Failed to fetch allowed Spark apps: {e}")
 
@@ -142,17 +176,10 @@ class SparkController:
             self._stop_event.wait(10)
 
     def filter_processes(self, processes: List[Process]) -> List[Process]:
-        """
-        Filter the list of processes.
-        If a process is identified as a Spark process (exists in registry),
-        it is ONLY kept if its App ID is in the allowed list.
-        Non-Spark processes are kept as is.
-        """
         allowed = set()
         with self._allowed_apps_lock:
             allowed = self._allowed_apps.copy()
 
-        # We need a snapshot of registry to avoid holding lock too long
         with self._registry_lock:
             registry_snapshot = self._registry.copy()
 
@@ -164,12 +191,9 @@ class SparkController:
                     app_id = registry_snapshot[pid]["app_id"]
                     if app_id in allowed:
                         kept_processes.append(p)
-                    # else: identified as Spark but not allowed -> drop
                 else:
-                    # Not a known Spark process -> keep it (gProfiler default behavior)
                     kept_processes.append(p)
             except Exception:
-                # If checking PID fails, safe to ignore
                 pass
 
         return kept_processes

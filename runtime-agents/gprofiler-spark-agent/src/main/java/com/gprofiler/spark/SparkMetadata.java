@@ -1,32 +1,32 @@
 package com.gprofiler.spark;
 
 import java.lang.management.ManagementFactory;
-import org.json.JSONObject;
+import com.google.gson.JsonObject;
 
 public class SparkMetadata {
 
-    public static JSONObject getMetadata() {
-        JSONObject json = new JSONObject();
+    public static JsonObject getMetadata() {
+        JsonObject json = new JsonObject();
 
         // Extract Spark properties
         String appId = System.getProperty("spark.app.id");
         String appName = System.getProperty("spark.app.name");
 
         if (appId != null) {
-            json.put("spark.app.id", appId);
+            json.addProperty("spark.app.id", appId);
         }
         if (appName != null) {
-            json.put("spark.app.name", appName);
+            json.addProperty("spark.app.name", appName);
         }
 
         // Extract PID (Java 8 compatible)
         String pid = getPid();
         if (pid != null) {
             try {
-                json.put("pid", Long.parseLong(pid));
+                json.addProperty("pid", Long.parseLong(pid));
             } catch (NumberFormatException e) {
                 // Should not happen if getPid works as expected
-                json.put("pid_raw", pid);
+                json.addProperty("pid_raw", pid);
             }
         }
 

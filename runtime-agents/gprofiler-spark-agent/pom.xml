@@ -17,9 +17,19 @@
 
   <dependencies>
     <dependency>
-      <groupId>org.json</groupId>
-      <artifactId>json</artifactId>
-      <version>20231013</version>
+      <groupId>com.google.code.gson</groupId>
+      <artifactId>gson</artifactId>
+      <version>2.10.1</version>
+    </dependency>
+    <dependency>
+      <groupId>org.ow2.asm</groupId>
+      <artifactId>asm</artifactId>
+      <version>9.6</version>
+    </dependency>
+    <dependency>
+      <groupId>org.ow2.asm</groupId>
+      <artifactId>asm-commons</artifactId>
+      <version>9.6</version>
     </dependency>
   </dependencies>
 
@@ -41,9 +51,20 @@
                   <manifestEntries>
                     <Premain-Class>com.gprofiler.spark.Agent</Premain-Class>
                     <Can-Retransform-Classes>true</Can-Retransform-Classes>
+                    <Boot-Class-Path>gprofiler-spark-agent-1.0-SNAPSHOT.jar</Boot-Class-Path>
                   </manifestEntries>
                 </transformer>
               </transformers>
+              <relocations>
+                <relocation>
+                   <pattern>com.google.gson</pattern>
+                   <shadedPattern>com.gprofiler.spark.shaded.com.google.gson</shadedPattern>
+                </relocation>
+                <relocation>
+                   <pattern>org.objectweb.asm</pattern>
+                   <shadedPattern>com.gprofiler.spark.shaded.org.objectweb.asm</shadedPattern>
+                </relocation>
+              </relocations>
             </configuration>
           </execution>
         </executions>
