@@ -274,7 +274,7 @@ class GProfiler:
                         suppress_log=True,
                         stdin=collapsed_data.encode(),
                         stop_event=self._profiler_state.stop_event,
-                        timeout=10,
+                        timeout=300,
                     ).stdout,
                 )
                 .replace(b"{{{START_TIME}}}", start_ts.encode())
