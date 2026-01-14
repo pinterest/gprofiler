@@ -19,8 +19,10 @@ import logging
 import os
 import socket
 import threading
+from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Any, Optional, List, TYPE_CHECKING
+from typing import Dict, Any, Optional, List, TYPE_CHECKING, Deque
 
 import configargparse
 import requests
@@ -53,6 +55,20 @@ from gprofiler.hw_metrics import HWMetricsMonitor, HWMetricsMonitorBase, NoopHWM
 from gprofiler.exceptions import NoProfilersEnabledError
 
 logger = logging.getLogger(__name__)
+
+# Command queue size limits
+ADHOC_QUEUE_MAX_SIZE = 10  # Maximum ad-hoc commands to queue
+CONTINUOUS_QUEUE_MAX_SIZE = 1  # Maximum continuous commands to queue
+
+
+@dataclass
+class ProfilingCommand:
+    """Represents a profiling command with metadata"""
+    command_id: str
+    command_type: str  # 'start' or 'stop'
+    profiling_command: Dict[str, Any]
+    is_continuous: bool
+    timestamp: datetime.datetime
 
 
 class HeartbeatClient:
@@ -224,6 +240,101 @@ class DynamicGProfilerManager:
         self.current_thread: Optional[threading.Thread] = None
         self.stop_event = threading.Event()
         self.heartbeat_interval = 30  # seconds
+        
+        # Command queues
+        self.adhoc_queue: Deque[ProfilingCommand] = deque()  # For single-run commands (continuous=False)
+        self.continuous_queue: Deque[ProfilingCommand] = deque()  # For continuous commands (continuous=True)
+        self.queue_lock = threading.Lock()  # Thread-safe queue operations
+        
+        # Current command tracking
+        self.current_command: Optional[ProfilingCommand] = None
+        self.current_command_start_time: Optional[datetime.datetime] = None
+    
+    def enqueue_command(self, command_response: Dict[str, Any]):
+        """Enqueue a profiling command to the appropriate queue"""
+        profiling_command = command_response["profiling_command"]
+        command_id = command_response["command_id"]
+        command_type = profiling_command.get("command_type", "start")
+        
+        # Extract continuous flag from combined_config
+        combined_config = profiling_command.get("combined_config", {})
+        is_continuous = combined_config.get("continuous", False)
+        
+        # Create ProfilingCommand object
+        cmd = ProfilingCommand(
+            command_id=command_id,
+            command_type=command_type,
+            profiling_command=profiling_command,
+            is_continuous=is_continuous,
+            timestamp=datetime.datetime.now()
+        )
+        
+        # Add to appropriate queue
+        with self.queue_lock:
+            if command_type == "stop":
+                # Stop commands are handled immediately, not queued
+                logger.info(f"RECEIVED STOP COMMAND for command ID: {command_id}")
+                return cmd
+            elif is_continuous:
+                # Check if continuous queue is full
+                if len(self.continuous_queue) >= CONTINUOUS_QUEUE_MAX_SIZE:
+                    dropped_cmd = self.continuous_queue.popleft()
+                    logger.warning(f"Continuous queue full (max: {CONTINUOUS_QUEUE_MAX_SIZE}), dropping oldest command {dropped_cmd.command_id}")
+                
+                self.continuous_queue.append(cmd)
+                logger.info(f"Enqueued continuous command {command_id} (queue size: {len(self.continuous_queue)})")
+            else:
+                # Check if ad-hoc queue is full
+                if len(self.adhoc_queue) >= ADHOC_QUEUE_MAX_SIZE:
+                    dropped_cmd = self.adhoc_queue.popleft()
+                    logger.warning(f"Ad-hoc queue full (max: {ADHOC_QUEUE_MAX_SIZE}), dropping oldest command {dropped_cmd.command_id}")
+                
+                self.adhoc_queue.append(cmd)
+                logger.info(f"Enqueued ad-hoc command {command_id} (queue size: {len(self.adhoc_queue)})")
+        
+        return cmd
+    
+    def get_next_command(self) -> Optional[ProfilingCommand]:
+        """Fetch the next command to execute based on priority logic.
+        
+        Priority strategy:
+        1. Ad-hoc commands have higher priority than continuous commands
+        2. Within each queue, FIFO order is maintained
+        3. If no ad-hoc commands exist, fetch from continuous queue
+        
+        Returns:
+            ProfilingCommand if available, None otherwise
+        """
+        with self.queue_lock:
+            # Priority 1: Ad-hoc commands (single-run, immediate execution)
+            if self.adhoc_queue:
+                cmd = self.adhoc_queue.popleft()
+                logger.info(f"Fetched ad-hoc command {cmd.command_id} from queue (remaining: {len(self.adhoc_queue)})")
+                return cmd
+            
+            # Priority 2: Continuous commands (long-running)
+            if self.continuous_queue:
+                cmd = self.continuous_queue.popleft()
+                logger.info(f"Fetched continuous command {cmd.command_id} from queue (remaining: {len(self.continuous_queue)})")
+                return cmd
+            
+            logger.debug("No commands in queues")
+            return None
+    
+    def has_queued_commands(self) -> bool:
+        """Check if there are any commands in the queues"""
+        with self.queue_lock:
+            return len(self.adhoc_queue) > 0 or len(self.continuous_queue) > 0
+    
+    def clear_queues(self):
+        """Clear all queued commands (used during shutdown)"""
+        with self.queue_lock:
+            adhoc_count = len(self.adhoc_queue)
+            continuous_count = len(self.continuous_queue)
+            self.adhoc_queue.clear()
+            self.continuous_queue.clear()
+            if adhoc_count > 0 or continuous_count > 0:
+                logger.info(f"Cleared {adhoc_count} ad-hoc and {continuous_count} continuous commands from queues")
     
     def start_heartbeat_loop(self):
         """Start the main heartbeat loop"""
@@ -235,33 +346,30 @@ class DynamicGProfilerManager:
                 command_response = self.heartbeat_client.send_heartbeat()
                 
                 if command_response and command_response.get("profiling_command"):
-                    profiling_command = command_response["profiling_command"]
                     command_id = command_response["command_id"]
-                    command_type = profiling_command.get("command_type", "start")
+                    profiling_command = command_response["profiling_command"]
                     
                     logger.info(f"Received profiling command: {profiling_command}")
                     
                     # Check for idempotency - skip if command already executed
                     if command_id in self.heartbeat_client.executed_command_ids:
                         logger.info(f"Command ID {command_id} already executed, skipping...")
-
-                        # Wait for next heartbeat
                         self.stop_event.wait(self.heartbeat_interval)
-
                         continue
-                    
-                    logger.info(f"Received {command_type} command: {command_id}")
                     
                     # Mark command as executed for idempotency
                     self.heartbeat_client.mark_command_executed(command_id)
                     self.heartbeat_client.last_command_id = command_id
                     
-                    if command_type == "stop":
-                        # Stop current profiler without starting a new one
-                        logger.info(f"RECEIVED STOP COMMAND for command ID: {command_id}")
+                    # Enqueue command or handle stop immediately
+                    cmd = self.enqueue_command(command_response)
+                    
+                    # Stop commands are handled immediately
+                    if cmd.command_type == "stop":
                         logger.info(f"STOP command details: {profiling_command}")
                         self._stop_current_profiler()
-                        # TODO: important comment to make sure profiler has stopped successful to avoid leak 
+                        # Clear all queues on stop command
+                        self.clear_queues()
                         # Report completion for stop command
                         self.heartbeat_client.send_command_completion(
                             command_id=command_id,
@@ -270,35 +378,33 @@ class DynamicGProfilerManager:
                             error_message=None,
                             results_path=None
                         )
-                    elif command_type == "start":
-                        # Stop current profiler if running, then start new one
-                        logger.info("Starting new profiler due to start command")
-                        # TODO: important comment to make sure profiler has stopped successful to avoid leak 
-                        self._stop_current_profiler()
-                        self._start_new_profiler(profiling_command, command_id)
-                        # Note: command completion still needs since it will wait for successful profiling 
-                        # Report command completion to the server
-                        try:
-                            self.heartbeat_client.send_command_completion(
-                                command_id=command_id,
-                                status="completed",
-                                execution_time=0,
-                                error_message=None,
-                                results_path=None
-                            )
-                        except Exception as e:
-                            logger.error(f"Failed to report command completion for {command_id}: {e}")
-                    else:
-                        logger.warning(f"Unknown command type: {command_type}")
-                        # Report completion for unknown command type
-                        self.heartbeat_client.send_command_completion(
-                            command_id=command_id,
-                            status="failed",
-                            execution_time=0,
-                            error_message=f"Unknown command type: {command_type}",
-                            results_path=None
-                        )
                 
+                # Process queued commands if no profiler is running OR if current profiler is continuous
+                if self.has_queued_commands():
+                    should_process_next = False
+                    
+                    if self.current_gprofiler is None:
+                        # No profiler running, process next command
+                        should_process_next = True
+                    elif self.current_command and self.current_command.is_continuous:
+                        # Current profiler is continuous, can be interrupted for next command
+                        should_process_next = True
+                        logger.info(f"Current continuous profiler will be stopped for next queued command")
+                        
+                        # Re-enqueue current continuous command if continuous queue is empty
+                        with self.queue_lock:
+                            if len(self.continuous_queue) == 0:
+                                self.continuous_queue.append(self.current_command)
+                                logger.info(f"Re-enqueued current continuous command {self.current_command.command_id} (continuous queue was empty)")
+                        
+                        # Stop current profiler
+                        self._stop_current_profiler()
+                    
+                    if should_process_next:
+                        next_cmd = self.get_next_command()
+                        if next_cmd and next_cmd.command_type == "start":
+                            logger.info(f"Starting profiler for queued command {next_cmd.command_id}")
+                            self._start_new_profiler(next_cmd.profiling_command, next_cmd.command_id)
                 
                 # Wait for next heartbeat
                 self.stop_event.wait(self.heartbeat_interval)
@@ -348,6 +454,18 @@ class DynamicGProfilerManager:
             # Create new GProfiler instance
             self.current_gprofiler = self._create_gprofiler_instance(new_args)
             
+            # Track current command
+            combined_config = profiling_command.get("combined_config", {})
+            is_continuous = combined_config.get("continuous", False)
+            self.current_command = ProfilingCommand(
+                command_id=command_id,
+                command_type="start",
+                profiling_command=profiling_command,
+                is_continuous=is_continuous,
+                timestamp=datetime.datetime.now()
+            )
+            self.current_command_start_time = datetime.datetime.now()
+            
             # Start profiler in a separate thread
             self.current_thread = threading.Thread(
                 target=self._run_profiler,
@@ -361,7 +479,7 @@ class DynamicGProfilerManager:
             )
             self.current_thread.start()
             
-            logger.info(f"Started new gProfiler instance with command ID: {command_id}")
+            logger.info(f"Started new gProfiler instance with command ID: {command_id} (continuous={is_continuous})")
             
         except Exception as e:
             logger.error(f"Failed to start new profiler: {e}", exc_info=True)
@@ -373,6 +491,9 @@ class DynamicGProfilerManager:
                 error_message=str(e),
                 results_path=None
             )
+            # Clear current command tracking on failure
+            self.current_command = None
+            self.current_command_start_time = None
     
     def _create_profiler_args(self, profiling_command: Dict[str, Any]) -> configargparse.Namespace:
         """Create modified args based on profiling command"""
@@ -648,12 +769,21 @@ class DynamicGProfilerManager:
             end_time = datetime.datetime.now()
             execution_time = int((end_time - start_time).total_seconds())
             
-            # Clear the current profiler reference
+            # Clear the current profiler reference and command tracking
             if self.current_gprofiler == gprofiler:
                 self.current_gprofiler = None
+                self.current_command = None
+                self.current_command_start_time = None
+                
+                # After profiler completes, check if there are more commands in queue
+                if self.has_queued_commands() and not self.stop_event.is_set():
+                    logger.info("Profiler completed, checking for next queued command...")
+                    # The heartbeat loop will pick up the next command
     
     def stop(self):
         """Stop the heartbeat manager"""
         logger.info("Stopping heartbeat manager...")
         self.stop_event.set()
         self._stop_current_profiler()
+        self.clear_queues()
+        logger.info("Heartbeat manager stopped")
