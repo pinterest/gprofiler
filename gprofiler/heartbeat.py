@@ -352,32 +352,30 @@ class DynamicGProfilerManager:
                     logger.info(f"Received profiling command: {profiling_command}")
                     
                     # Check for idempotency - skip if command already executed
-                    if command_id in self.heartbeat_client.executed_command_ids:
+                    if command_id not in self.heartbeat_client.executed_command_ids:
+                        # Mark command as executed for idempotency
+                        self.heartbeat_client.mark_command_executed(command_id)
+                        self.heartbeat_client.last_command_id = command_id
+                        
+                        # Enqueue command or handle stop immediately
+                        cmd = self.enqueue_command(command_response)
+                        
+                        # Stop commands are handled immediately
+                        if cmd.command_type == "stop":
+                            logger.info(f"STOP command details: {profiling_command}")
+                            self._stop_current_profiler()
+                            # Clear all queues on stop command
+                            self.clear_queues()
+                            # Report completion for stop command
+                            self.heartbeat_client.send_command_completion(
+                                command_id=command_id,
+                                status="completed",
+                                execution_time=0,
+                                error_message=None,
+                                results_path=None
+                            )
+                    else:
                         logger.info(f"Command ID {command_id} already executed, skipping...")
-                        self.stop_event.wait(self.heartbeat_interval)
-                        continue
-                    
-                    # Mark command as executed for idempotency
-                    self.heartbeat_client.mark_command_executed(command_id)
-                    self.heartbeat_client.last_command_id = command_id
-                    
-                    # Enqueue command or handle stop immediately
-                    cmd = self.enqueue_command(command_response)
-                    
-                    # Stop commands are handled immediately
-                    if cmd.command_type == "stop":
-                        logger.info(f"STOP command details: {profiling_command}")
-                        self._stop_current_profiler()
-                        # Clear all queues on stop command
-                        self.clear_queues()
-                        # Report completion for stop command
-                        self.heartbeat_client.send_command_completion(
-                            command_id=command_id,
-                            status="completed",
-                            execution_time=0,
-                            error_message=None,
-                            results_path=None
-                        )
                 
                 # Process queued commands if no profiler is running OR if current profiler is continuous
                 if self.has_queued_commands():
@@ -402,9 +400,31 @@ class DynamicGProfilerManager:
                     
                     if should_process_next:
                         next_cmd = self.get_next_command()
-                        if next_cmd and next_cmd.command_type == "start":
-                            logger.info(f"Starting profiler for queued command {next_cmd.command_id}")
-                            self._start_new_profiler(next_cmd.profiling_command, next_cmd.command_id)
+                        if next_cmd:
+                            if next_cmd.command_type == "start":
+                                logger.info(f"Starting profiler for queued command {next_cmd.command_id}")
+                                self._start_new_profiler(next_cmd.profiling_command, next_cmd.command_id)
+                                # Report command completion to the server
+                                try:
+                                    self.heartbeat_client.send_command_completion(
+                                        command_id=next_cmd.command_id,
+                                        status="completed",
+                                        execution_time=0,
+                                        error_message=None,
+                                        results_path=None
+                                    )
+                                except Exception as e:
+                                    logger.error(f"Failed to report command completion for {next_cmd.command_id}: {e}")
+                            else:
+                                logger.warning(f"Unknown command type: {next_cmd.command_type}")
+                                # Report completion for unknown command type
+                                self.heartbeat_client.send_command_completion(
+                                    command_id=next_cmd.command_id,
+                                    status="failed",
+                                    execution_time=0,
+                                    error_message=f"Unknown command type: {next_cmd.command_type}",
+                                    results_path=None
+                                )
                 
                 # Wait for next heartbeat
                 self.stop_event.wait(self.heartbeat_interval)
