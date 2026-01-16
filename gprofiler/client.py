@@ -190,6 +190,10 @@ class ProfilerAPIClient(BaseAPIClient):
     def get_health(self) -> Dict:
         return self.get("health_check")
 
+    def get_spark_allowed_apps(self) -> List[str]:
+        # Return a list of allowed spark app IDs
+        return cast(List[str], self.get("spark/allowed_apps"))
+
     def submit_profile(
         self,
         start_time: datetime.datetime,
