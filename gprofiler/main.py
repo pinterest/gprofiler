@@ -502,15 +502,28 @@ class GProfiler:
         flamegraph_html = None
         if self._flamegraph:
             # Create a temporary merged result to generate flamegraph from
-            temp_merged = concatenate_profiles(
-                process_profiles=process_profiles if NoopProfiler.is_noop_profiler(self.system_profiler) else system_result,
-                container_names_client=self._profiler_state.container_names_client,
-                enrichment_options=self._enrichment_options,
-                metadata=metadata,
-                metrics=metrics,
-                hwmetrics=hwmetrics,
-                external_app_metadata=external_app_metadata,
-            )
+            # Use the same logic as merged_result to ensure consistency
+            if NoopProfiler.is_noop_profiler(self.system_profiler):
+                temp_merged = concatenate_profiles(
+                    process_profiles=process_profiles,
+                    container_names_client=self._profiler_state.container_names_client,
+                    enrichment_options=self._enrichment_options,
+                    metadata=metadata,
+                    metrics=metrics,
+                    hwmetrics=hwmetrics,
+                    external_app_metadata=external_app_metadata,
+                )
+            else:
+                temp_merged = merge_profiles(
+                    perf_pid_to_profiles=system_result,
+                    process_profiles=process_profiles,
+                    container_names_client=self._profiler_state.container_names_client,
+                    enrichment_options=self._enrichment_options,
+                    metadata=metadata,
+                    metrics=metrics,
+                    hwmetrics=hwmetrics,
+                    external_app_metadata=external_app_metadata,
+                )
             
             # Strip metadata to get just the stacks
             stripped_collapsed_data = self._strip_extra_data(temp_merged)
