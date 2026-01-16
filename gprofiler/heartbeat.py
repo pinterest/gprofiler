@@ -296,7 +296,7 @@ class DynamicGProfilerManager:
                     else:
                         logger.info(f"Command ID {command_id} already received and processed, skipping...")
                 
-                # Process queued commands if no profiler is running OR if current profiler is continuous
+                # Process queued commands if no profiler is running OR if current profiler can be interrupted
                 if self.command_manager.has_queued_commands() and self._ready_for_next_command():
                     next_cmd = self.command_manager.get_next_command()
                     if next_cmd:
