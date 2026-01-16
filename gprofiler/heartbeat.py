@@ -67,7 +67,8 @@ class HeartbeatClient:
         self.hostname = get_hostname()
         self.ip_address = self._get_local_ip()
         self.last_command_id: Optional[str] = None
-        self.executed_command_ids: set = set()  # Track executed command IDs for idempotency (in-memory)
+        self.received_command_ids: set = set()  # Track received command IDs for idempotency (prevent duplicate processing)
+        self.executed_command_ids: set = set()  # Track executed command IDs (commands that were actually processed)
         self.max_command_history = 1000  # Limit command history to prevent memory growth
         self.session = requests.Session()
         
@@ -186,15 +187,23 @@ class HeartbeatClient:
             logger.error(f"Failed to send command completion for {command_id}: {e}")
             return False
 
-    
+    def mark_command_received(self, command_id: str):
+        """Mark a command as received for idempotency (prevents duplicate processing of the same command)"""
+        self.received_command_ids.add(command_id)
+        
+        # Cleanup old command IDs if we exceed the limit
+        if len(self.received_command_ids) > self.max_command_history:
+            self._cleanup_old_command_ids()
+        
+        logger.debug(f"Marked command ID {command_id} as received")
     
     def mark_command_executed(self, command_id: str):
-        """Mark a command as executed (in-memory)"""
+        """Mark a command as executed (command was actually processed/acted upon)"""
         self.executed_command_ids.add(command_id)
         
         # Cleanup old command IDs if we exceed the limit
         if len(self.executed_command_ids) > self.max_command_history:
-            self._cleanup_old_command_ids()
+            self._cleanup_old_executed_command_ids()
         
         logger.debug(f"Marked command ID {command_id} as executed")
     
@@ -203,16 +212,27 @@ class HeartbeatClient:
         try:
             # Keep only the most recent commands (this is a simple approach)
             # In production, you might want to implement time-based cleanup
-            if len(self.executed_command_ids) > self.max_command_history:
+            if len(self.received_command_ids) > self.max_command_history:
                 # Convert to list, sort, and keep the last max_command_history items
-                command_list = list(self.executed_command_ids)
+                command_list = list(self.received_command_ids)
                 # Since UUIDs don't sort chronologically, we'll just remove some arbitrary ones
                 # In a real implementation, you'd want to track timestamps
                 commands_to_keep = command_list[-self.max_command_history:]
-                self.executed_command_ids = set(commands_to_keep)
-                logger.info(f"Cleaned up command ID history in memory, keeping {len(self.executed_command_ids)} entries")
+                self.received_command_ids = set(commands_to_keep)
+                logger.info(f"Cleaned up command ID history in memory, keeping {len(self.received_command_ids)} entries")
         except Exception as e:
             logger.warning(f"Failed to cleanup old command IDs: {e}")
+    
+    def _cleanup_old_executed_command_ids(self):
+        """Remove old executed command IDs to prevent memory growth"""
+        try:
+            if len(self.executed_command_ids) > self.max_command_history:
+                command_list = list(self.executed_command_ids)
+                commands_to_keep = command_list[-self.max_command_history:]
+                self.executed_command_ids = set(commands_to_keep)
+                logger.info(f"Cleaned up executed command ID history in memory, keeping {len(self.executed_command_ids)} entries")
+        except Exception as e:
+            logger.warning(f"Failed to cleanup old executed command IDs: {e}")
 
 
 class DynamicGProfilerManager:
@@ -248,10 +268,10 @@ class DynamicGProfilerManager:
                     
                     logger.info(f"Received profiling command: {profiling_command}")
                     
-                    # Check for idempotency - skip if command already executed
-                    if command_id not in self.heartbeat_client.executed_command_ids:
-                        # Mark command as executed for idempotency
-                        self.heartbeat_client.mark_command_executed(command_id)
+                    # Check for idempotency - skip if command already received (prevents duplicate processing)
+                    if command_id not in self.heartbeat_client.received_command_ids:
+                        # Mark command as received for idempotency
+                        self.heartbeat_client.mark_command_received(command_id)
                         self.heartbeat_client.last_command_id = command_id
                         
                         # Enqueue command or handle stop immediately
@@ -263,6 +283,8 @@ class DynamicGProfilerManager:
                             self._stop_current_profiler()
                             # Clear all queues on stop command
                             self.command_manager.clear_queues()
+                            # Mark as executed
+                            self.heartbeat_client.mark_command_executed(command_id)
                             # Report completion for stop command
                             self.heartbeat_client.send_command_completion(
                                 command_id=command_id,
@@ -272,7 +294,7 @@ class DynamicGProfilerManager:
                                 results_path=None
                             )
                     else:
-                        logger.info(f"Command ID {command_id} already executed, skipping...")
+                        logger.info(f"Command ID {command_id} already received and processed, skipping...")
                 
                 # Process queued commands if no profiler is running OR if current profiler is continuous
                 if self.command_manager.has_queued_commands() and self._ready_for_next_command():
@@ -288,6 +310,8 @@ class DynamicGProfilerManager:
 
                             logger.info("Starting profiler for queued command %s", next_cmd.command_id)
                             self._start_new_profiler(next_cmd.profiling_command, next_cmd.command_id)
+                            # Mark as executed
+                            self.heartbeat_client.mark_command_executed(next_cmd.command_id)
                             # Report command completion to the server
                             try:
                                 self.heartbeat_client.send_command_completion(
@@ -301,6 +325,8 @@ class DynamicGProfilerManager:
                                 logger.error(f"Failed to report command completion for {next_cmd.command_id}: {e}")
                         else:
                             logger.warning(f"Unknown command type: {next_cmd.command_type}")
+                            # Mark as executed (even though it failed)
+                            self.heartbeat_client.mark_command_executed(next_cmd.command_id)
                             # Report completion for unknown command type
                             self.heartbeat_client.send_command_completion(
                                 command_id=next_cmd.command_id,
