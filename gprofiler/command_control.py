@@ -136,18 +136,14 @@ class CommandManager:
         with self.queue_lock:
             # Check stop queue first (highest priority)
             if self.stop_queue and self.stop_queue[0].command_id == command_id:
-                if self.stop_queue[0].is_paused:
-                    logger.info(f"Cannot dequeue stop command {command_id} because it is paused")
-                    return False
+                # No need to check for pause on stop commands
                 cmd = self.stop_queue.popleft()
                 logger.info(f"Dequeued stop command {command_id} from queue (remaining: {len(self.stop_queue)})")
                 return True
 
             # Check ad-hoc queue
             if self.adhoc_queue and self.adhoc_queue[0].command_id == command_id:
-                if self.adhoc_queue[0].is_paused:
-                    logger.info(f"Cannot dequeue ad-hoc command {command_id} because it is paused")
-                    return False
+                # No need to check for pause on ad-hoc commands
                 cmd = self.adhoc_queue.popleft()
                 logger.info(f"Dequeued ad-hoc command {command_id} from queue (remaining: {len(self.adhoc_queue)})")
                 return True
@@ -179,15 +175,13 @@ class CommandManager:
         with self.queue_lock:
             # Check stop queue first (highest priority)
             if self.stop_queue and self.stop_queue[0].command_id == command_id:
-                self.stop_queue[0].is_paused = True
-                logger.info(f"Paused stop command {command_id}")
-                return True
+                logger.warning(f"Stop commands cannot be paused. Command {command_id} remains active.")
+                return False
 
             # Check ad-hoc queue
             if self.adhoc_queue and self.adhoc_queue[0].command_id == command_id:
-                self.adhoc_queue[0].is_paused = True
-                logger.info(f"Paused ad-hoc command {command_id}")
-                return True
+                logger.warning(f"Ad-hoc commands cannot be paused. Command {command_id} remains active.")
+                return False
 
             # Check continuous queue
             if self.continuous_queue and self.continuous_queue[0].command_id == command_id:
