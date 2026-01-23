@@ -460,10 +460,6 @@ class DynamicGProfilerManager:
         # Set continuous mode
         new_args.continuous = combined_config.get("continuous", False)
         
-        # Set output directory to temporary storage path
-        # This ensures consistent output location for dynamically started profilers
-        new_args.output_dir = TEMPORARY_STORAGE_PATH
-        
         # Set flamegraph generation based on continuous mode
         # In continuous mode, disable flamegraph generation to reduce overhead
         # In single-run mode, enable flamegraph for better visualization
@@ -644,7 +640,7 @@ class DynamicGProfilerManager:
             perfspect_path = Path(args.tool_perfspect_path)
         
         return GProfiler(
-            output_dir=args.output_dir,
+            output_dir=getattr(args, 'output_dir', None),
             flamegraph=args.flamegraph,
             rotating_output=getattr(args, 'rotating_output', False),
             rootless=getattr(args, 'rootless', False),
