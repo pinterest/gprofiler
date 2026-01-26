@@ -98,7 +98,9 @@ class HeartbeatClient:
                 "service_name": self.service_name,
                 "last_command_id": self.last_command_id,
                 "status": "active",
-                "timestamp": datetime.datetime.now().isoformat()
+                "timestamp": datetime.datetime.now().isoformat(),
+                "received_command_ids": list(self.received_command_ids),
+                "executed_command_ids": list(self.executed_command_ids)
             }
             
             url = f"{self.api_server}/api/metrics/heartbeat"
