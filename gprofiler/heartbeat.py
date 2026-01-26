@@ -493,17 +493,64 @@ class DynamicGProfilerManager:
             
             # Handle Perf Profiler configuration
             perf_config = profiler_configs.get("perf", "enabled_restricted")
-            if perf_config == "enabled_restricted":
-                new_args.max_system_processes_for_system_profilers = 600
-                new_args.perf_max_docker_containers = 2
-                logger.info("Perf profiler: enabled restricted mode")
-            elif perf_config == "enabled_aggressive":
-                new_args.max_system_processes_for_system_profilers = 1500
-                new_args.perf_max_docker_containers = 50
-                logger.info("Perf profiler: enabled aggressive mode")
-            elif perf_config == "disabled":
-                new_args.perf_mode = "disabled"
-                logger.info("Perf profiler: disabled")
+            
+            # Handle both nested object and legacy string formats
+            if isinstance(perf_config, dict):
+                # New nested object format: {"mode": "enabled_restricted", "events": ["cycles", "cache-misses"]}
+                perf_mode = perf_config.get("mode", "enabled_restricted")
+                perf_events = perf_config.get("events", ["cycles"])
+                
+                # Ensure events is a list
+                if isinstance(perf_events, str):
+                    perf_events = [perf_events]
+                elif not isinstance(perf_events, list):
+                    perf_events = ["cycles"]
+                
+                # Validate and filter events
+                # Note: Some events like stalled-cycles-backend may not be supported on all CPUs
+                # Support both "cycles" and "cpu-cycles" (they are the same event)
+                valid_events = ["cycles", "cpu-cycles", "instructions", "cache-misses", "cache-references", 
+                               "branch-misses", "branch-instructions", "stalled-cycles-frontend", 
+                               "stalled-cycles-backend"]  # backend may not be supported on all CPUs
+                perf_events = [e for e in perf_events if e in valid_events]
+                
+                # Normalize cpu-cycles to cycles (perf accepts both, but we standardize on "cycles")
+                perf_events = ["cycles" if e == "cpu-cycles" else e for e in perf_events]
+                
+                # Default to cycles if no valid events
+                if not perf_events:
+                    perf_events = ["cycles"]
+                
+                if perf_mode == "enabled_restricted":
+                    new_args.max_system_processes_for_system_profilers = 600
+                    new_args.perf_max_docker_containers = 2
+                    logger.info(f"Perf profiler: enabled restricted mode with events={perf_events}")
+                elif perf_mode == "enabled_aggressive":
+                    new_args.max_system_processes_for_system_profilers = 1500
+                    new_args.perf_max_docker_containers = 50
+                    logger.info(f"Perf profiler: enabled aggressive mode with events={perf_events}")
+                elif perf_mode == "disabled":
+                    new_args.perf_mode = "disabled"
+                    logger.info("Perf profiler: disabled")
+                
+                # Set the perf events (store as comma-separated string for CLI compatibility)
+                new_args.perf_events = ",".join(perf_events)
+            else:
+                # Legacy string format for backward compatibility
+                if perf_config == "enabled_restricted":
+                    new_args.max_system_processes_for_system_profilers = 600
+                    new_args.perf_max_docker_containers = 2
+                    logger.info("Perf profiler: enabled restricted mode (legacy format)")
+                elif perf_config == "enabled_aggressive":
+                    new_args.max_system_processes_for_system_profilers = 1500
+                    new_args.perf_max_docker_containers = 50
+                    logger.info("Perf profiler: enabled aggressive mode (legacy format)")
+                elif perf_config == "disabled":
+                    new_args.perf_mode = "disabled"
+                    logger.info("Perf profiler: disabled (legacy format)")
+                
+                # Default events for legacy format
+                new_args.perf_events = "cycles"
             
             # Handle Pyperf configuration
             pyperf_config = profiler_configs.get("pyperf", "enabled")

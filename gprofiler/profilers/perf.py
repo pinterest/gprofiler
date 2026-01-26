@@ -149,6 +149,16 @@ def add_highest_avg_depth_stacks_per_process(
             default=0,
             dest="perf_max_docker_containers",
         ),
+        ProfilerArgument(
+            "--perf-events",
+            help="PMU events to profile (comma-separated). Options: cycles (default time-based), instructions, "
+            "cache-misses, cache-references, branch-misses, branch-instructions, stalled-cycles-frontend, "
+            "stalled-cycles-backend. Multiple events will generate separate flamegraphs. "
+            "Example: --perf-events cycles,cache-misses,branch-misses. Default: %(default)s",
+            type=str,
+            default="cycles",
+            dest="perf_events",
+        ),
     ],
     disablement_help="Disable the global perf of processes,"
     " and instead only concatenate runtime-specific profilers results",
@@ -195,6 +205,7 @@ class SystemProfiler(ProfilerBase):
         perf_use_cgroups: bool = False,
         perf_max_cgroups: int = 50,
         perf_max_docker_containers: int = 0,
+        perf_events: str = "cycles",
         min_duration: int = 10,
     ):
         super().__init__(frequency, duration, profiler_state, min_duration)
@@ -212,6 +223,23 @@ class SystemProfiler(ProfilerBase):
         self._perf_use_cgroups = perf_use_cgroups
         self._perf_max_cgroups = perf_max_cgroups
         self._perf_max_docker_containers = perf_max_docker_containers
+        
+        # Parse comma-separated events into a list
+        if isinstance(perf_events, str):
+            self._perf_events = [e.strip() for e in perf_events.split(",") if e.strip()]
+        else:
+            self._perf_events = perf_events if isinstance(perf_events, list) else ["cycles"]
+        
+        # Validate events
+        # Note: Some events like stalled-cycles-backend may not be supported on all CPUs
+        valid_events = ["cycles", "instructions", "cache-misses", "cache-references",
+                       "branch-misses", "branch-instructions", "stalled-cycles-frontend",
+                       "stalled-cycles-backend"]  # backend may not be supported on all CPUs
+        self._perf_events = [e for e in self._perf_events if e in valid_events]
+        
+        # Default to cycles if no valid events
+        if not self._perf_events:
+            self._perf_events = ["cycles"]
         # allow gprofiler to be delayed up to 3 intervals before timing out.
         # For low-frequency profiling, use shorter switch intervals to reduce memory buildup
         # But maintain reasonable safety margin to avoid premature rotations
@@ -282,6 +310,7 @@ class SystemProfiler(ProfilerBase):
                 use_cgroups=self._perf_use_cgroups,
                 max_cgroups=self._perf_max_cgroups,
                 max_docker_containers=self._perf_max_docker_containers,
+                perf_events=self._perf_events,
             )
             self._perfs.append(self._perf_fp)
         else:
@@ -301,6 +330,7 @@ class SystemProfiler(ProfilerBase):
                 use_cgroups=self._perf_use_cgroups,
                 max_cgroups=self._perf_max_cgroups,
                 max_docker_containers=self._perf_max_docker_containers,
+                perf_events=self._perf_events,
             )
             self._perfs.append(self._perf_dwarf)
         else:

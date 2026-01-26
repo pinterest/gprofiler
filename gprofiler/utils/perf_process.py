@@ -79,6 +79,7 @@ class PerfProcess:
         use_cgroups: bool = False,
         max_cgroups: int = 50,
         max_docker_containers: int = 0,
+        perf_events: List[str] = None,
     ):
         self._start_time = 0.0
         self._frequency = frequency
@@ -88,6 +89,7 @@ class PerfProcess:
         self._inject_jit = inject_jit
         self._use_cgroups = use_cgroups
         self._max_cgroups = max_cgroups
+        self._perf_events = perf_events if perf_events else ["cycles"]
         self._pid_args = []
         self._cgroup_args = []
         
@@ -142,7 +144,7 @@ class PerfProcess:
 
     def _get_perf_cmd(self) -> List[str]:
         # When using cgroups, perf requires events to be specified before cgroups.
-        # If no explicit events are provided but cgroups are used, add default event.
+        # If no explicit events are provided but cgroups are used, add default events.
         # For multiple cgroups, perf requires one event per cgroup.
         extra_args = self._extra_args
         if self._cgroup_args and not extra_args:
@@ -155,13 +157,22 @@ class PerfProcess:
             
             if cgroup_arg:
                 num_cgroups = len(cgroup_arg.split(","))
-                # Add one event per cgroup (perf requirement)
+                # Add events for each cgroup
+                # For multiple events, we need: -e event1 -e event2 ... for each cgroup
                 extra_args = []
-                for _ in range(num_cgroups):
-                    extra_args.extend(["-e", "cycles"])
+                for event in self._perf_events:
+                    for _ in range(num_cgroups):
+                        extra_args.extend(["-e", event])
             else:
-                # Fallback: single event
-                extra_args = ["-e", "cycles"]
+                # Fallback: add all events
+                extra_args = []
+                for event in self._perf_events:
+                    extra_args.extend(["-e", event])
+        elif not extra_args:
+            # No cgroups, just add all events
+            extra_args = []
+            for event in self._perf_events:
+                extra_args.extend(["-e", event])
             
         return (
             [
