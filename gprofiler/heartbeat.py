@@ -45,6 +45,7 @@ from gprofiler.metrics_publisher import (
 )
 from gprofiler.profiler_state import ProfilerState
 from gprofiler.profilers.factory import get_profilers
+from gprofiler.profilers.perf_events import validate_and_normalize_events
 from gprofiler.profilers.profiler_base import NoopProfiler
 from gprofiler.state import State, init_state, get_state
 from gprofiler.system_metrics import NoopSystemMetricsMonitor, SystemMetricsMonitor, SystemMetricsMonitorBase
@@ -495,17 +496,52 @@ class DynamicGProfilerManager:
             
             # Handle Perf Profiler configuration
             perf_config = profiler_configs.get("perf", "enabled_restricted")
-            if perf_config == "enabled_restricted":
-                new_args.max_system_processes_for_system_profilers = 600
-                new_args.perf_max_docker_containers = 2
-                logger.info("Perf profiler: enabled restricted mode")
-            elif perf_config == "enabled_aggressive":
-                new_args.max_system_processes_for_system_profilers = 1500
-                new_args.perf_max_docker_containers = 50
-                logger.info("Perf profiler: enabled aggressive mode")
-            elif perf_config == "disabled":
-                new_args.perf_mode = "disabled"
-                logger.info("Perf profiler: disabled")
+            
+            # Handle both nested object and legacy string formats
+            if isinstance(perf_config, dict):
+                # New nested object format: {"mode": "enabled_restricted", "events": ["cycles", "cache-misses"]}
+                perf_mode = perf_config.get("mode", "enabled_restricted")
+                perf_events = perf_config.get("events", ["cycles"])
+                
+                # Ensure events is a list
+                if isinstance(perf_events, str):
+                    perf_events = [perf_events]
+                elif not isinstance(perf_events, list):
+                    perf_events = ["cycles"]
+                
+                # Validate and normalize events using global constants
+                perf_events = validate_and_normalize_events(perf_events)
+                
+                if perf_mode == "enabled_restricted":
+                    new_args.max_system_processes_for_system_profilers = 600
+                    new_args.perf_max_docker_containers = 2
+                    logger.info(f"Perf profiler: enabled restricted mode with events={perf_events}")
+                elif perf_mode == "enabled_aggressive":
+                    new_args.max_system_processes_for_system_profilers = 1500
+                    new_args.perf_max_docker_containers = 50
+                    logger.info(f"Perf profiler: enabled aggressive mode with events={perf_events}")
+                elif perf_mode == "disabled":
+                    new_args.perf_mode = "disabled"
+                    logger.info("Perf profiler: disabled")
+                
+                # Set the perf events (store as comma-separated string for CLI compatibility)
+                new_args.perf_events = ",".join(perf_events)
+            else:
+                # Legacy string format for backward compatibility
+                if perf_config == "enabled_restricted":
+                    new_args.max_system_processes_for_system_profilers = 600
+                    new_args.perf_max_docker_containers = 2
+                    logger.info("Perf profiler: enabled restricted mode (legacy format)")
+                elif perf_config == "enabled_aggressive":
+                    new_args.max_system_processes_for_system_profilers = 1500
+                    new_args.perf_max_docker_containers = 50
+                    logger.info("Perf profiler: enabled aggressive mode (legacy format)")
+                elif perf_config == "disabled":
+                    new_args.perf_mode = "disabled"
+                    logger.info("Perf profiler: disabled (legacy format)")
+                
+                # Default events for legacy format
+                new_args.perf_events = "cycles"
             
             # Handle Pyperf configuration
             pyperf_config = profiler_configs.get("pyperf", "enabled")

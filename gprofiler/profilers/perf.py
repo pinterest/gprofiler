@@ -39,6 +39,7 @@ from gprofiler.metadata import ProfileMetadata, application_identifiers
 from gprofiler.metadata.application_metadata import ApplicationMetadata
 from gprofiler.profiler_state import ProfilerState
 from gprofiler.profilers.node import clean_up_node_maps, generate_map_for_node_processes, get_node_processes
+from gprofiler.profilers.perf_events import validate_and_normalize_events
 from gprofiler.profilers.profiler_base import ProfilerBase
 from gprofiler.profilers.registry import ProfilerArgument, register_profiler
 from gprofiler.utils.perf import discover_appropriate_perf_event, parse_perf_script_from_iterator, valid_perf_pid
@@ -149,6 +150,16 @@ def add_highest_avg_depth_stacks_per_process(
             default=0,
             dest="perf_max_docker_containers",
         ),
+        ProfilerArgument(
+            "--perf-events",
+            help="PMU events to profile (comma-separated). Options: cycles (default time-based), instructions, "
+            "cache-misses, cache-references, branch-misses, branch-instructions, stalled-cycles-frontend, "
+            "stalled-cycles-backend. Multiple events will generate separate flamegraphs. "
+            "Example: --perf-events cycles,cache-misses,branch-misses. Default: %(default)s",
+            type=str,
+            default="cycles",
+            dest="perf_events",
+        ),
     ],
     disablement_help="Disable the global perf of processes,"
     " and instead only concatenate runtime-specific profilers results",
@@ -195,6 +206,7 @@ class SystemProfiler(ProfilerBase):
         perf_use_cgroups: bool = False,
         perf_max_cgroups: int = 50,
         perf_max_docker_containers: int = 0,
+        perf_events: str = "cycles",
         min_duration: int = 10,
     ):
         super().__init__(frequency, duration, profiler_state, min_duration)
@@ -212,6 +224,15 @@ class SystemProfiler(ProfilerBase):
         self._perf_use_cgroups = perf_use_cgroups
         self._perf_max_cgroups = perf_max_cgroups
         self._perf_max_docker_containers = perf_max_docker_containers
+        
+        # Parse comma-separated events into a list
+        if isinstance(perf_events, str):
+            events_list = [e.strip() for e in perf_events.split(",") if e.strip()]
+        else:
+            events_list = perf_events if isinstance(perf_events, list) else ["cycles"]
+        
+        # Validate and normalize events
+        self._perf_events = validate_and_normalize_events(events_list)
         # allow gprofiler to be delayed up to 3 intervals before timing out.
         # For low-frequency profiling, use shorter switch intervals to reduce memory buildup
         # But maintain reasonable safety margin to avoid premature rotations
@@ -282,6 +303,7 @@ class SystemProfiler(ProfilerBase):
                 use_cgroups=self._perf_use_cgroups,
                 max_cgroups=self._perf_max_cgroups,
                 max_docker_containers=self._perf_max_docker_containers,
+                perf_events=self._perf_events,
             )
             self._perfs.append(self._perf_fp)
         else:
@@ -301,6 +323,7 @@ class SystemProfiler(ProfilerBase):
                 use_cgroups=self._perf_use_cgroups,
                 max_cgroups=self._perf_max_cgroups,
                 max_docker_containers=self._perf_max_docker_containers,
+                perf_events=self._perf_events,
             )
             self._perfs.append(self._perf_dwarf)
         else:
