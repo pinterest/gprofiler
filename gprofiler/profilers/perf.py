@@ -39,6 +39,7 @@ from gprofiler.metadata import ProfileMetadata, application_identifiers
 from gprofiler.metadata.application_metadata import ApplicationMetadata
 from gprofiler.profiler_state import ProfilerState
 from gprofiler.profilers.node import clean_up_node_maps, generate_map_for_node_processes, get_node_processes
+from gprofiler.profilers.perf_events import validate_and_normalize_events
 from gprofiler.profilers.profiler_base import ProfilerBase
 from gprofiler.profilers.registry import ProfilerArgument, register_profiler
 from gprofiler.utils.perf import discover_appropriate_perf_event, parse_perf_script_from_iterator, valid_perf_pid
@@ -226,20 +227,12 @@ class SystemProfiler(ProfilerBase):
         
         # Parse comma-separated events into a list
         if isinstance(perf_events, str):
-            self._perf_events = [e.strip() for e in perf_events.split(",") if e.strip()]
+            events_list = [e.strip() for e in perf_events.split(",") if e.strip()]
         else:
-            self._perf_events = perf_events if isinstance(perf_events, list) else ["cycles"]
+            events_list = perf_events if isinstance(perf_events, list) else ["cycles"]
         
-        # Validate events
-        # Note: Some events like stalled-cycles-backend may not be supported on all CPUs
-        valid_events = ["cycles", "instructions", "cache-misses", "cache-references",
-                       "branch-misses", "branch-instructions", "stalled-cycles-frontend",
-                       "stalled-cycles-backend"]  # backend may not be supported on all CPUs
-        self._perf_events = [e for e in self._perf_events if e in valid_events]
-        
-        # Default to cycles if no valid events
-        if not self._perf_events:
-            self._perf_events = ["cycles"]
+        # Validate and normalize events
+        self._perf_events = validate_and_normalize_events(events_list)
         # allow gprofiler to be delayed up to 3 intervals before timing out.
         # For low-frequency profiling, use shorter switch intervals to reduce memory buildup
         # But maintain reasonable safety margin to avoid premature rotations

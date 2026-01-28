@@ -45,6 +45,7 @@ from gprofiler.metrics_publisher import (
 )
 from gprofiler.profiler_state import ProfilerState
 from gprofiler.profilers.factory import get_profilers
+from gprofiler.profilers.perf_events import validate_and_normalize_events
 from gprofiler.profilers.profiler_base import NoopProfiler
 from gprofiler.state import State, init_state, get_state
 from gprofiler.system_metrics import NoopSystemMetricsMonitor, SystemMetricsMonitor, SystemMetricsMonitorBase
@@ -506,20 +507,8 @@ class DynamicGProfilerManager:
                 elif not isinstance(perf_events, list):
                     perf_events = ["cycles"]
                 
-                # Validate and filter events
-                # Note: Some events like stalled-cycles-backend may not be supported on all CPUs
-                # Support both "cycles" and "cpu-cycles" (they are the same event)
-                valid_events = ["cycles", "cpu-cycles", "instructions", "cache-misses", "cache-references", 
-                               "branch-misses", "branch-instructions", "stalled-cycles-frontend", 
-                               "stalled-cycles-backend"]  # backend may not be supported on all CPUs
-                perf_events = [e for e in perf_events if e in valid_events]
-                
-                # Normalize cpu-cycles to cycles (perf accepts both, but we standardize on "cycles")
-                perf_events = ["cycles" if e == "cpu-cycles" else e for e in perf_events]
-                
-                # Default to cycles if no valid events
-                if not perf_events:
-                    perf_events = ["cycles"]
+                # Validate and normalize events using global constants
+                perf_events = validate_and_normalize_events(perf_events)
                 
                 if perf_mode == "enabled_restricted":
                     new_args.max_system_processes_for_system_profilers = 600
