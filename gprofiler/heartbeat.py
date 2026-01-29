@@ -46,6 +46,7 @@ from gprofiler.metrics_publisher import (
 from gprofiler.profiler_state import ProfilerState
 from gprofiler.profilers.factory import get_profilers
 from gprofiler.profilers.perf_events import validate_and_normalize_events
+from gprofiler.profilers.pmu_manager import get_pmu_manager
 from gprofiler.profilers.profiler_base import NoopProfiler
 from gprofiler.state import State, init_state, get_state
 from gprofiler.system_metrics import NoopSystemMetricsMonitor, SystemMetricsMonitor, SystemMetricsMonitorBase
@@ -73,6 +74,9 @@ class HeartbeatClient:
         self.max_command_history = 1000  # Limit command history to prevent memory growth
         self.session = requests.Session()
         
+        # Initialize PMU events manager (singleton - cached after first detection)
+        self.pmu_manager = get_pmu_manager()
+        
         # Set up authentication headers
         if self.server_token:
             self.session.headers.update({
@@ -93,6 +97,9 @@ class HeartbeatClient:
     def send_heartbeat(self) -> Optional[Dict[str, Any]]:
         """Send heartbeat to server and return any profiling commands"""
         try:
+            # Get supported PMU events (cached in memory after first detection)
+            perf_supported_events = self.pmu_manager.get_supported_events()
+            
             heartbeat_data = {
                 "ip_address": self.ip_address,
                 "hostname": self.hostname,
@@ -101,7 +108,8 @@ class HeartbeatClient:
                 "status": "active",
                 "timestamp": datetime.datetime.now().isoformat(),
                 "received_command_ids": list(self.received_command_ids),
-                "executed_command_ids": list(self.executed_command_ids)
+                "executed_command_ids": list(self.executed_command_ids),
+                "perf_supported_events": perf_supported_events,
             }
             
             url = f"{self.api_server}/api/metrics/heartbeat"
