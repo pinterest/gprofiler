@@ -81,6 +81,7 @@ from gprofiler.profiler_state import ProfilerState
 from gprofiler.profilers.factory import get_profilers
 from gprofiler.profilers.profiler_base import NoopProfiler, ProcessProfilerBase, ProfilerInterface
 from gprofiler.profilers.registry import get_profilers_registry
+from gprofiler.spark import SparkController
 from gprofiler.state import State, init_state
 from gprofiler.system_metrics import Metrics, NoopSystemMetricsMonitor, SystemMetricsMonitor, SystemMetricsMonitorBase
 from gprofiler.usage_loggers import CgroupsUsageLogger, NoopUsageLogger, UsageLoggerInterface
@@ -168,6 +169,9 @@ class GProfiler:
         self._collect_hw_metrics = collect_hw_metrics
         self._perfspect_path = perfspect_path
         self._perfspect_duration = perfspect_duration
+        self._spark_controller: Optional[SparkController] = None
+        self._profile_all_spark = user_args.get("profile_all_spark", False)
+
         if self._collect_metadata:
             self._static_metadata = get_static_metadata(self._spawn_time, user_args, self._external_metadata_path)
 
@@ -180,6 +184,12 @@ class GProfiler:
         # the latter can be root only. the former can not. we should do this separation so we don't expose
         # files unnecessarily.
         container_names_client = ContainerNamesClient() if self._enrichment_options.container_names else None
+
+        if self._profiler_api_client or self._profile_all_spark:
+            self._spark_controller = SparkController(
+                client=self._profiler_api_client, profile_all=self._profile_all_spark
+            )
+
         self._profiler_state = ProfilerState(
             stop_event=Event(),
             storage_dir=TEMPORARY_STORAGE_PATH,
@@ -190,6 +200,9 @@ class GProfiler:
             processes_to_profile=processes_to_profile,
             max_processes_per_profiler=user_args.get("max_processes_per_profiler", 0),
             max_system_processes_for_system_profilers=user_args.get("max_system_processes_for_system_profilers", 0),
+            spark_controller=self._spark_controller,
+            output_dir=self._output_dir,
+            profiler_api_client=self._profiler_api_client,
         )
         self.system_profiler, self.process_profilers = get_profilers(user_args, profiler_state=self._profiler_state)
         self._usage_logger = usage_logger
@@ -352,6 +365,9 @@ class GProfiler:
             except Exception as e:
                 logger.warning(f"Could not count system processes, continuing with all profilers: {e}")
 
+        if self._spark_controller:
+            self._spark_controller.start()
+
         for prof in list(self.all_profilers):
             try:
                 # Skip system profilers if threshold exceeded, unless they override the logic
@@ -402,6 +418,12 @@ class GProfiler:
                 logger.debug(f"Successfully stopped profiler: {prof.name}")
             except Exception as e:
                 logger.error(f"Error stopping profiler {prof.name}: {e}")
+
+        if self._spark_controller:
+            try:
+                self._spark_controller.stop()
+            except Exception as e:
+                logger.error(f"Error stopping spark controller: {e}")
 
     def _snapshot(self) -> None:   
         local_start_time = datetime.datetime.utcnow()
@@ -622,6 +644,16 @@ class GProfiler:
                 # Single comprehensive cleanup call that handles everything
                 self.maybe_cleanup_subprocesses()
                 logger.debug("Comprehensive post-snapshot cleanup completed")
+
+                restart_requested = False
+                for prof in self.process_profilers:
+                    if getattr(prof, "restart_requested", False):
+                        restart_requested = True
+                        break
+
+                if restart_requested:
+                    logger.info("Skipping wait due to restart request")
+                    continue
 
                 # wait for one duration
                 self._profiler_state.stop_event.wait(max(self._duration - (time.monotonic() - snapshot_start), 0))
@@ -874,6 +906,20 @@ def parse_cmd_args() -> configargparse.Namespace:
         default=False,
         action="store_true",
         help="Deprecated! Removed in version 1.42.0",
+    )
+
+    spark_options.add_argument(
+        "--profile-all-spark",
+        action="store_true",
+        default=False,
+        help="Profile all Spark applications, ignoring server-side allow-list (testing only)",
+    )
+
+    spark_options.add_argument(
+        "--spark-mode",
+        action="store_true",
+        default=False,
+        help="Run in Spark mode: disables system profiling, enables checkpointing on thread updates, and filters for Spark apps.",
     )
 
     nodejs_options = parser.add_argument_group("NodeJS")
@@ -1241,6 +1287,14 @@ def parse_cmd_args() -> configargparse.Namespace:
 
     if args.profile_spawned_processes and args.pids_to_profile is not None:
         parser.error("--pids is not allowed when profiling spawned processes")
+
+    if args.spark_mode:
+        # In Spark mode, we force disable system profilers (perf)
+        # and ensure we use allocation/java mode if not specified, though user can still control mode.
+        # Primarily we want to avoid perf.
+        if args.perf_mode != "disabled":
+            logger.info("Spark mode enabled: Disabling system profiler (perf)")
+            args.perf_mode = "disabled"
 
     if args.enable_heartbeat_server:
         if not args.upload_results:

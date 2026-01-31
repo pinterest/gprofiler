@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import datetime
 import errno
 import functools
 import json
@@ -24,7 +25,7 @@ import time
 from enum import Enum
 from pathlib import Path
 from subprocess import CompletedProcess
-from threading import Event, Lock
+from threading import Event, Lock, Thread
 from types import TracebackType
 from typing import Any, Dict, Iterable, List, Optional, Set, Type, TypeVar, Union
 
@@ -376,10 +377,12 @@ class JavaMetadata(ApplicationMetadata):
         stop_event: Event,
         jattach_jcmd_runner: JattachJcmdRunner,
         java_collect_jvm_flags: Union[JavaFlagCollectionOptions, List[str]],
+        spark_controller: Optional[Any] = None,
     ):
         super().__init__(stop_event)
         self.jattach_jcmd_runner = jattach_jcmd_runner
         self.java_collect_jvm_flags = java_collect_jvm_flags
+        self.spark_controller = spark_controller
 
     def make_application_metadata(self, process: Process) -> Dict[str, Any]:
         version = get_java_version(process, self._stop_event) or "/java not found"
@@ -400,6 +403,14 @@ class JavaMetadata(ApplicationMetadata):
             "libjvm_elfid": libjvm_elfid,
             "jvm_flags": jvm_flags,
         }
+
+        if self.spark_controller:
+            try:
+                thread_map = self.spark_controller.get_thread_map(process.pid)
+                if thread_map:
+                    metadata["spark_threads"] = thread_map
+            except Exception:
+                logger.debug(f"Failed to get spark threads for {process.pid}", exc_info=True)
 
         metadata.update(super().make_application_metadata(process))
         return metadata
@@ -1044,9 +1055,13 @@ class JavaProfiler(SpawningProcessProfilerBase):
         self._ap_timeout = self._duration + self._AP_EXTRA_TIMEOUT_S
         application_identifiers.ApplicationIdentifiers.init_java(self._jattach_jcmd_runner)
         self._metadata = JavaMetadata(
-            self._profiler_state.stop_event, self._jattach_jcmd_runner, self._collect_jvm_flags
+            self._profiler_state.stop_event,
+            self._jattach_jcmd_runner,
+            self._collect_jvm_flags,
+            self._profiler_state.spark_controller,
         )
         self._report_meminfo = java_async_profiler_report_meminfo
+        self.restart_requested = False
         self._java_full_hserr = java_full_hserr
         self._include_method_modifiers = java_include_method_modifiers
         self._java_line_numbers = java_line_numbers
@@ -1285,13 +1300,29 @@ class JavaProfiler(SpawningProcessProfilerBase):
             logger.debug("Process paths", pid=process.pid, execfn=execfn, exe=exe)
             logger.debug("Process mapped files", pid=process.pid, maps=set(m.path for m in process.memory_maps()))
 
+        mode = self._mode
+        ap_args = self._ap_args
+
+        # If this is a Spark process (has spark threads metadata), enforce wall time and threaded profiling
+        if app_metadata and "spark_threads" in app_metadata:
+            if mode != "alloc":  # Keep alloc mode if explicitly set
+                mode = "wall"
+
+            # Add -t if not present
+            if not ap_args:
+                ap_args = "-t"
+            elif "-t" not in ap_args.split(","):  # Simple check, assumes comma separated
+                ap_args = f"{ap_args},-t"
+
+            logger.debug(f"Enforcing Spark options for {process.pid}: mode={mode}, args={ap_args}")
+
         with AsyncProfiledProcess(
             process,
             self._profiler_state,
-            self._mode,
+            mode,
             self._ap_safemode,
             self._ap_features,
-            self._ap_args,
+            ap_args,
             self._jattach_timeout,
             self._ap_mcache,
             self._report_meminfo,
@@ -1319,47 +1350,234 @@ class JavaProfiler(SpawningProcessProfilerBase):
             pid=pid,
         )
 
-    def _profile_ap_process(self, ap_proc: AsyncProfiledProcess, comm: str, duration: int) -> StackToSampleCount:
-        started = ap_proc.start_async_profiler(self._interval, ap_timeout=self._ap_timeout)
-        if not started:
-            logger.info(f"Found async-profiler already started on {ap_proc.process.pid}, trying to stop it...")
-            # stop, and try to start again. this might happen if AP & gProfiler go out of sync: for example,
-            # gProfiler being stopped brutally, while AP keeps running. If gProfiler is later started again, it will
-            # try to start AP again...
-            # not using the "resume" action because I'm not sure it properly reconfigures all settings; while stop;start
-            # surely does.
-            ap_proc.stop_async_profiler(with_output=False)
-            started = ap_proc.start_async_profiler(self._interval, second_try=True, ap_timeout=self._ap_timeout)
-            if not started:
-                raise Exception(
-                    f"async-profiler is still running in {ap_proc.process.pid}, even after trying to stop it!"
-                )
+    def _checkpoint_and_upload_spark_profile(
+        self,
+        ap_proc: AsyncProfiledProcess,
+        output: str,
+        comm: str,
+        start_time: datetime.datetime,
+        end_time: datetime.datetime,
+        spawn_time: float,
+        spark_threads: Optional[Dict],
+        queued_updates: List[Dict],
+        app_id: Optional[str]
+    ) -> None:
+        """Helper to save and upload Spark profiles and metadata."""
+        if not self._profiler_state.output_dir:
+            return
+
+        # Placeholder metrics for internal upload
+        from gprofiler.system_metrics import Metrics
+        dummy_metrics = Metrics(0, 0)
 
         try:
-            wait_event(
-                duration, self._profiler_state.stop_event, lambda: not is_process_running(ap_proc.process), interval=1
-            )
-        except TimeoutError:
-            # Process still running. We will stop the profiler in finally block.
-            pass
-        else:
-            # Process terminated, was it due to an error?
-            self._check_hotspot_error(ap_proc)
-            logger.debug(f"Profiled process {ap_proc.process.pid} exited before stopping async-profiler")
-            # fall-through - try to read the output, since async-profiler writes it upon JVM exit.
-        finally:
-            if is_process_running(ap_proc.process):
-                ap_log = ap_proc.stop_async_profiler(True)
-                if self._report_meminfo:
-                    self._log_mem_usage(ap_log, ap_proc.process.pid)
+            timestamp_str = end_time.strftime("%Y-%m-%dT%H_%M_%S")
+            base_filename = f"profile_{timestamp_str}_{ap_proc.process.pid}"
+            collapsed_path = os.path.join(self._profiler_state.output_dir, f"{base_filename}.col")
 
-        output = ap_proc.read_output()
+            with open(collapsed_path, "w") as f:
+                f.write(parse_one_collapsed(output, comm).stack_summary.to_file_content())
+            logger.info(f"Saved Spark checkpoint to {collapsed_path}")
+
+            update_payloads = []
+            if spark_threads:
+                meta_path = os.path.join(self._profiler_state.output_dir, f"{base_filename}_metadata.json")
+                with open(meta_path, "w") as f:
+                    json.dump({"threads": spark_threads, "app_id": app_id}, f)
+
+            for update in queued_updates:
+                idx = update["update_index"]
+                update_path = os.path.join(self._profiler_state.output_dir, f"{base_filename}_metadata_{idx}.json")
+                with open(update_path, "w") as f:
+                    json.dump(update, f)
+                update_payloads.append(update)
+
+            if self._profiler_state.profiler_api_client:
+                client = self._profiler_state.profiler_api_client
+
+                def _upload_task(
+                    p_client=client,
+                    p_start=start_time,
+                    p_end=end_time,
+                    p_output=output,
+                    p_comm=comm,
+                    p_threads=spark_threads,
+                    p_updates=update_payloads
+                ):
+                    try:
+                        metadata_list = []
+                        if p_threads:
+                             metadata_list.append({
+                                 "timestamp": p_start.isoformat(),
+                                 "threads": p_threads,
+                                 "type": "base"
+                             })
+                        metadata_list.extend(p_updates)
+
+                        collapsed_str = parse_one_collapsed(p_output, p_comm).stack_summary.to_file_content()
+
+                        p_client.submit_profile(
+                            start_time=p_start,
+                            end_time=p_end,
+                            profile=collapsed_str,
+                            profile_api_version=None,
+                            spawn_time=spawn_time,
+                            metrics=dummy_metrics,
+                            gpid="",
+                            spark_metadata=metadata_list
+                        )
+                        logger.info(f"Uploaded Spark checkpoint for {ap_proc.process.pid}")
+                    except Exception as e:
+                        logger.error(f"Failed to upload Spark checkpoint: {e}")
+
+                Thread(target=_upload_task, name=f"Upload-{ap_proc.process.pid}").start()
+
+        except Exception as e:
+            logger.error(f"Failed to handle Spark checkpoint: {e}")
+
+    def _profile_ap_process(self, ap_proc: AsyncProfiledProcess, comm: str, duration: int) -> StackToSampleCount:
+        total_duration = duration
+        start_time_global = time.monotonic()
+        restart_event = None
+        queued_metadata_updates: List[Dict] = []
+        update_counter = 0
+        is_spark_mode = self._profiler_state.spark_controller is not None
+
+        if is_spark_mode:
+            restart_event = self._profiler_state.spark_controller.get_restart_event(ap_proc.process.pid)
+            if restart_event:
+                restart_event.clear()
+            # In Spark mode, ignore the duration limit for the session.
+            # We run until the process exits or global stop_event is set.
+            # We set total_duration to a very large number effectively making it infinite.
+            # The outer gprofiler loop might still wait on us, but since we return skipped profiles
+            # on checkpoints, we control the flow.
+            # Wait, if we never return, gprofiler main loop (snapshot) will block forever on us.
+            # This is desired behavior: "continue to profile under the same session".
+            total_duration = 31536000000 # 1000 years
+
+        segment_start_time = datetime.datetime.utcnow()
+        spawn_time = time.time() # Approximation
+
+        while True:
+            # Calculate remaining duration for the global session
+            elapsed_global = time.monotonic() - start_time_global
+            remaining = total_duration - elapsed_global
+
+            if remaining <= 0:
+                break
+
+            started = ap_proc.start_async_profiler(self._interval, ap_timeout=self._ap_timeout)
+            if not started:
+                logger.info(f"Found async-profiler already started on {ap_proc.process.pid}, trying to stop it...")
+                ap_proc.stop_async_profiler(with_output=False)
+                started = ap_proc.start_async_profiler(self._interval, second_try=True, ap_timeout=self._ap_timeout)
+                if not started:
+                     raise Exception(
+                        f"async-profiler is still running in {ap_proc.process.pid}, even after trying to stop it!"
+                    )
+
+            segment_monotonic_start = time.monotonic()
+            stop_reason = "timeout"
+
+            try:
+                while True:
+                    wait_time = total_duration - (time.monotonic() - start_time_global)
+                    if wait_time <= 0:
+                        stop_reason = "timeout"
+                        break
+
+                    try:
+                        wait_event(
+                            wait_time,
+                            self._profiler_state.stop_event,
+                            lambda: (not is_process_running(ap_proc.process))
+                            or (restart_event is not None and restart_event.is_set()),
+                            interval=1,
+                        )
+                    except TimeoutError:
+                        stop_reason = "timeout"
+                        break
+
+                    if not is_process_running(ap_proc.process):
+                        stop_reason = "exited"
+                        break
+
+                    if self._profiler_state.stop_event.is_set():
+                        stop_reason = "stop_event"
+                        break
+
+                    if restart_event and restart_event.is_set():
+                         elapsed_segment = time.monotonic() - segment_monotonic_start
+                         if elapsed_segment < 30.0:
+                             logger.info(f"Spark update during cooldown ({elapsed_segment:.1f}s < 30s) for {ap_proc.process.pid}. Recording metadata update.")
+
+                             if self._profiler_state.spark_controller:
+                                 new_thread_map = self._profiler_state.spark_controller.get_thread_map(ap_proc.process.pid)
+
+                                 update_counter += 1
+                                 queued_metadata_updates.append({
+                                     "timestamp": datetime.datetime.utcnow().isoformat(),
+                                     "threads": new_thread_map,
+                                     "update_index": update_counter
+                                 })
+
+                             restart_event.clear()
+                             continue
+
+                         logger.info(f"Restart requested for process {ap_proc.process.pid} due to thread change (duration {elapsed_segment:.1f}s)")
+                         stop_reason = "restart"
+                         restart_event.clear()
+                         break
+
+            finally:
+                if is_process_running(ap_proc.process):
+                    ap_log = ap_proc.stop_async_profiler(True)
+                    if self._report_meminfo:
+                        self._log_mem_usage(ap_log, ap_proc.process.pid)
+
+            if stop_reason == "exited":
+                self._check_hotspot_error(ap_proc)
+                logger.debug(f"Profiled process {ap_proc.process.pid} exited")
+                break
+
+            segment_end_time = datetime.datetime.utcnow()
+            output = ap_proc.read_output()
+
+            if output and (stop_reason == "restart" or (is_spark_mode and self._profiler_state.output_dir)):
+                current_metadata = self._metadata.get_metadata(ap_proc.process)
+                spark_threads = current_metadata.get("spark_threads")
+                app_id = current_metadata.get("app_id")
+
+                self._checkpoint_and_upload_spark_profile(
+                    ap_proc, output, comm, segment_start_time, segment_end_time, spawn_time,
+                    spark_threads, queued_metadata_updates, app_id
+                )
+                queued_metadata_updates = []
+
+                if stop_reason == "restart":
+                    # Force refresh of metadata for the next segment if we are restarting
+                    try:
+                        # Invalidate cache for this process to ensure fresh metadata is fetched
+                        if hasattr(self._metadata, "_cache") and ap_proc.process in self._metadata._cache:
+                            del self._metadata._cache[ap_proc.process]
+                    except Exception as e:
+                        logger.warning(f"Failed to clear metadata cache for process {ap_proc.process.pid}: {e}")
+
+            if stop_reason in ("timeout", "stop_event", "exited"):
+                if is_spark_mode and self._profiler_state.output_dir:
+                    return self._profiling_error_stack("skipped", "handled_internally", comm)
+                break
+
+            segment_start_time = datetime.datetime.utcnow()
+
         if output is None:
             logger.warning(f"Profiled process {ap_proc.process.pid} exited before reading the output")
             return self._profiling_error_stack("error", "process exited before reading the output", comm)
         else:
             logger.info(f"Finished profiling process {ap_proc.process.pid}")
             return parse_one_collapsed(output, comm)
+
 
     def _check_hotspot_error(self, ap_proc: AsyncProfiledProcess) -> None:
         pid = ap_proc.process.pid
@@ -1397,10 +1615,46 @@ class JavaProfiler(SpawningProcessProfilerBase):
             logger.debug("Java profiling has been disabled, skipping profiling of all java processes")
             # continue - _profile_process will return an appropriate error for each process selected for
             # profiling.
-        return pgrep_maps(DETECTED_JAVA_PROCESSES_REGEX)
+
+        if self._profiler_state.processes_to_profile is not None:
+            # If specific PIDs are requested, check only them (avoid pgrep_maps which scans all processes)
+            candidates = []
+            for p in self._profiler_state.processes_to_profile:
+                try:
+                    if self._should_profile_process(p):
+                        candidates.append(p)
+                except NoSuchProcess:
+                    pass
+                except Exception as e:
+                    logger.warning(f"Error checking process {p.pid}: {e}")
+            return candidates
+
+        processes = pgrep_maps(DETECTED_JAVA_PROCESSES_REGEX)
+
+        # If in Spark mode (Spark controller active and system profiling disabled),
+        # limit to Spark processes only using the controller's filter
+        if (
+            self._profiler_state.spark_controller
+            and hasattr(self._profiler_state.spark_controller, "filter_processes")
+            # We assume Spark mode if we have a controller and perf is disabled (typical for Spark-only)
+            # or if explicitly configured (though here we rely on the controller logic)
+        ):
+            processes = self._profiler_state.spark_controller.filter_processes(processes)
+
+        return processes
 
     def _should_profile_process(self, process: Process) -> bool:
-        return search_proc_maps(process, DETECTED_JAVA_PROCESSES_REGEX) is not None and not self._should_skip_process(process)
+        has_libjvm = search_proc_maps(process, DETECTED_JAVA_PROCESSES_REGEX) is not None
+        if not has_libjvm:
+            logger.debug(f"Process {process.pid} skipped: libjvm not found in maps")
+            return False
+
+        skip = self._should_skip_process(process)
+        if skip:
+            logger.debug(f"Process {process.pid} skipped: too young")
+            return False
+
+        return True
     
     def _should_skip_process(self, process: Process) -> bool:
         # Skip short-lived processes - if a process is younger than min_duration,
@@ -1501,6 +1755,7 @@ class JavaProfiler(SpawningProcessProfilerBase):
             self._handle_kernel_messages(messages)
 
     def snapshot(self) -> ProcessToProfileData:
+        self.restart_requested = False
         try:
             return super().snapshot()
         finally:
