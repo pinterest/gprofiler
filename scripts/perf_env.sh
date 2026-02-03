@@ -56,7 +56,6 @@ apt-get install -y --no-install-recommends \
     libiberty-dev \
     libcap-dev \
     libdwarf-dev \
-    liblzma-dev \
     libnuma-dev \
     libbabeltrace-ctf-dev \
     systemtap-sdt-dev \
