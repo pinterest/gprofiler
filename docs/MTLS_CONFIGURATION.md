@@ -190,11 +190,13 @@ When certificate refresh is enabled, the agent logs:
 [INFO] HeartbeatClient: TLS session refreshed successfully
 ```
 
-If refresh fails, errors are logged but the agent continues using the current certificate until the next refresh attempt:
+If refresh fails, errors are logged but the agent preserves the existing working session and continues operating normally until the next refresh attempt:
 
 ```
 [ERROR] ProfilerAPIClient: Failed to refresh TLS session: [error details]. Will retry on next interval.
 ```
+
+**Important**: Certificate refresh failures do not interrupt agent connectivity. The agent continues using its current valid session and will automatically retry on the next refresh interval. This ensures uninterrupted profiling even if temporary issues prevent certificate reload (e.g., file system errors, permission issues, or malformed new certificates).
 
 ## Security Considerations
 
@@ -276,6 +278,7 @@ With mTLS enabled:
 - Does not block profiling operations
 - New connections use refreshed certificates immediately
 - Old connections complete gracefully
+- **Failure handling**: If refresh fails, the agent preserves its current working session and retries on the next interval, ensuring continuous operation
 
 ## Configuration File Support
 
