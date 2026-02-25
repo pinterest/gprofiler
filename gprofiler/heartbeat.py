@@ -129,9 +129,9 @@ class HeartbeatClient:
     
     def _refresh_session(self) -> None:
         """Refresh the TLS session by recreating it. Thread-safe."""
+        old_session = self.session
         try:
             logger.debug("HeartbeatClient: Refreshing TLS session to reload certificates")
-            old_session = self.session
             self._init_session()
             # Re-apply authentication headers after session refresh
             if self.server_token:
@@ -143,6 +143,8 @@ class HeartbeatClient:
             old_session.close()
             logger.info("HeartbeatClient: TLS session refreshed successfully")
         except Exception as e:
+            # Restore old session if refresh failed
+            self.session = old_session
             logger.error(f"HeartbeatClient: Failed to refresh TLS session: {e}. Will retry on next interval.")
     
     def _cert_refresh_loop(self) -> None:

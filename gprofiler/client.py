@@ -16,6 +16,7 @@
 import datetime
 import gzip
 import json
+import os
 import threading
 from io import BytesIO
 from typing import IO, TYPE_CHECKING, Any, Dict, List, Optional, Tuple, cast
@@ -167,6 +168,14 @@ class ProfilerAPIClient(BaseAPIClient):
         
         # Configure client certificate for mTLS
         if self._tls_client_cert and self._tls_client_key:
+            if not os.path.isfile(self._tls_client_cert):
+                raise FileNotFoundError(f"Client certificate not found: {self._tls_client_cert}")
+            if not os.path.isfile(self._tls_client_key):
+                raise FileNotFoundError(f"Client key not found: {self._tls_client_key}")
+            if not os.access(self._tls_client_cert, os.R_OK):
+                raise PermissionError(f"Cannot read client certificate: {self._tls_client_cert}")
+            if not os.access(self._tls_client_key, os.R_OK):
+                raise PermissionError(f"Cannot read client key: {self._tls_client_key}")
             self._session.cert = (self._tls_client_cert, self._tls_client_key)
             logger.debug(f"mTLS enabled with client cert: {self._tls_client_cert}")
         elif self._tls_client_cert or self._tls_client_key:
@@ -180,14 +189,16 @@ class ProfilerAPIClient(BaseAPIClient):
     
     def _refresh_session(self) -> None:
         """Refresh the TLS session by recreating it. Thread-safe."""
+        old_session = self._session
         try:
             logger.debug("Refreshing TLS session to reload certificates")
-            old_session = self._session
             self._init_session()
             # Close old session after new one is established
             old_session.close()
             logger.info("TLS session refreshed successfully")
         except Exception as e:
+            # Restore old session if refresh failed
+            self._session = old_session
             logger.error(f"Failed to refresh TLS session: {e}. Will retry on next interval.")
     
     def _cert_refresh_loop(self) -> None:
