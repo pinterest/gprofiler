@@ -61,18 +61,38 @@ logger = logging.getLogger(__name__)
 class HeartbeatClient:
     """Client for sending heartbeats to the server and receiving profiling commands"""
     
-    def __init__(self, api_server: str, service_name: str, server_token: str, verify: bool = True):
+    def __init__(
+        self,
+        api_server: str,
+        service_name: str,
+        server_token: str,
+        verify: bool = True,
+        tls_client_cert: Optional[str] = None,
+        tls_client_key: Optional[str] = None,
+        tls_ca_bundle: Optional[str] = None,
+        tls_cert_refresh_enabled: bool = False,
+        tls_cert_refresh_interval: int = 21600,
+    ):
         self.api_server = api_server.rstrip('/')
         self.service_name = service_name
         self.server_token = server_token
         self.verify = verify
+        self.tls_client_cert = tls_client_cert
+        self.tls_client_key = tls_client_key
+        self.tls_ca_bundle = tls_ca_bundle
+        self.tls_cert_refresh_enabled = tls_cert_refresh_enabled
+        self.tls_cert_refresh_interval = tls_cert_refresh_interval
         self.hostname = get_hostname()
         self.ip_address = self._get_local_ip()
         self.last_command_id: Optional[str] = None
         self.received_command_ids: set = set()  # Track received command IDs for idempotency (prevent duplicate processing)
         self.executed_command_ids: set = set()  # Track executed command IDs (commands that were actually processed)
         self.max_command_history = 1000  # Limit command history to prevent memory growth
-        self.session = requests.Session()
+        self._refresh_thread: Optional[threading.Thread] = None
+        self._refresh_stop_event = threading.Event()
+        
+        # Initialize session
+        self._init_session()
         
         # Initialize PMU events manager (singleton - cached after first detection)
         self.pmu_manager = get_pmu_manager()
@@ -83,6 +103,76 @@ class HeartbeatClient:
                 'Authorization': f'Bearer {self.server_token}',
                 'Content-Type': 'application/json'
             })
+        
+        # Start certificate refresh thread if enabled
+        if self.tls_cert_refresh_enabled and (self.tls_client_cert or self.tls_ca_bundle):
+            self._start_cert_refresh_thread()
+    
+    def _init_session(self) -> None:
+        """Initialize or reinitialize the requests session with TLS configuration."""
+        self.session = requests.Session()
+        
+        # Configure server certificate verification
+        if self.tls_ca_bundle:
+            # Use custom CA bundle if provided
+            self.session.verify = self.tls_ca_bundle
+        else:
+            # Use default verify setting (True/False or system CA bundle)
+            self.session.verify = self.verify
+        
+        # Configure client certificate for mTLS
+        if self.tls_client_cert and self.tls_client_key:
+            self.session.cert = (self.tls_client_cert, self.tls_client_key)
+            logger.debug(f"HeartbeatClient: mTLS enabled with client cert: {self.tls_client_cert}")
+        elif self.tls_client_cert or self.tls_client_key:
+            logger.warning("HeartbeatClient: Both --tls-client-cert and --tls-client-key must be provided for mTLS. Ignoring partial configuration.")
+    
+    def _refresh_session(self) -> None:
+        """Refresh the TLS session by recreating it. Thread-safe."""
+        old_session = self.session
+        try:
+            logger.debug("HeartbeatClient: Refreshing TLS session to reload certificates")
+            self._init_session()
+            # Re-apply authentication headers after session refresh
+            if self.server_token:
+                self.session.headers.update({
+                    'Authorization': f'Bearer {self.server_token}',
+                    'Content-Type': 'application/json'
+                })
+            # Close old session after new one is established
+            old_session.close()
+            logger.info("HeartbeatClient: TLS session refreshed successfully")
+        except Exception as e:
+            # Restore old session if refresh failed
+            self.session = old_session
+            logger.error(f"HeartbeatClient: Failed to refresh TLS session: {e}. Will retry on next interval.")
+    
+    def _cert_refresh_loop(self) -> None:
+        """Background thread loop for periodic certificate refresh."""
+        logger.info(f"HeartbeatClient: Certificate refresh thread started (interval: {self.tls_cert_refresh_interval}s)")
+        while not self._refresh_stop_event.wait(self.tls_cert_refresh_interval):
+            self._refresh_session()
+        logger.debug("HeartbeatClient: Certificate refresh thread stopped")
+    
+    def _start_cert_refresh_thread(self) -> None:
+        """Start the background thread for certificate refresh."""
+        if self._refresh_thread is None or not self._refresh_thread.is_alive():
+            self._refresh_thread = threading.Thread(
+                target=self._cert_refresh_loop,
+                daemon=True,
+                name="HeartbeatClient-CertRefresh"
+            )
+            self._refresh_thread.start()
+            logger.debug(f"HeartbeatClient: Started TLS certificate refresh thread (interval: {self.tls_cert_refresh_interval}s)")
+    
+    def stop_cert_refresh(self) -> None:
+        """Stop the certificate refresh thread. Call during cleanup."""
+        if self._refresh_thread and self._refresh_thread.is_alive():
+            logger.debug("HeartbeatClient: Stopping certificate refresh thread")
+            self._refresh_stop_event.set()
+            self._refresh_thread.join(timeout=5)
+            if self._refresh_thread.is_alive():
+                logger.warning("HeartbeatClient: Certificate refresh thread did not stop gracefully")
     
     def _get_local_ip(self) -> str:
         """Get the local IP address"""
@@ -116,7 +206,6 @@ class HeartbeatClient:
             response = self.session.post(
                 url,
                 json=heartbeat_data,
-                verify=self.verify,
                 timeout=30
             )
             
@@ -183,7 +272,6 @@ class HeartbeatClient:
             response = self.session.post(
                 url,
                 json=completion_data,
-                verify=self.verify,
                 timeout=30
             )
             
@@ -659,7 +747,12 @@ class DynamicGProfilerManager:
                 curlify_requests=getattr(args, 'curlify_requests', False),
                 hostname=get_hostname(),
                 verify=args.verify,
-                upload_timeout=getattr(args, 'server-upload-timeout', 120)  # Default to 120 seconds
+                upload_timeout=getattr(args, 'server-upload-timeout', 120),  # Default to 120 seconds
+                tls_client_cert=getattr(args, 'tls_client_cert', None),
+                tls_client_key=getattr(args, 'tls_client_key', None),
+                tls_ca_bundle=getattr(args, 'tls_ca_bundle', None),
+                tls_cert_refresh_enabled=getattr(args, 'tls_cert_refresh_enabled', False),
+                tls_cert_refresh_interval=getattr(args, 'tls_cert_refresh_interval', 21600),
             )
         
         enrichment_options = EnrichmentOptions(

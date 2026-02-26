@@ -976,6 +976,41 @@ def parse_cmd_args() -> configargparse.Namespace:
         connectivity.add_argument(
             "--no-verify", help="Do not verify server certificates", action="store_false", dest="verify"
         )
+        connectivity.add_argument(
+            "--tls-client-cert",
+            type=str,
+            default=None,
+            help="Path to client certificate file for mTLS (PEM format). "
+            "Use with --tls-client-key for mutual TLS authentication",
+        )
+        connectivity.add_argument(
+            "--tls-client-key",
+            type=str,
+            default=None,
+            help="Path to client private key file for mTLS (PEM format). "
+            "Use with --tls-client-cert for mutual TLS authentication",
+        )
+        connectivity.add_argument(
+            "--tls-ca-bundle",
+            type=str,
+            default=None,
+            help="Path to CA bundle file for verifying server certificates (PEM format). "
+            "Overrides system default CA bundle when specified",
+        )
+        connectivity.add_argument(
+            "--tls-cert-refresh-enabled",
+            action="store_true",
+            default=False,
+            help="Enable periodic TLS certificate refresh. Useful for short-lived certificates "
+            "(e.g., Normandie certs that rotate every 10-12 hours)",
+        )
+        connectivity.add_argument(
+            "--tls-cert-refresh-interval",
+            type=positive_integer,
+            default=21600,
+            help="Interval in seconds for TLS certificate refresh when --tls-cert-refresh-enabled is set. "
+            "Default: %(default)s seconds (6 hours)",
+        )
 
     extract_resources = subparsers.add_parser("extract-resources")
     extract_resources.set_defaults(func=copy_resources)
@@ -1413,7 +1448,17 @@ def main() -> None:
     state = init_state()
 
     remote_logs_handler = (
-        RemoteLogsHandler(args.api_server, args.server_token, args.service_name, args.verify)
+        RemoteLogsHandler(
+            args.api_server,
+            args.server_token,
+            args.service_name,
+            args.verify,
+            args.tls_client_cert,
+            args.tls_client_key,
+            args.tls_ca_bundle,
+            args.tls_cert_refresh_enabled,
+            args.tls_cert_refresh_interval,
+        )
         if _should_send_logs(args)
         else None
     )
@@ -1513,6 +1558,11 @@ def main() -> None:
                     hostname=get_hostname(),
                     verify=args.verify,
                     upload_timeout=args.server_upload_timeout,
+                    tls_client_cert=args.tls_client_cert,
+                    tls_client_key=args.tls_client_key,
+                    tls_ca_bundle=args.tls_ca_bundle,
+                    tls_cert_refresh_enabled=args.tls_cert_refresh_enabled,
+                    tls_cert_refresh_interval=args.tls_cert_refresh_interval,
                 )
                 if args.upload_results
                 else None
@@ -1558,6 +1608,11 @@ def main() -> None:
                 service_name=args.service_name,
                 server_token=args.server_token,
                 verify=args.verify,
+                tls_client_cert=args.tls_client_cert,
+                tls_client_key=args.tls_client_key,
+                tls_ca_bundle=args.tls_ca_bundle,
+                tls_cert_refresh_enabled=args.tls_cert_refresh_enabled,
+                tls_cert_refresh_interval=args.tls_cert_refresh_interval,
             )
 
             # Create dynamic profiler manager  
