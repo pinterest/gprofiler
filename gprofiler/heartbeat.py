@@ -351,6 +351,13 @@ class DynamicGProfilerManager:
         # Current command tracking
         self.current_command: Optional[ProfilingCommand] = None
         self.current_command_start_time: Optional[datetime.datetime] = None
+        self.current_profiler_types: set = set()
+        
+        # Parallel ad-hoc slot (used when profiler types don't overlap with current)
+        self.adhoc_gprofiler: Optional['GProfiler'] = None
+        self.adhoc_thread: Optional[threading.Thread] = None
+        self.adhoc_command: Optional[ProfilingCommand] = None
+        self.adhoc_profiler_types: set = set()
     
     def start_heartbeat_loop(self):
         """Start the main heartbeat loop"""
@@ -393,17 +400,22 @@ class DynamicGProfilerManager:
                     else:
                         logger.info(f"Command ID {command_id} already received and processed, skipping...")
 
-                # Step 2: Process next command in queue if ready
+                # Step 2: Cleanup completed parallel ad-hoc profiler
+                if self.adhoc_thread and not self.adhoc_thread.is_alive():
+                    self.adhoc_gprofiler = None
+                    self.adhoc_thread = None
+                    self.adhoc_command = None
+                    self.adhoc_profiler_types = set()
+
+                # Step 3: Process next command in queue if ready
                 next_cmd = self.command_manager.get_next_command()
                 if self._should_process_next_command(next_cmd):
                     if next_cmd.command_type == "stop":
                         logger.info(f"Processing STOP command {next_cmd.command_id} from queue")
                         self._stop_current_profiler()
-                        # Clear all queues on stop command
+                        self._stop_adhoc_profiler()
                         self.command_manager.clear_queues()
-                        # Mark as executed
                         self.heartbeat_client.mark_command_executed(next_cmd.command_id)
-                        # Report completion for stop command
                         self.heartbeat_client.send_command_completion(
                             command_id=next_cmd.command_id,
                             status="completed",
@@ -412,31 +424,39 @@ class DynamicGProfilerManager:
                             results_path=None
                         )
                     elif next_cmd.command_type == "start":
-                        # Check if current profiler can be paused
-                        if self._can_be_paused():
-                            logger.info("Pausing current profiler for queued command %s", next_cmd.command_id)
+                        started = False
+                        if self.current_gprofiler is None:
+                            logger.info("Starting profiler for queued command %s", next_cmd.command_id)
+                            self._start_new_profiler(next_cmd.profiling_command, next_cmd.command_id)
+                            started = True
+                        elif self._can_run_in_parallel(next_cmd):
+                            logger.info(
+                                "Starting parallel ad-hoc profiler for command %s (non-overlapping profiler types)",
+                                next_cmd.command_id,
+                            )
+                            self._start_adhoc_profiler(next_cmd.profiling_command, next_cmd.command_id)
+                            started = True
+                        elif self._can_be_paused():
+                            logger.info("Pausing current profiler for queued command %s (overlapping types)", next_cmd.command_id)
                             self.command_manager.pause_command(self.current_command.command_id)
                             self._stop_current_profiler()
+                            self._start_new_profiler(next_cmd.profiling_command, next_cmd.command_id)
+                            started = True
 
-                        logger.info("Starting profiler for queued command %s", next_cmd.command_id)
-                        self._start_new_profiler(next_cmd.profiling_command, next_cmd.command_id)
-                        # Mark as executed
-                        self.heartbeat_client.mark_command_executed(next_cmd.command_id)
-                        # Report command completion to the server
-                        try:
-                            self.heartbeat_client.send_command_completion(
-                                command_id=next_cmd.command_id,
-                                status="completed",
-                                execution_time=0,
-                                error_message=None,
-                                results_path=None
-                            )
-                        except Exception as e:
-                            logger.error(f"Failed to report command completion for {next_cmd.command_id}: {e}")
+                        if started:
+                            self.heartbeat_client.mark_command_executed(next_cmd.command_id)
+                            try:
+                                self.heartbeat_client.send_command_completion(
+                                    command_id=next_cmd.command_id,
+                                    status="completed",
+                                    execution_time=0,
+                                    error_message=None,
+                                    results_path=None
+                                )
+                            except Exception as e:
+                                logger.error(f"Failed to report command completion for {next_cmd.command_id}: {e}")
                     else:
                         logger.warning(f"Unknown command type: {next_cmd.command_type}")
-
-                        # Report completion for unknown command type
                         self.heartbeat_client.send_command_completion(
                             command_id=next_cmd.command_id,
                             status="failed",
@@ -476,10 +496,34 @@ class DynamicGProfilerManager:
             self.current_gprofiler = None
         
         if self.current_thread and self.current_thread.is_alive():
-            # No need to actively kill the thread, the self.current_gprofiler.stop() already handles it using events
             logger.info("Waiting for profiler thread to finish...")
             self.current_thread.join(timeout=10)
             self.current_thread = None
+        
+        self.current_profiler_types = set()
+    
+    def _stop_adhoc_profiler(self):
+        """Stop the parallel ad-hoc profiler if running"""
+        if self.adhoc_gprofiler:
+            logger.info("Stopping parallel ad-hoc profiler...")
+            try:
+                self.adhoc_gprofiler.stop()
+            except Exception as e:
+                logger.error(f"Error stopping ad-hoc profiler: {e}")
+            
+            try:
+                self.adhoc_gprofiler.maybe_cleanup_subprocesses()
+            except Exception as cleanup_error:
+                logger.info(f"Ad-hoc cleanup completed with minor errors: {cleanup_error}")
+            
+            self.adhoc_gprofiler = None
+        
+        if self.adhoc_thread and self.adhoc_thread.is_alive():
+            self.adhoc_thread.join(timeout=10)
+            self.adhoc_thread = None
+        
+        self.adhoc_command = None
+        self.adhoc_profiler_types = set()
     
     def _start_new_profiler(self, profiling_command: Dict[str, Any], command_id: str):
         """Start a new profiler with the given configuration"""
@@ -505,6 +549,7 @@ class DynamicGProfilerManager:
                 is_paused=False
             )
             self.current_command_start_time = datetime.datetime.now()
+            self.current_profiler_types = self._get_enabled_profiler_types(profiling_command)
             
             # Start profiler in a separate thread
             self.current_thread = threading.Thread(
@@ -534,6 +579,52 @@ class DynamicGProfilerManager:
             # Clear current command tracking on failure
             self.current_command = None
             self.current_command_start_time = None
+            self.current_profiler_types = set()
+    
+    def _start_adhoc_profiler(self, profiling_command: Dict[str, Any], command_id: str):
+        """Start an ad-hoc profiler in parallel with the current profiler (non-overlapping types only)"""
+        try:
+            from gprofiler.main import DEFAULT_PROFILING_DURATION
+            
+            new_args = self._create_profiler_args(profiling_command)
+            self.adhoc_gprofiler = self._create_gprofiler_instance(new_args)
+            
+            self.adhoc_command = ProfilingCommand(
+                command_id=command_id,
+                command_type="start",
+                profiling_command=profiling_command,
+                is_continuous=False,
+                timestamp=datetime.datetime.now(),
+                is_paused=False
+            )
+            self.adhoc_profiler_types = self._get_enabled_profiler_types(profiling_command)
+            
+            self.adhoc_thread = threading.Thread(
+                target=self._run_profiler,
+                args=(
+                    self.adhoc_gprofiler,
+                    False,
+                    getattr(new_args, "duration", DEFAULT_PROFILING_DURATION),
+                    command_id,
+                ),
+                daemon=True
+            )
+            self.adhoc_thread.start()
+            
+            logger.info(f"Started parallel ad-hoc profiler with command ID: {command_id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to start parallel ad-hoc profiler: {e}", exc_info=True)
+            self.heartbeat_client.send_command_completion(
+                command_id=command_id,
+                status="failed",
+                execution_time=0,
+                error_message=str(e),
+                results_path=None
+            )
+            self.adhoc_gprofiler = None
+            self.adhoc_command = None
+            self.adhoc_profiler_types = set()
     
     def _create_profiler_args(self, profiling_command: Dict[str, Any]) -> configargparse.Namespace:
         """Create modified args based on profiling command"""
@@ -848,41 +939,107 @@ class DynamicGProfilerManager:
             # Dequeue the command now that profiler has finished
             self.command_manager.dequeue_command(command_id)
             
-            # Clear the current profiler reference and command tracking
+            # Clear the profiler reference and command tracking for whichever slot this was
             if self.current_gprofiler == gprofiler:
                 self.current_gprofiler = None
                 self.current_command = None
                 self.current_command_start_time = None
+                self.current_profiler_types = set()
                 
-                # After profiler completes, check if there are more commands in queue
                 if self.command_manager.has_queued_commands() and not self.stop_event.is_set():
                     logger.info("Profiler completed, checking for next queued command...")
-                    # The heartbeat loop will pick up the next command
+            elif self.adhoc_gprofiler == gprofiler:
+                self.adhoc_gprofiler = None
+                self.adhoc_command = None
+                self.adhoc_profiler_types = set()
+                logger.info(f"Parallel ad-hoc profiler completed for command ID: {command_id}")
     
     def _can_be_paused(self) -> bool:
         """Check if the current profiler can be paused for queued commands"""
         return self.current_command is not None and self.current_command.is_continuous
     
+    def _can_run_in_parallel(self, next_cmd: ProfilingCommand) -> bool:
+        """Check if the next command can run in the parallel ad-hoc slot.
+        
+        Requires: adhoc slot free, next command is ad-hoc (not continuous),
+        and profiler types don't overlap with the currently running profiler.
+        """
+        if self.adhoc_gprofiler is not None:
+            return False
+        if next_cmd.is_continuous:
+            return False
+        next_types = self._get_enabled_profiler_types(next_cmd.profiling_command)
+        return not bool(next_types & self.current_profiler_types)
+    
     def _ready_for_next_command(self) -> bool:
         """Check if ready to execute the next command"""
-        return self.current_gprofiler is None or self._can_be_paused()
+        if self.current_gprofiler is None:
+            return True
+        if self._can_be_paused():
+            return True
+        if self.adhoc_gprofiler is None:
+            return True
+        return False
     
     def _should_process_next_command(self, cmd: ProfilingCommand) -> bool:
         """Determine if the next command should be processed based on current state"""
-        # If command is None, cannot process
         if cmd is None:
             return False
 
-        # If current command corresponds to the same command ID, do not re-process
         if self.current_command and self.current_command.command_id == cmd.command_id:
             return False
 
+        if self.adhoc_command and self.adhoc_command.command_id == cmd.command_id:
+            return False
+
         return self._ready_for_next_command()
+    
+    @staticmethod
+    def _get_enabled_profiler_types(profiling_command: Dict[str, Any]) -> set:
+        """Extract the set of enabled profiler type names from a profiling command.
+        
+        Maps profiler_configs keys to canonical type names. If no profiler_configs
+        are specified, assumes all profiler types are enabled (default behavior).
+        """
+        combined_config = profiling_command.get("combined_config", {})
+        profiler_configs = combined_config.get("profiler_configs", {})
+        
+        PROFILER_MAP = {
+            "perf": "perf",
+            "async_profiler": "java",
+            "pyperf": "python",
+            "pyspy": "python",
+            "phpspy": "php",
+            "rbspy": "ruby",
+            "dotnet_trace": "dotnet",
+            "nodejs_perf": "nodejs",
+        }
+        
+        if not profiler_configs:
+            return {"perf", "java", "python", "php", "ruby", "dotnet", "nodejs"}
+        
+        enabled = set()
+        for config_key, canonical_name in PROFILER_MAP.items():
+            config_value = profiler_configs.get(config_key)
+            if config_value is None:
+                enabled.add(canonical_name)
+                continue
+            
+            if isinstance(config_value, dict):
+                if config_value.get("enabled") is False or config_value.get("mode") == "disabled":
+                    continue
+            elif config_value == "disabled":
+                continue
+            
+            enabled.add(canonical_name)
+        
+        return enabled
 
     def stop(self):
         """Stop the heartbeat manager"""
         logger.info("Stopping heartbeat manager...")
         self.stop_event.set()
         self._stop_current_profiler()
+        self._stop_adhoc_profiler()
         self.command_manager.clear_queues()
         logger.info("Heartbeat manager stopped")
