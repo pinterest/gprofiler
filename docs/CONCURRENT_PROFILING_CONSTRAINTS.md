@@ -1,10 +1,10 @@
-# Concurrent Profiling Constraints: Why Continuous + Ad-hoc Cannot Run Simultaneously
+# Concurrent Profiling Constraints
 
-This document explains why gProfiler cannot run continuous and ad-hoc profiling at the same time, the technical constraints at each layer, and how the current queue-based design safely handles this.
+This document explains why gProfiler cannot run two profiling commands against the **same profiler types** simultaneously, how the queue-based design safely handles this, and how non-overlapping profiler types can run in parallel.
 
 ## Overview
 
-gProfiler enforces a **single-profiler-at-a-time** model. When both continuous and ad-hoc profiling are requested, the system uses a priority queue with pause/resume semantics rather than running them in parallel. This is not a design limitation that can be "fixed" -- it is the correct behavior dictated by fundamental constraints in the underlying profiling tools and kernel interfaces.
+Two profiling commands that enable the **same profiler type** (e.g., both enable perf, or both enable Java async-profiler) cannot run concurrently -- this is a hard constraint from the underlying kernel interfaces and runtime profilers. However, when two commands enable **completely different profiler types** (e.g., one runs only perf, the other runs only Java async-profiler), gProfiler can run them in parallel via a dedicated ad-hoc slot.
 
 ## Three Layers of Exclusivity
 
@@ -49,29 +49,39 @@ sudo netstat -xp | grep gprofiler
 
 **Could this be bypassed?** Technically yes, but it exists to prevent the exact resource conflicts described in Layer 3.
 
-### Layer 2: Single-Slot Manager Design
+### Layer 2: Two-Slot Manager Design (Primary + Parallel Ad-hoc)
 
-`DynamicGProfilerManager` in `gprofiler/heartbeat.py` maintains a single `current_gprofiler` reference and a single `current_thread`:
+`DynamicGProfilerManager` in `gprofiler/heartbeat.py` maintains a **primary slot** for the main profiling command and a **parallel ad-hoc slot** for non-overlapping ad-hoc commands:
 
 ```python
 class DynamicGProfilerManager:
     def __init__(self, base_args, heartbeat_client):
+        # Primary slot
         self.current_gprofiler: Optional['GProfiler'] = None
         self.current_thread: Optional[threading.Thread] = None
         self.current_command: Optional[ProfilingCommand] = None
+        self.current_profiler_types: set = set()
+        
+        # Parallel ad-hoc slot (non-overlapping types only)
+        self.adhoc_gprofiler: Optional['GProfiler'] = None
+        self.adhoc_thread: Optional[threading.Thread] = None
+        self.adhoc_command: Optional[ProfilingCommand] = None
+        self.adhoc_profiler_types: set = set()
 ```
 
-When an ad-hoc command arrives while continuous profiling is running, the manager **pauses** the continuous profiler (stops it), runs the ad-hoc command, and then the continuous profiler can be re-queued:
+When an ad-hoc command arrives while another profiler is running, the manager checks for profiler type overlap:
 
 ```python
-if next_cmd.command_type == "start":
-    if self._can_be_paused():
-        self.command_manager.pause_command(self.current_command.command_id)
-        self._stop_current_profiler()
-    self._start_new_profiler(next_cmd.profiling_command, next_cmd.command_id)
+if self.current_gprofiler is None:
+    self._start_new_profiler(...)            # Nothing running -> start
+elif self._can_run_in_parallel(next_cmd):
+    self._start_adhoc_profiler(...)          # Non-overlapping -> parallel
+elif self._can_be_paused():
+    self._stop_current_profiler()
+    self._start_new_profiler(...)            # Overlapping -> time-slice
 ```
 
-**Could this be refactored to hold two slots?** Yes, architecturally. But it would not help because of Layer 3.
+This is safe because each `GProfiler` instance creates its own `ProfilerState` with a separate `stop_event` and unique temporary directory. They share no mutable state.
 
 ### Layer 3: Profiler Internals (The Hard Constraint)
 
@@ -202,44 +212,88 @@ CONTINUOUS_QUEUE_MAX_SIZE = 1  # Only latest continuous config matters
 
 When a new continuous command arrives, the continuous queue is cleared first (only the latest continuous configuration is relevant). Ad-hoc commands accumulate and are processed FIFO between heartbeat intervals.
 
-## What Would Work (Theoretical Alternatives)
+## Execution Strategy: Parallel vs Time-Slicing
 
-If you need both continuous monitoring and ad-hoc profiling to overlap in time, these approaches are possible within the existing constraints:
+When a new ad-hoc command arrives while a profiler is already running, the `DynamicGProfilerManager` chooses the strategy automatically:
 
-### 1. Time-Slicing (Current Design)
+### Decision Flow
 
-The pause/resume mechanism already provides this. Continuous profiling is interrupted briefly for ad-hoc snapshots, then resumes. The gap is typically the duration of a single ad-hoc snapshot (30-120 seconds).
+```
+Ad-hoc command arrives
+         │
+         ▼
+  Nothing running?  ──yes──►  Start in primary slot
+         │ no
+         ▼
+  Profiler types     ──yes──►  Start in parallel ad-hoc slot
+  don't overlap?               (both run simultaneously)
+         │ no
+         ▼
+  Current is         ──yes──►  Pause current, run ad-hoc in primary,
+  continuous?                  continuous re-queued (time-slicing)
+         │ no
+         ▼
+  Wait for current ad-hoc to complete
+```
 
-**Trade-off:** Brief gap in continuous data during ad-hoc runs.
+### Profiler Type Extraction
 
-### 2. Non-Overlapping Profiler Types
+`_get_enabled_profiler_types()` extracts the set of enabled profiler types from a command's `profiler_configs`. The canonical types are: `perf`, `java`, `python`, `php`, `ruby`, `dotnet`, `nodejs`.
 
-If the continuous and ad-hoc commands targeted **different profiler types** (e.g., continuous runs perf-only for system overview, ad-hoc runs Java async-profiler only), they would not collide at Layer 3. This would require:
+If no `profiler_configs` are specified, all types are assumed enabled (the default). Overlap is a simple set intersection:
 
-- Profiler-type-aware command routing in `DynamicGProfilerManager`
-- Per-profiler-type locking instead of a single `current_gprofiler` slot
-- Careful validation that the two commands don't share any profiler types
+```python
+def _can_run_in_parallel(self, next_cmd):
+    if self.adhoc_gprofiler is not None:
+        return False        # Adhoc slot already occupied
+    if next_cmd.is_continuous:
+        return False        # Don't run two continuous in parallel
+    next_types = self._get_enabled_profiler_types(next_cmd.profiling_command)
+    return not bool(next_types & self.current_profiler_types)
+```
 
-**Trade-off:** Significant architectural complexity; only helps when profiler types don't overlap.
+### Example: Non-Overlapping (Parallel)
 
-### 3. Separate Hosts
+Continuous command enables: `{"perf": "enabled_restricted", "async_profiler": "disabled", "pyperf": "disabled", ...}`
+Ad-hoc command enables: `{"perf": "disabled", "async_profiler": {"enabled": true}, "pyperf": "disabled", ...}`
+
+- Continuous types: `{"perf"}`
+- Ad-hoc types: `{"java"}`
+- Intersection: `{}` (empty) -> **run in parallel**
+
+Both profilers run simultaneously in separate threads with separate `GProfiler` instances and separate `ProfilerState` objects.
+
+### Example: Overlapping (Time-Slice)
+
+Continuous command enables: `{"perf": "enabled_restricted", "async_profiler": {"enabled": true}}`
+Ad-hoc command enables: `{"perf": "enabled_aggressive", "async_profiler": {"enabled": true}}`
+
+- Continuous types: `{"perf", "java"}`
+- Ad-hoc types: `{"perf", "java"}`
+- Intersection: `{"perf", "java"}` -> **fallback to time-slicing**
+
+Continuous is paused, ad-hoc runs to completion, continuous can resume.
+
+### Example: Default Configs (Time-Slice)
+
+If either command has no `profiler_configs`, all profiler types are assumed enabled. Two commands with all defaults will always overlap -> time-slicing.
+
+## Other Approaches
+
+### Separate Hosts
 
 Run continuous profiling on one set of replicas and send ad-hoc commands to a different set. No resource contention since different hosts have independent PMU counters, ptrace namespaces, and JVM processes.
 
-**Trade-off:** Requires sufficient fleet size and intelligent routing in Performance Studio.
-
-### 4. Sampling Rate Reduction
+### Sampling Rate Adjustment
 
 Run a single continuous profiler at a lower sampling rate, and temporarily increase the rate for "ad-hoc" snapshots. This stays within the single-profiler constraint while approximating the effect of two profilers.
 
-**Trade-off:** Lower baseline continuous resolution; complexity in dynamic rate adjustment.
-
 ## Key Takeaways
 
-1. **The single-profiler-at-a-time model is correct.** It is not a limitation to be worked around, but a reflection of real hardware and kernel constraints.
+1. **Same profiler type = cannot run concurrently.** This is enforced by the kernel (ptrace, PMU counters) and runtimes (async-profiler, EventPipe).
 
-2. **The queue-based pause/resume design is the standard solution.** It gives ad-hoc commands higher priority while preserving continuous profiling continuity.
+2. **Different profiler types = can run in parallel.** The manager detects non-overlapping types and uses a dedicated ad-hoc slot.
 
-3. **True parallel profiling of the same processes is physically impossible** with the current generation of profiling tools (async-profiler, perf, ptrace-based profilers).
+3. **Overlapping types fall back to time-slicing.** Continuous is paused for ad-hoc, then resumed. This is safe and correct.
 
-4. **The system-wide mutex (`grab_gprofiler_mutex`) exists as a safety net** to prevent accidental concurrent instances from causing the exact conflicts described above.
+4. **The system-wide mutex (`grab_gprofiler_mutex`) prevents two gProfiler processes.** Within a single process, the `DynamicGProfilerManager` handles parallelism via the two-slot design.
