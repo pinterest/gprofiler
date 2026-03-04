@@ -263,12 +263,11 @@ class DynamicGProfilerManager:
     """Orchestrates profiler lifecycle based on commands received via heartbeat.
 
     Uses two slots:
-    * **primary** (`ContinuousProfilerSlot`) — runs the main continuous or
-      single-run profiler.
-    * **adhoc** (`AdhocProfilerSlot`) — runs an ad-hoc profiler *in parallel*
-      when its profiler types do not overlap with the primary slot.  If there
-      is overlap, the manager falls back to time-slicing (pause primary, run
-      ad-hoc, resume primary).
+    * **continuous** (`ContinuousProfilerSlot`) — runs the long-running
+      continuous profiler.
+    * **adhoc** (`AdhocProfilerSlot`) — runs ad-hoc profilers, either in
+      parallel (when profiler types don't overlap with the continuous slot)
+      or after time-slicing (pause continuous, run ad-hoc, resume continuous).
     """
 
     def __init__(self, base_args: configargparse.Namespace, heartbeat_client: HeartbeatClient):
@@ -277,7 +276,7 @@ class DynamicGProfilerManager:
         self.heartbeat_interval = 30
         self.command_manager = CommandManager()
 
-        self.primary = ContinuousProfilerSlot(base_args, heartbeat_client, self.command_manager, self.stop_event)
+        self.continuous = ContinuousProfilerSlot(base_args, heartbeat_client, self.command_manager, self.stop_event)
         self.adhoc = AdhocProfilerSlot(base_args, heartbeat_client, self.command_manager, self.stop_event)
 
     # --- Main loop ---
@@ -334,7 +333,7 @@ class DynamicGProfilerManager:
     def _process_command(self, cmd: ProfilingCommand) -> None:
         if cmd.command_type == "stop":
             logger.info(f"Processing STOP command {cmd.command_id}")
-            self.primary.stop()
+            self.continuous.stop()
             self.adhoc.stop()
             self.command_manager.clear_queues()
             self.heartbeat_client.mark_command_executed(cmd.command_id)
@@ -355,23 +354,43 @@ class DynamicGProfilerManager:
 
         started = False
 
-        if not self.primary.is_running():
-            logger.info("Starting profiler for command %s", cmd.command_id)
-            self.primary.start(cmd.profiling_command, cmd.command_id)
-            started = True
-        elif self.adhoc.can_run(cmd, self.primary.profiler_types):
-            logger.info(
-                "Starting parallel ad-hoc profiler for command %s (non-overlapping profiler types)",
-                cmd.command_id,
-            )
-            self.adhoc.start(cmd.profiling_command, cmd.command_id)
-            started = True
-        elif self.primary.can_be_paused():
-            logger.info("Pausing current profiler for command %s (overlapping types)", cmd.command_id)
-            self.command_manager.pause_command(self.primary.command.command_id)
-            self.primary.stop()
-            self.primary.start(cmd.profiling_command, cmd.command_id)
-            started = True
+        if cmd.is_continuous:
+            # Continuous commands always target the primary slot
+            if not self.continuous.is_running():
+                logger.info("Starting continuous profiler for command %s", cmd.command_id)
+                self.continuous.start(cmd.profiling_command, cmd.command_id)
+                started = True
+            elif self.continuous.can_be_paused():
+                logger.info(
+                    "Replacing current continuous profiler with command %s", cmd.command_id
+                )
+                self.command_manager.pause_command(self.continuous.command.command_id)
+                self.continuous.stop()
+                self.continuous.start(cmd.profiling_command, cmd.command_id)
+                started = True
+        else:
+            # Ad-hoc commands: prefer parallel slot, fall back to time-slice or primary
+            if not self.continuous.is_running():
+                # Nothing running at all — use the adhoc slot directly
+                logger.info("Starting ad-hoc profiler for command %s (no active profiler)", cmd.command_id)
+                self.adhoc.start(cmd.profiling_command, cmd.command_id)
+                started = True
+            elif self.adhoc.can_run(cmd, self.continuous.profiler_types):
+                logger.info(
+                    "Starting parallel ad-hoc profiler for command %s (non-overlapping profiler types)",
+                    cmd.command_id,
+                )
+                self.adhoc.start(cmd.profiling_command, cmd.command_id)
+                started = True
+            elif self.continuous.can_be_paused():
+                logger.info(
+                    "Pausing continuous profiler for ad-hoc command %s (overlapping types)",
+                    cmd.command_id,
+                )
+                self.command_manager.pause_command(self.continuous.command.command_id)
+                self.continuous.stop()
+                self.adhoc.start(cmd.profiling_command, cmd.command_id)
+                started = True
 
         if started:
             self.heartbeat_client.mark_command_executed(cmd.command_id)
@@ -385,32 +404,33 @@ class DynamicGProfilerManager:
     # --- Decision helpers ---
 
     def _should_process(self, cmd: Optional[ProfilingCommand]) -> bool:
-        # If no command, nothing to do
         if cmd is None:
             return False
 
-        # If command already executing, skip (idempotency)
-        if self.primary.is_running_command(cmd.command_id):
+        if self.continuous.is_running_command(cmd.command_id):
             return False
         if self.adhoc.is_running_command(cmd.command_id):
             return False
 
-        # Actual decision logic:
-        if not self.primary.is_running():
-            return True
-        if self.adhoc.can_run(cmd, self.primary.profiler_types) and not self.adhoc.is_running():
-            return True
-        if self.primary.can_be_paused():
-            return True
-
-        return False
+        if cmd.is_continuous:
+            # Continuous → needs primary slot (free or pausable)
+            return not self.continuous.is_running() or self.continuous.can_be_paused()
+        else:
+            # Ad-hoc → needs adhoc slot (free, or primary pausable for time-slice)
+            if not self.continuous.is_running():
+                return True
+            if self.adhoc.can_run(cmd, self.continuous.profiler_types):
+                return True
+            if self.continuous.can_be_paused():
+                return True
+            return False
 
     # --- Lifecycle ---
 
     def stop(self) -> None:
         logger.info("Stopping heartbeat manager...")
         self.stop_event.set()
-        self.primary.stop()
+        self.continuous.stop()
         self.adhoc.stop()
         self.command_manager.clear_queues()
         logger.info("Heartbeat manager stopped")
