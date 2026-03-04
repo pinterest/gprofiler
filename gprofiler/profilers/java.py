@@ -20,7 +20,6 @@ import os
 import re
 import secrets
 import signal
-import time
 from enum import Enum
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -861,8 +860,8 @@ class AsyncProfiledProcess:
             dest="java_async_profiler_mode",
             choices=SUPPORTED_AP_MODES + ["auto"],
             default="auto",
-            help="Select async-profiler's mode: 'cpu' (CPU-only profiling), 'wall' (wall time including I/O waits),"
-            " 'itimer' (SIGPROF fallback), 'alloc' (allocation profiling), or 'auto' (select 'cpu' if perf_events are available; otherwise 'itimer'). Defaults to '%(default)s'.",
+            help="Select async-profiler's mode: 'cpu' (CPU-only), 'wall' (wall time including I/O), "
+            "'itimer' (SIGPROF fallback), 'alloc' (allocation), or 'auto'. Defaults to '%(default)s'.",
         ),
         ProfilerArgument(
             "--java-async-profiler-safemode",
@@ -870,10 +869,8 @@ class AsyncProfiledProcess:
             default=JAVA_ASYNC_PROFILER_DEFAULT_SAFEMODE,
             type=integer_range(0, 0x40),
             metavar="[0-63]",
-            help="Controls the 'safemode' parameter passed to async-profiler. This is parameter denotes multiple"
-            " bits that describe different stack recovery techniques which async-profiler uses. In a future release,"
-            " these optinos will be migrated to the 'features' parameter."
-            " Defaults to '%(default)s'.",
+            help="Controls the 'safemode' parameter passed to async-profiler (multiple bits for stack recovery). "
+            "Defaults to '%(default)s'.",
         ),
         ProfilerArgument(
             "--java-async-profiler-features",
@@ -1105,8 +1102,6 @@ class JavaProfiler(SpawningProcessProfilerBase):
     def _profiling_skipped_profile(self, reason: str, comm: str) -> ProfileData:
         return ProfileData(self._profiling_error_stack("skipped", reason, comm), None, None, None)
 
-
-
     def _is_jvm_type_supported(self, java_version_cmd_output: str) -> bool:
         return all(exclusion not in java_version_cmd_output for exclusion in self.JDK_EXCLUSIONS)
 
@@ -1239,7 +1234,7 @@ class JavaProfiler(SpawningProcessProfilerBase):
     def _profile_process(self, process: Process, duration: int, spawned: bool) -> ProfileData:
         # Use full duration since young processes are now skipped entirely in _should_skip_process
         actual_duration = duration
-        
+
         comm = process_comm(process)
         exe = process_exe(process)
         java_version_output: Optional[str] = get_java_version_logged(process, self._profiler_state.stop_event)
@@ -1271,11 +1266,14 @@ class JavaProfiler(SpawningProcessProfilerBase):
             self._profiled_pids.add(process.pid)
 
         logger.info(f"Profiling{' spawned' if spawned else ''} process {process.pid} with async-profiler")
-        
+
         if actual_duration != duration:
             process_age = self._get_process_age(process)
-            logger.debug(f"Adjusted async-profiler duration: {actual_duration}s (original: {duration}s) for young process {process.pid} (age: {process_age:.1f}s)")
-        
+            logger.debug(
+                f"Adjusted async-profiler duration: {actual_duration}s (original: {duration}s) "
+                f"for young process {process.pid} (age: {process_age:.1f}s)"
+            )
+
         container_name = self._profiler_state.get_container_name(process.pid)
         app_metadata = self._metadata.get_metadata(process)
         appid = application_identifiers.get_java_app_id(process, self._collect_spark_app_name)
@@ -1400,19 +1398,24 @@ class JavaProfiler(SpawningProcessProfilerBase):
         return pgrep_maps(DETECTED_JAVA_PROCESSES_REGEX)
 
     def _should_profile_process(self, process: Process) -> bool:
-        return search_proc_maps(process, DETECTED_JAVA_PROCESSES_REGEX) is not None and not self._should_skip_process(process)
-    
+        return search_proc_maps(process, DETECTED_JAVA_PROCESSES_REGEX) is not None and not self._should_skip_process(
+            process
+        )
+
     def _should_skip_process(self, process: Process) -> bool:
         # Skip short-lived processes - if a process is younger than min_duration,
         # it's likely to exit before profiling completes
         try:
             process_age = self._get_process_age(process)
             if process_age < self._min_duration:
-                logger.debug(f"Skipping young Java process {process.pid} (age: {process_age:.1f}s < min_duration: {self._min_duration}s)")
+                logger.debug(
+                    f"Skipping young Java process {process.pid} "
+                    f"(age: {process_age:.1f}s < min_duration: {self._min_duration}s)"
+                )
                 return True
         except Exception as e:
             logger.debug(f"Could not determine age for Java process {process.pid}: {e}")
-        
+
         return False
 
     def start(self) -> None:

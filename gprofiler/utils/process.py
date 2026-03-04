@@ -18,6 +18,8 @@ import re
 from typing import Callable, Iterator, Match, Optional
 
 from granulate_utils.linux.process import is_process_running, read_proc_file
+
+__all__ = ["is_process_running", "read_proc_file", "search_proc_maps", "process_comm", "search_for_process"]
 from psutil import AccessDenied, NoSuchProcess, Process, process_iter
 
 from gprofiler.platform import is_windows

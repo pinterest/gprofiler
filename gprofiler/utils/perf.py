@@ -27,7 +27,7 @@ from gprofiler.exceptions import CalledProcessError, PerfNoSupportedEvent
 from gprofiler.gprofiler_types import ProcessToStackSampleCounters
 from gprofiler.log import get_logger_adapter
 from gprofiler.utils import run_process
-from gprofiler.utils.perf_process import PerfProcess, perf_path, _is_pid_related_error
+from gprofiler.utils.perf_process import PerfProcess, _is_pid_related_error, perf_path
 
 logger = get_logger_adapter(__name__)
 
@@ -69,8 +69,11 @@ class SupportedPerfEvent(Enum):
 
 
 def discover_appropriate_perf_event(
-    tmp_dir: Path, stop_event: Event, pids: Optional[List[Process]] = None,
-    use_cgroups: bool = False, max_cgroups: int = 50
+    tmp_dir: Path,
+    stop_event: Event,
+    pids: Optional[List[Process]] = None,
+    use_cgroups: bool = False,
+    max_cgroups: int = 50,
 ) -> SupportedPerfEvent:
     """
     Get the appropriate event should be used by `perf record`.
@@ -91,7 +94,7 @@ def discover_appropriate_perf_event(
     segfault_count = 0
     pid_failure_count = 0
     total_events = len(SupportedPerfEvent)
-    
+
     for event in SupportedPerfEvent:
         try:
             current_extra_args = event.perf_extra_args() + [
@@ -104,7 +107,7 @@ def discover_appropriate_perf_event(
             # so we use system-wide profiling for discovery regardless of the final mode
             discovery_pids = None if use_cgroups else pids
             discovery_use_cgroups = False  # Always use system-wide for discovery
-            
+
             perf_process = PerfProcess(
                 frequency=11,
                 stop_event=stop_event,
@@ -132,16 +135,16 @@ def discover_appropriate_perf_event(
             # Check if this was a segfault in perf script, log it appropriately
             exc_name = type(e).__name__
             error_message = str(e)
-            
-            # Check if this looks like a segfault-related error 
-            if "CalledProcessError" in exc_name and hasattr(e, 'returncode') and getattr(e, 'returncode', 0) < 0:
+
+            # Check if this looks like a segfault-related error
+            if "CalledProcessError" in exc_name and hasattr(e, "returncode") and getattr(e, "returncode", 0) < 0:
                 segfault_count += 1
                 logger.warning(
                     f"Perf event {event.name} failed with signal {-getattr(e, 'returncode', 0)}, "
                     f"likely segfault. This is known to happen on some GPU machines.",
                     perf_event=event.name,
                 )
-            # Check if this is a PID-related failure  
+            # Check if this is a PID-related failure
             elif pids is not None and _is_pid_related_error(error_message):
                 pid_failure_count += 1
                 logger.warning(
@@ -155,7 +158,7 @@ def discover_appropriate_perf_event(
                     f"Failed to collect samples for perf event ({exc_name})",
                     exc_info=True,
                     perf_event=event.name,
-                    )
+                )
         finally:
             perf_process.stop()
 
@@ -173,7 +176,7 @@ def discover_appropriate_perf_event(
             f"Target processes may have exited during discovery. "
             f"Consider using system-wide profiling or '--perf-mode disabled' to avoid using perf."
         )
-    
+
     raise PerfNoSupportedEvent
 
 

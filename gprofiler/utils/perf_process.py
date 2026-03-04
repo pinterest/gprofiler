@@ -22,10 +22,9 @@ from gprofiler.utils import (
 )
 from gprofiler.utils.cgroup_utils import (
     get_top_cgroup_names_for_perf,
+    is_cgroup_available,
     validate_perf_cgroup_support,
-    is_cgroup_available
 )
-
 
 logger = get_logger_adapter(__name__)
 
@@ -37,7 +36,7 @@ def perf_path() -> str:
 def _is_pid_related_error(error_message: str) -> bool:
     """
     Check if an error message indicates a PID-related failure.
-    
+
     :param error_message: The error message to check
     :return: True if the error appears to be PID-related
     """
@@ -45,14 +44,14 @@ def _is_pid_related_error(error_message: str) -> bool:
     pid_error_patterns = [
         "no such process",
         "invalid pid",
-        "process not found", 
+        "process not found",
         "process exited",
         "operation not permitted",
         "permission denied",
         "attach failed",
-        "failed to attach"
+        "failed to attach",
     ]
-    
+
     return any(pattern in error_lower for pattern in pid_error_patterns)
 
 
@@ -92,7 +91,7 @@ class PerfProcess:
         self._perf_events = perf_events if perf_events else ["cycles"]
         self._pid_args = []
         self._cgroup_args = []
-        
+
         # Determine profiling strategy
         if use_cgroups and is_cgroup_available() and validate_perf_cgroup_support():
             # Use cgroup-based profiling for better reliability
@@ -102,29 +101,40 @@ class PerfProcess:
                     # Cgroup monitoring requires system-wide mode (-a)
                     self._pid_args.append("-a")
                     self._cgroup_args.extend(["-G", ",".join(top_cgroups)])
-                    logger.info(f"Using cgroup-based profiling with {len(top_cgroups)} top cgroups: {top_cgroups[:3]}{'...' if len(top_cgroups) > 3 else ''}")
+                    logger.info(
+                        f"Using cgroup-based profiling with {len(top_cgroups)} top cgroups: "
+                        f"{top_cgroups[:3]}{'...' if len(top_cgroups) > 3 else ''}"
+                    )
                 else:
                     # Never fall back to system-wide profiling when cgroups are explicitly requested
                     from gprofiler.exceptions import PerfNoSupportedEvent
+
                     if max_docker_containers > 0:
-                        logger.error(f"No Docker containers found for profiling despite --perf-max-docker-containers={max_docker_containers}. "
-                                   "This could indicate cgroup v2 compatibility issues or no running containers. "
-                                   "Perf profiler will be disabled to prevent system-wide profiling.")
+                        logger.error(
+                            f"No Docker containers found despite --perf-max-docker-containers={max_docker_containers}. "
+                            "Cgroup v2 or container issues. Perf profiler will be disabled."
+                        )
                         raise PerfNoSupportedEvent("Docker container profiling requested but no containers available")
                     elif max_cgroups > 0:
-                        logger.error(f"No cgroups found for profiling despite --perf-max-cgroups={max_cgroups}. "
-                                   "This could indicate cgroup compatibility issues or no active cgroups. "
-                                   "Perf profiler will be disabled to prevent system-wide profiling.")
+                        logger.error(
+                            f"No cgroups found despite --perf-max-cgroups={max_cgroups}. "
+                            "Cgroup compatibility or no active cgroups. Perf profiler will be disabled."
+                        )
                         raise PerfNoSupportedEvent("Cgroup profiling requested but no cgroups available")
                     else:
-                        logger.error("Cgroup profiling was requested (--perf-use-cgroups) but no specific limits were set. "
-                                   "Perf profiler will be disabled to prevent system-wide profiling.")
+                        logger.error(
+                            "Cgroup profiling was requested (--perf-use-cgroups) but no specific limits were set. "
+                            "Perf profiler will be disabled to prevent system-wide profiling."
+                        )
                         raise PerfNoSupportedEvent("Cgroup profiling requested but no containers or cgroups specified")
             except Exception as e:
                 # Never fall back to system-wide profiling when cgroups are explicitly requested
                 from gprofiler.exceptions import PerfNoSupportedEvent
-                logger.error(f"Failed to get cgroups for profiling: {e}. "
-                           "Perf profiler will be disabled to prevent system-wide profiling.")
+
+                logger.error(
+                    f"Failed to get cgroups for profiling: {e}. "
+                    "Perf profiler will be disabled to prevent system-wide profiling."
+                )
                 raise PerfNoSupportedEvent(f"Cgroup profiling failed: {e}")
         elif processes_to_profile is not None:
             # Traditional PID-based profiling
@@ -133,7 +143,7 @@ class PerfProcess:
         else:
             # System-wide profiling
             self._pid_args.append("-a")
-            
+
         self._extra_args = extra_args
         self._switch_timeout_s = switch_timeout_s
         self._process: Optional[Popen] = None
@@ -154,7 +164,7 @@ class PerfProcess:
                 if arg == "-G" and i + 1 < len(self._cgroup_args):
                     cgroup_arg = self._cgroup_args[i + 1]
                     break
-            
+
             if cgroup_arg:
                 num_cgroups = len(cgroup_arg.split(","))
                 # Add events for each cgroup
@@ -173,7 +183,7 @@ class PerfProcess:
             extra_args = []
             for event in self._perf_events:
                 extra_args.extend(["-e", event])
-            
+
         return (
             [
                 perf_path(),
@@ -202,10 +212,10 @@ class PerfProcess:
         logger.info(f"Starting {self._log_name}")
         # remove old files, should they exist from previous runs
         remove_path(self._output_path, missing_ok=True)
-        
+
         perf_cmd = self._get_perf_cmd()
         logger.debug(f"{self._log_name} command: {' '.join(perf_cmd)}")
-        
+
         try:
             process = start_process(perf_cmd)
         except CalledProcessError as e:
@@ -220,7 +230,7 @@ class PerfProcess:
             else:
                 logger.error(f"{self._log_name} failed to start: {e}")
             raise
-        
+
         try:
             wait_event(self._DUMP_TIMEOUT_S, self._stop_event, lambda: os.path.exists(self._output_path))
             self.start_time = time.monotonic()

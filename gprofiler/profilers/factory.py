@@ -56,8 +56,8 @@ def get_profilers(
             except PerfNoSupportedEvent:
                 # Handle perf-specific failures gracefully - continue with other profilers
                 logger.warning(
-                    f"Perf profiler initialization failed, continuing with other profilers. "
-                    f"Run with --no-perf to disable this warning."
+                    "Perf profiler initialization failed, continuing with other profilers. "
+                    "Run with --no-perf to disable this warning."
                 )
                 continue
             except Exception:

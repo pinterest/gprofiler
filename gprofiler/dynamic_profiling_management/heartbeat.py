@@ -18,7 +18,7 @@ import datetime
 import logging
 import socket
 import threading
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional, cast
 
 import configargparse
 import requests
@@ -27,11 +27,7 @@ from gprofiler.dynamic_profiling_management.ad_hoc import AdhocProfilerSlot
 from gprofiler.dynamic_profiling_management.command_control import CommandManager, ProfilingCommand
 from gprofiler.dynamic_profiling_management.continuous import ContinuousProfilerSlot
 from gprofiler.metadata.system_metadata import get_hostname
-from gprofiler.metrics_publisher import (
-    MetricsPublisher,
-    RESPONSE_TYPE_SUCCESS,
-    RESPONSE_TYPE_FAILURE,
-)
+from gprofiler.metrics_publisher import RESPONSE_TYPE_FAILURE, RESPONSE_TYPE_SUCCESS, MetricsPublisher
 from gprofiler.profilers.pmu_manager import get_pmu_manager
 
 logger = logging.getLogger(__name__)
@@ -148,7 +144,7 @@ class HeartbeatClient:
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
                 s.connect(("8.8.8.8", 80))
-                return s.getsockname()[0]
+                return str(s.getsockname()[0])
         except Exception:
             return "127.0.0.1"
 
@@ -172,30 +168,34 @@ class HeartbeatClient:
             response = self.session.post(url, json=heartbeat_data, timeout=30)
 
             if response.status_code == 200:
-                MetricsPublisher.get_instance().send_sli_metric(
-                    response_type=RESPONSE_TYPE_SUCCESS, method_name="send_heartbeat"
-                )
+                _mp = MetricsPublisher.get_instance()
+                if _mp is not None:
+                    _mp.send_sli_metric(response_type=RESPONSE_TYPE_SUCCESS, method_name="send_heartbeat")
                 result = response.json()
-                if result.get("success") and result.get("profiling_command"):
+                if isinstance(result, dict) and result.get("success") and result.get("profiling_command"):
                     logger.info(f"Received profiling command from server: {result.get('command_id')}")
-                    return result
+                    return cast(Dict[str, Any], result)
                 logger.debug("Heartbeat successful, no pending commands")
                 return None
             else:
                 logger.warning(f"Heartbeat failed with status {response.status_code}: {response.text}")
-                MetricsPublisher.get_instance().send_sli_metric(
-                    response_type=RESPONSE_TYPE_FAILURE,
-                    method_name="send_heartbeat",
-                    extra_tags={"status_code": response.status_code},
-                )
+                _mp = MetricsPublisher.get_instance()
+                if _mp is not None:
+                    _mp.send_sli_metric(
+                        response_type=RESPONSE_TYPE_FAILURE,
+                        method_name="send_heartbeat",
+                        extra_tags={"status_code": response.status_code},
+                    )
                 return None
         except Exception as e:
             logger.error(f"Failed to send heartbeat: {e}")
-            MetricsPublisher.get_instance().send_sli_metric(
-                response_type=RESPONSE_TYPE_FAILURE,
-                method_name="send_heartbeat",
-                extra_tags={"error": str(e)},
-            )
+            _mp = MetricsPublisher.get_instance()
+            if _mp is not None:
+                _mp.send_sli_metric(
+                    response_type=RESPONSE_TYPE_FAILURE,
+                    method_name="send_heartbeat",
+                    extra_tags={"error": str(e)},
+                )
             return None
 
     def send_command_completion(
@@ -295,7 +295,7 @@ class DynamicGProfilerManager:
 
                 # Step 3: Process next queued command
                 next_cmd = self.command_manager.get_next_command()
-                if self._should_process(next_cmd):
+                if next_cmd is not None and self._should_process(next_cmd):
                     self._process_command(next_cmd)
 
                 self.stop_event.wait(self.heartbeat_interval)
@@ -360,10 +360,8 @@ class DynamicGProfilerManager:
                 logger.info("Starting continuous profiler for command %s", cmd.command_id)
                 self.continuous.start(cmd.profiling_command, cmd.command_id)
                 started = True
-            elif self.continuous.can_be_paused():
-                logger.info(
-                    "Replacing current continuous profiler with command %s", cmd.command_id
-                )
+            elif self.continuous.can_be_paused() and self.continuous.command is not None:
+                logger.info("Replacing current continuous profiler with command %s", cmd.command_id)
                 self.command_manager.pause_command(self.continuous.command.command_id)
                 self.continuous.stop()
                 self.continuous.start(cmd.profiling_command, cmd.command_id)
@@ -386,7 +384,9 @@ class DynamicGProfilerManager:
                 )
                 self.adhoc.start(cmd.profiling_command, cmd.command_id)
                 started = True
-            elif self.continuous.can_be_paused() and not self.adhoc.is_running():
+            elif (
+                self.continuous.can_be_paused() and not self.adhoc.is_running() and self.continuous.command is not None
+            ):
                 # Time-slice path: pause continuous, run ad-hoc, continuous re-queued
                 logger.info(
                     "Pausing continuous profiler for ad-hoc command %s (overlapping types)",
