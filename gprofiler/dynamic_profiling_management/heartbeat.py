@@ -369,20 +369,25 @@ class DynamicGProfilerManager:
                 self.continuous.start(cmd.profiling_command, cmd.command_id)
                 started = True
         else:
-            # Ad-hoc commands: prefer parallel slot, fall back to time-slice or primary
+            # Ad-hoc commands: always use ad-hoc slot if possible (parallel or time-slice)
             if not self.continuous.is_running():
-                # Nothing running at all — use the adhoc slot directly
-                logger.info("Starting ad-hoc profiler for command %s (no active profiler)", cmd.command_id)
-                self.adhoc.start(cmd.profiling_command, cmd.command_id)
-                started = True
+                # Nothing running at all — use the adhoc slot (only if free)
+                if not self.adhoc.is_running():
+                    logger.info("Starting ad-hoc profiler for command %s (no active profiler)", cmd.command_id)
+                    self.adhoc.start(cmd.profiling_command, cmd.command_id)
+                    started = True
+                else:
+                    logger.debug("Ad-hoc slot busy; deferring command %s", cmd.command_id)
             elif self.adhoc.can_run(cmd, self.continuous.profiler_types):
+                # Parallel path: can_run() already verified adhoc slot is free
                 logger.info(
                     "Starting parallel ad-hoc profiler for command %s (non-overlapping profiler types)",
                     cmd.command_id,
                 )
                 self.adhoc.start(cmd.profiling_command, cmd.command_id)
                 started = True
-            elif self.continuous.can_be_paused():
+            elif self.continuous.can_be_paused() and not self.adhoc.is_running():
+                # Time-slice path: pause continuous, run ad-hoc, continuous re-queued
                 logger.info(
                     "Pausing continuous profiler for ad-hoc command %s (overlapping types)",
                     cmd.command_id,
@@ -418,10 +423,13 @@ class DynamicGProfilerManager:
         else:
             # Ad-hoc → needs adhoc slot (free, or primary pausable for time-slice)
             if not self.continuous.is_running():
-                return True
+                # Nothing running — adhoc slot must be free too
+                return not self.adhoc.is_running()
             if self.adhoc.can_run(cmd, self.continuous.profiler_types):
+                # Parallel path: can_run() already checks adhoc slot is free
                 return True
-            if self.continuous.can_be_paused():
+            if self.continuous.can_be_paused() and not self.adhoc.is_running():
+                # Time-slice path: need adhoc slot free to accept the paused work
                 return True
             return False
 
