@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 class MemoryManager:
     """Centralized memory management for gProfiler with configurable options."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize memory manager."""
         self._cleanup_count = 0
 

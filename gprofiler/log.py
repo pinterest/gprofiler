@@ -146,7 +146,7 @@ class _ExtraFormatter(logging.Formatter):
 class _UTCFormatter(logging.Formatter):
     # Patch formatTime to be GMT (UTC) for all formatters,
     # see https://docs.python.org/3/library/logging.html?highlight=formattime#logging.Formatter.formatTime
-    converter = time.gmtime
+    converter = time.gmtime  # type: ignore[assignment]
 
 
 class GProfilerFormatter(_ExtraFormatter, _UTCFormatter):

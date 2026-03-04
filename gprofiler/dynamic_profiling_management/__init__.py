@@ -3,7 +3,7 @@ import logging
 import os
 import threading
 from pathlib import Path
-from typing import Dict, Any, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import configargparse
 
@@ -236,7 +236,7 @@ def create_gprofiler_instance(args: configargparse.Namespace) -> Optional["GProf
         perfspect_path = Path(args.tool_perfspect_path)
 
     return GProfiler(
-        output_dir=getattr(args, "output_dir", None),
+        output_dir=getattr(args, "output_dir", None) or "",
         flamegraph=args.flamegraph,
         rotating_output=getattr(args, "rotating_output", False),
         rootless=getattr(args, "rootless", False),
@@ -274,10 +274,10 @@ class ProfilerSlotBase:
     def __init__(
         self,
         base_args: configargparse.Namespace,
-        heartbeat_client,
+        heartbeat_client: Any,
         command_manager: "CommandManager",
         stop_event: threading.Event,
-    ):
+    ) -> None:
         self._base_args = base_args
         self._heartbeat_client = heartbeat_client
         self._command_manager = command_manager

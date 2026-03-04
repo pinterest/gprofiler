@@ -13,13 +13,12 @@ Run this to see the evidence that led to gprofiler's memory leak fix.
 import gc
 import os
 import subprocess
-import time
 from typing import List
 
 import psutil
 
 
-def demonstrate_gc_limitation():
+def demonstrate_gc_limitation() -> None:
     """Demonstrate that Python GC cannot see OS file descriptors."""
     print("🔬 PROOF: Python GC Cannot See OS File Descriptors")
     print("=" * 60)
@@ -30,17 +29,18 @@ def demonstrate_gc_limitation():
 
     # Create multiple subprocesses with pipes
     processes = []
-    print(f"\n📦 Creating 5 subprocesses with pipes...")
+    print("\n📦 Creating 5 subprocesses with pipes...")
 
     for i in range(5):
         process = subprocess.Popen(
             ["echo", f"Process {i}"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE
         )
         processes.append(process)
+        assert process.stdout is not None
         print(f"   Process {i}: PID {process.pid}, stdout FD {process.stdout.fileno()}")
 
     # Wait for all processes to complete
-    print(f"\n⏳ Waiting for all processes to complete...")
+    print("\n⏳ Waiting for all processes to complete...")
     for i, process in enumerate(processes):
         process.wait()
         print(f"   Process {i}: exit code {process.returncode} (DEAD)")
@@ -51,7 +51,7 @@ def demonstrate_gc_limitation():
     print(f"   Increase: +{after_death_fds - initial_fds} FDs")
 
     # Force garbage collection
-    print(f"\n🗑️  Forcing garbage collection...")
+    print("\n🗑️  Forcing garbage collection...")
     collected_objects = 0
     for generation in range(3):
         collected = gc.collect()
@@ -66,23 +66,24 @@ def demonstrate_gc_limitation():
     print(f"   Difference from after death: {after_gc_fds - after_death_fds}")
 
     # Show that Python objects still exist but processes are dead
-    print(f"\n🔍 Evidence of the problem:")
+    print("\n🔍 Evidence of the problem:")
     for i, process in enumerate(processes):
+        stdout, stderr, stdin = process.stdout, process.stderr, process.stdin
         print(f"   Process {i}:")
         print(f"     - Python object exists: {process is not None}")
         print(f"     - Process is dead: {process.poll() is not None}")
-        print(f"     - stdout FD open: {not process.stdout.closed}")
-        print(f"     - stderr FD open: {not process.stderr.closed}")
-        print(f"     - stdin FD open: {not process.stdin.closed}")
+        print(f"     - stdout FD open: {stdout is not None and not stdout.closed}")
+        print(f"     - stderr FD open: {stderr is not None and not stderr.closed}")
+        print(f"     - stdin FD open: {stdin is not None and not stdin.closed}")
 
-    print(f"\n❌ PROBLEM IDENTIFIED:")
-    print(f"   - All processes are DEAD")
+    print("\n❌ PROBLEM IDENTIFIED:")
+    print("   - All processes are DEAD")
     print(f"   - But {after_gc_fds - initial_fds} file descriptors still OPEN")
     print(f"   - Python GC collected {collected_objects} objects but FDs remain")
-    print(f"   - This is the ROOT CAUSE of gprofiler's memory leak!")
+    print("   - This is the ROOT CAUSE of gprofiler's memory leak!")
 
     # Now demonstrate the fix
-    print(f"\n✅ THE FIX: Manual cleanup")
+    print("\n✅ THE FIX: Manual cleanup")
     resources_freed = 0
 
     for i, process in enumerate(processes):
@@ -106,19 +107,19 @@ def demonstrate_gc_limitation():
     print(f"   Resources manually freed: {resources_freed}")
     print(f"   Final file descriptors: {final_fds}")
     print(f"   Net change from initial: {final_fds - initial_fds}")
-    print(f"   ✅ OS resources properly cleaned up!")
+    print("   ✅ OS resources properly cleaned up!")
 
 
-def simulate_gprofiler_leak():
+def simulate_gprofiler_leak() -> None:
     """Simulate the leak pattern that gprofiler experienced."""
-    print(f"\n" + "=" * 60)
+    print("\n" + "=" * 60)
     print("🏭 SIMULATION: gprofiler's Original Memory Leak Pattern")
     print("=" * 60)
 
     # Simulate the global _processes list
     _processes = []
 
-    print(f"Simulating subprocess creation pattern...")
+    print("Simulating subprocess creation pattern...")
     initial_memory = psutil.Process().memory_info().rss / 1024 / 1024
 
     # Create many short-lived processes (like pdeathsigger)
@@ -154,14 +155,14 @@ def simulate_gprofiler_leak():
         dead_count = sum(1 for p in _processes if p.poll() is not None)
         print(f"   - Dead processes in list: {dead_count}")
 
-    print(f"\n❌ LEAK PATTERN DEMONSTRATED:")
+    print("\n❌ LEAK PATTERN DEMONSTRATED:")
     print(f"   - {len(_processes)} processes in global list")
-    print(f"   - All processes are dead but pipes remain open")
+    print("   - All processes are dead but pipes remain open")
     print(f"   - Memory increased by {current_memory - initial_memory:.1f} MB")
-    print(f"   - This pattern × 1000s of processes = 2.5GB leak!")
+    print("   - This pattern × 1000s of processes = 2.5GB leak!")
 
     # Apply the fix
-    print(f"\n🔧 APPLYING THE FIX:")
+    print("\n🔧 APPLYING THE FIX:")
     cleanup_stats = cleanup_completed_processes(_processes)
 
     final_memory = psutil.Process().memory_info().rss / 1024 / 1024
@@ -171,7 +172,7 @@ def simulate_gprofiler_leak():
     print(f"   Final memory: {final_memory:.1f} MB")
     print(f"   Memory freed: {current_memory - final_memory:.1f} MB")
     print(f"   Final FDs: {final_fds}")
-    print(f"   ✅ Leak fixed by proper resource cleanup!")
+    print("   ✅ Leak fixed by proper resource cleanup!")
 
 
 def cleanup_completed_processes(processes_list: List[subprocess.Popen]) -> dict:
@@ -233,9 +234,9 @@ def cleanup_completed_processes(processes_list: List[subprocess.Popen]) -> dict:
     }
 
 
-def explain_why_gc_cant_help():
+def explain_why_gc_cant_help() -> None:
     """Explain the technical reasons why Python GC can't solve this."""
-    print(f"\n" + "=" * 60)
+    print("\n" + "=" * 60)
     print("🧠 WHY PYTHON GC CAN'T AUTOMATICALLY FIX THIS")
     print("=" * 60)
 
@@ -283,7 +284,7 @@ if __name__ == "__main__":
         simulate_gprofiler_leak()
         explain_why_gc_cant_help()
 
-        print(f"\n" + "=" * 60)
+        print("\n" + "=" * 60)
         print("🎯 CONCLUSION")
         print("=" * 60)
         print("✅ PROOF COMPLETE:")

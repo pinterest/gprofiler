@@ -15,27 +15,22 @@
 #
 import concurrent.futures
 import datetime
-import json
 import logging
 import logging.config
 import logging.handlers
 import os
-import re
 import shutil
-import socket
 import sys
-import threading
 import time
 import traceback
 from pathlib import Path
 from threading import Event
 from types import TracebackType
-from typing import Any, Dict, Iterable, List, Optional, Type, cast
+from typing import Iterable, List, Optional, Type, cast
 
 import configargparse
 import humanfriendly
 import psutil
-import requests
 from granulate_utils.linux.ns import is_root, is_running_in_init_pid
 from granulate_utils.linux.process import is_process_running
 from granulate_utils.metadata.cloud import get_aws_execution_env
@@ -52,23 +47,12 @@ from gprofiler.client import (
 from gprofiler.consts import CPU_PROFILING_MODE
 from gprofiler.containers_client import ContainerNamesClient
 from gprofiler.diagnostics import log_diagnostics, set_diagnostics
+from gprofiler.dynamic_profiling_management.heartbeat import DynamicGProfilerManager, HeartbeatClient
 from gprofiler.exceptions import APIError, NoProfilersEnabledError
 from gprofiler.gprofiler_types import ProcessToProfileData, UserArgs, integers_list, positive_integer
-from gprofiler.dynamic_profiling_management.heartbeat import DynamicGProfilerManager, HeartbeatClient
 from gprofiler.hw_metrics import HWMetricsMonitor, HWMetricsMonitorBase, NoopHWMetricsMonitor
 from gprofiler.log import RemoteLogsHandler, initial_root_logger_setup
 from gprofiler.memory_manager import MemoryManager
-from gprofiler.metrics_publisher import (
-    MetricsPublisher, METRIC_BASE_NAME,
-    ERROR_TYPE_PROCESS_PROFILER_FAILURE, ERROR_TYPE_PERF_FAILURE, ERROR_TYPE_PROFILING_RUN_FAILURE,
-    ERROR_TYPE_UPLOAD_ERROR,
-    COMPONENT_SYSTEM_PROFILER, COMPONENT_API_CLIENT, COMPONENT_GPROFILER_MAIN,
-    SEVERITY_ERROR, SEVERITY_WARNING, SEVERITY_CRITICAL,
-    ERROR_MSG_PROCESS_PROFILER_FAILURE, ERROR_MSG_PERF_FAILURE, ERROR_MSG_PROFILING_RUN_FAILURE,
-    ERROR_MSG_UPLOAD_ERROR,
-    ERROR_CATEGORY_UPLOAD_TIMEOUT, ERROR_CATEGORY_UPLOAD_API_ERROR, ERROR_CATEGORY_UPLOAD_REQUEST_EXCEPTION,
-    get_current_method_name,
-)
 from gprofiler.merge import concatenate_from_external_file, concatenate_profiles, merge_profiles
 from gprofiler.metadata import ProfileMetadata
 from gprofiler.metadata.application_identifiers import ApplicationIdentifiers
@@ -76,6 +60,28 @@ from gprofiler.metadata.enrichment import EnrichmentOptions
 from gprofiler.metadata.external_metadata import ExternalMetadataStaleError, read_external_metadata
 from gprofiler.metadata.metadata_collector import get_current_metadata, get_static_metadata
 from gprofiler.metadata.system_metadata import get_hostname, get_run_mode, get_static_system_info
+from gprofiler.metrics_publisher import (
+    COMPONENT_API_CLIENT,
+    COMPONENT_GPROFILER_MAIN,
+    COMPONENT_SYSTEM_PROFILER,
+    ERROR_CATEGORY_UPLOAD_API_ERROR,
+    ERROR_CATEGORY_UPLOAD_REQUEST_EXCEPTION,
+    ERROR_CATEGORY_UPLOAD_TIMEOUT,
+    ERROR_MSG_PERF_FAILURE,
+    ERROR_MSG_PROCESS_PROFILER_FAILURE,
+    ERROR_MSG_PROFILING_RUN_FAILURE,
+    ERROR_MSG_UPLOAD_ERROR,
+    ERROR_TYPE_PERF_FAILURE,
+    ERROR_TYPE_PROCESS_PROFILER_FAILURE,
+    ERROR_TYPE_PROFILING_RUN_FAILURE,
+    ERROR_TYPE_UPLOAD_ERROR,
+    METRIC_BASE_NAME,
+    SEVERITY_CRITICAL,
+    SEVERITY_ERROR,
+    SEVERITY_WARNING,
+    MetricsPublisher,
+    get_current_method_name,
+)
 from gprofiler.platform import is_aarch64, is_linux, is_windows
 from gprofiler.profiler_state import ProfilerState
 from gprofiler.profilers.factory import get_profilers
@@ -188,8 +194,10 @@ class GProfiler:
             profiling_mode=profiling_mode,
             container_names_client=container_names_client,
             processes_to_profile=processes_to_profile,
-            max_processes_per_profiler=user_args.get("max_processes_per_profiler", 0),
-            max_system_processes_for_system_profilers=user_args.get("max_system_processes_for_system_profilers", 0),
+            max_processes_per_profiler=int(user_args.get("max_processes_per_profiler") or 0),
+            max_system_processes_for_system_profilers=int(
+                user_args.get("max_system_processes_for_system_profilers") or 0
+            ),
         )
         self.system_profiler, self.process_profilers = get_profilers(user_args, profiler_state=self._profiler_state)
         self._usage_logger = usage_logger
@@ -252,12 +260,12 @@ class GProfiler:
         local_end_time: datetime.datetime,
     ) -> Optional[str]:
         """Generate flamegraph HTML from collapsed stack data.
-        
+
         Args:
             collapsed_data: Collapsed stack data (with metadata stripped)
             local_start_time: Profile start time
             local_end_time: Profile end time
-            
+
         Returns:
             Flamegraph HTML as a string, or None if generation fails
         """
@@ -280,7 +288,7 @@ class GProfiler:
                 .replace(b"{{{START_TIME}}}", start_ts.encode())
                 .replace(b"{{{END_TIME}}}", end_ts.encode())
             )
-            return flamegraph_html.decode('utf-8')
+            return flamegraph_html.decode("utf-8")
         except Exception as e:
             logger.warning(f"Failed to generate flamegraph HTML: {e}")
             return None
@@ -303,13 +311,9 @@ class GProfiler:
 
         if self._flamegraph:
             flamegraph_path = base_filename + ".html"
-            flamegraph_html = self._generate_flamegraph_html(
-                stripped_collapsed_data,
-                local_start_time,
-                local_end_time
-            )
+            flamegraph_html = self._generate_flamegraph_html(stripped_collapsed_data, local_start_time, local_end_time)
             if flamegraph_html:
-                Path(flamegraph_path).write_bytes(flamegraph_html.encode('utf-8'))
+                Path(flamegraph_path).write_bytes(flamegraph_html.encode("utf-8"))
 
                 # point last_flamegraph.html at the new file; and possibly, delete the previous one.
                 self._update_last_output("last_flamegraph.html", flamegraph_path)
@@ -348,26 +352,32 @@ class GProfiler:
                         f"Runtime profilers (py-spy, Java, etc.) will continue normally."
                     )
                 else:
-                    logger.debug(f"System process count: {total_processes} (threshold: {self._profiler_state.max_system_processes_for_system_profilers})")
+                    logger.debug(
+                        f"System process count: {total_processes} "
+                        f"(threshold: {self._profiler_state.max_system_processes_for_system_profilers})"
+                    )
             except Exception as e:
                 logger.warning(f"Could not count system processes, continuing with all profilers: {e}")
 
         for prof in list(self.all_profilers):
             try:
                 # Skip system profilers if threshold exceeded, unless they override the logic
-                if skip_system_profilers and hasattr(prof, '_is_system_profiler') and prof._is_system_profiler:
+                if skip_system_profilers and hasattr(prof, "_is_system_profiler") and prof._is_system_profiler:
                     # Check if the profiler has custom logic for system threshold skipping
-                    if hasattr(prof, 'should_skip_due_to_system_threshold'):
+                    if hasattr(prof, "should_skip_due_to_system_threshold"):
                         should_skip = prof.should_skip_due_to_system_threshold()
                     else:
                         should_skip = True
-                    
+
                     if should_skip:
                         logger.info(f"Skipping {prof.__class__.__name__} due to high system process count")
                         continue
                     else:
-                        logger.info(f"Not skipping {prof.__class__.__name__} despite high system process count (cgroup-based profiling requested)")
-                    
+                        logger.info(
+                            f"Not skipping {prof.__class__.__name__} despite high system process count "
+                            "(cgroup-based profiling requested)"
+                        )
+
                 prof.start()
             except Exception:
                 # the SystemProfiler is handled separately - let the user run with '--perf-mode none' if they
@@ -382,19 +392,19 @@ class GProfiler:
     def stop(self) -> None:
         logger.info("Stopping ...")
         self._profiler_state.stop_event.set()
-        
+
         # Stop system metrics monitor with exception protection
         try:
             self._system_metrics_monitor.stop()
         except Exception as e:
             logger.error(f"Error stopping system metrics monitor: {e}")
-        
+
         # Stop hardware metrics monitor with exception protection
         try:
             self._hw_metrics_monitor.stop()
         except Exception as e:
             logger.error(f"Error stopping hardware metrics monitor: {e}")
-        
+
         # Stop all profilers with individual exception protection
         for prof in self.all_profilers:
             try:
@@ -403,7 +413,7 @@ class GProfiler:
             except Exception as e:
                 logger.error(f"Error stopping profiler {prof.name}: {e}")
 
-    def _snapshot(self) -> None:   
+    def _snapshot(self) -> None:
         local_start_time = datetime.datetime.utcnow()
         monotonic_start_time = time.monotonic()
         process_profilers_futures = []
@@ -424,35 +434,39 @@ class GProfiler:
                 future_name = future.name  # type: ignore # hack, add the profiler's name to the Future object
                 logger.exception(f"{future_name} profiling failed")
                 # Report profiler failure to metrics server using singleton
-                MetricsPublisher.get_instance().send_error_metric(
-                    error_type=ERROR_TYPE_PROCESS_PROFILER_FAILURE,
-                    error_message=ERROR_MSG_PROCESS_PROFILER_FAILURE,
-                    category=f"profiler_{future_name}",
-                    severity=SEVERITY_ERROR,
-                    extra_tags={
-                        "method_name": get_current_method_name(),
-                        "profiler_name": future_name,
-                    },
-                )
+                metrics_pub = MetricsPublisher.get_instance()
+                if metrics_pub is not None:
+                    metrics_pub.send_error_metric(
+                        error_type=ERROR_TYPE_PROCESS_PROFILER_FAILURE,
+                        error_message=ERROR_MSG_PROCESS_PROFILER_FAILURE,
+                        category=f"profiler_{future_name}",
+                        severity=SEVERITY_ERROR,
+                        extra_tags={
+                            "method_name": get_current_method_name(),
+                            "profiler_name": future_name,
+                        },
+                    )
 
         local_end_time = local_start_time + datetime.timedelta(seconds=(time.monotonic() - monotonic_start_time))
 
         try:
-            system_result = system_future.result()            
+            system_result = system_future.result()
         except Exception:
             logger.critical(
                 "Running perf failed; consider running gProfiler with '--perf-mode disabled' to avoid using perf",
             )
             # Report critical perf failure to metrics server using singleton
-            MetricsPublisher.get_instance().send_error_metric(
-                error_type=ERROR_TYPE_PERF_FAILURE,
-                error_message=ERROR_MSG_PERF_FAILURE,
-                category=COMPONENT_SYSTEM_PROFILER,
-                severity=SEVERITY_CRITICAL,
-                extra_tags={
-                    "method_name": get_current_method_name(),
-                },
-            )
+            metrics_pub = MetricsPublisher.get_instance()
+            if metrics_pub is not None:
+                metrics_pub.send_error_metric(
+                    error_type=ERROR_TYPE_PERF_FAILURE,
+                    error_message=ERROR_MSG_PERF_FAILURE,
+                    category=COMPONENT_SYSTEM_PROFILER,
+                    severity=SEVERITY_CRITICAL,
+                    extra_tags={
+                        "method_name": get_current_method_name(),
+                    },
+                )
             raise
         metadata = (
             get_current_metadata(cast(ProfileMetadata, self._static_metadata))
@@ -507,16 +521,12 @@ class GProfiler:
                     hwmetrics=hwmetrics,
                     external_app_metadata=external_app_metadata,
                 )
-            
+
             # Strip metadata to get just the stacks
             stripped_collapsed_data = self._strip_extra_data(temp_merged)
-            
+
             # Generate flamegraph HTML using the extracted method
-            flamegraph_html = self._generate_flamegraph_html(
-                stripped_collapsed_data,
-                local_start_time,
-                local_end_time
-            )
+            flamegraph_html = self._generate_flamegraph_html(stripped_collapsed_data, local_start_time, local_end_time)
             if flamegraph_html:
                 logger.info("Generated flamegraph HTML for profile data")
 
@@ -549,7 +559,7 @@ class GProfiler:
             self._generate_output_files(merged_result, local_start_time, local_end_time)
 
         if self._profiler_api_client:
-            self._gpid =             _submit_profile_logged(
+            self._gpid = _submit_profile_logged(
                 self._profiler_api_client,
                 local_start_time,
                 local_end_time,
@@ -596,15 +606,17 @@ class GProfiler:
                 except Exception:
                     logger.exception("Profiling run failed!")
                     # Report profiling run failure to metrics server using singleton
-                    MetricsPublisher.get_instance().send_error_metric(
-                        error_type=ERROR_TYPE_PROFILING_RUN_FAILURE,
-                        error_message=ERROR_MSG_PROFILING_RUN_FAILURE,
-                        category=COMPONENT_GPROFILER_MAIN,
-                        severity=SEVERITY_ERROR,
-                        extra_tags={
-                            "method_name": get_current_method_name(),
-                        },
-                    )
+                    metrics_pub = MetricsPublisher.get_instance()
+                    if metrics_pub is not None:
+                        metrics_pub.send_error_metric(
+                            error_type=ERROR_TYPE_PROFILING_RUN_FAILURE,
+                            error_message=ERROR_MSG_PROFILING_RUN_FAILURE,
+                            category=COMPONENT_GPROFILER_MAIN,
+                            severity=SEVERITY_ERROR,
+                            extra_tags={
+                                "method_name": get_current_method_name(),
+                            },
+                        )
                 self._usage_logger.log_cycle()
 
                 # Calculate snapshot duration and remaining wait time
@@ -613,7 +625,8 @@ class GProfiler:
 
                 # Log timings to understand potential delays in snapshot duration
                 logger.debug(
-                    f"Snapshot timing: duration={snapshot_duration:.1f}s, configured={self._duration}s, wait={remaining_wait:.1f}s"
+                    f"Snapshot timing: duration={snapshot_duration:.1f}s, configured={self._duration}s, "
+                    f"wait={remaining_wait:.1f}s"
                 )
 
                 # COMPREHENSIVE CLEANUP AFTER SNAPSHOT
@@ -632,13 +645,16 @@ class GProfiler:
 
             self._state.set_cycle_id(None)
 
-    def maybe_cleanup_subprocesses(self):
-        """Clean up subprocess objects if memory management is enabled and memory usage exceeds threshold (default 50MB)."""
+    def maybe_cleanup_subprocesses(self) -> None:
+        """Clean up subprocess objects if memory management enabled and usage exceeds threshold (default 50MB)."""
         if not self._memory_management_enabled:
+            return
+        threshold = self._memory_cleanup_threshold_mb
+        if threshold is None or isinstance(threshold, str):
             return
         process = psutil.Process()
         memory_mb = process.memory_info().rss / (1024 * 1024)
-        if memory_mb > self._memory_cleanup_threshold_mb:
+        if memory_mb > threshold:
             self._memory_manager._cleanup_subprocess_objects()
 
 
@@ -664,40 +680,46 @@ def _submit_profile_logged(
         )
     except Timeout:
         logger.error("Upload of profile to server timed out.")
-        MetricsPublisher.get_instance().send_error_metric(
-            error_type=ERROR_TYPE_UPLOAD_ERROR,
-            error_message=ERROR_MSG_UPLOAD_ERROR,
-            category=COMPONENT_API_CLIENT,
-            severity=SEVERITY_WARNING,
-            extra_tags={
-                "method_name": get_current_method_name(),
-                "error_category": ERROR_CATEGORY_UPLOAD_TIMEOUT,
-            },
-        )
+        _mp = MetricsPublisher.get_instance()
+        if _mp is not None:
+            _mp.send_error_metric(
+                error_type=ERROR_TYPE_UPLOAD_ERROR,
+                error_message=ERROR_MSG_UPLOAD_ERROR,
+                category=COMPONENT_API_CLIENT,
+                severity=SEVERITY_WARNING,
+                extra_tags={
+                    "method_name": get_current_method_name(),
+                    "error_category": ERROR_CATEGORY_UPLOAD_TIMEOUT,
+                },
+            )
     except APIError as e:
         logger.error(f"Error occurred sending profile to server: {e}")
-        MetricsPublisher.get_instance().send_error_metric(
-            error_type=ERROR_TYPE_UPLOAD_ERROR,
-            error_message=ERROR_MSG_UPLOAD_ERROR,
-            category=COMPONENT_API_CLIENT,
-            severity=SEVERITY_ERROR,
-            extra_tags={
-                "method_name": get_current_method_name(),
-                "error_category": ERROR_CATEGORY_UPLOAD_API_ERROR,
-            },
-        )
+        _mp = MetricsPublisher.get_instance()
+        if _mp is not None:
+            _mp.send_error_metric(
+                error_type=ERROR_TYPE_UPLOAD_ERROR,
+                error_message=ERROR_MSG_UPLOAD_ERROR,
+                category=COMPONENT_API_CLIENT,
+                severity=SEVERITY_ERROR,
+                extra_tags={
+                    "method_name": get_current_method_name(),
+                    "error_category": ERROR_CATEGORY_UPLOAD_API_ERROR,
+                },
+            )
     except RequestException:
         logger.exception("Error occurred sending profile to server")
-        MetricsPublisher.get_instance().send_error_metric(
-            error_type=ERROR_TYPE_UPLOAD_ERROR,
-            error_message=ERROR_MSG_UPLOAD_ERROR,
-            category=COMPONENT_API_CLIENT,
-            severity=SEVERITY_ERROR,
-            extra_tags={
-                "method_name": get_current_method_name(),
-                "error_category": ERROR_CATEGORY_UPLOAD_REQUEST_EXCEPTION,
-            },
-        )
+        _mp = MetricsPublisher.get_instance()
+        if _mp is not None:
+            _mp.send_error_metric(
+                error_type=ERROR_TYPE_UPLOAD_ERROR,
+                error_message=ERROR_MSG_UPLOAD_ERROR,
+                category=COMPONENT_API_CLIENT,
+                severity=SEVERITY_ERROR,
+                extra_tags={
+                    "method_name": get_current_method_name(),
+                    "error_category": ERROR_CATEGORY_UPLOAD_REQUEST_EXCEPTION,
+                },
+            )
     else:
         logger.info("Successfully uploaded profiling data to the server")
         return cast(str, response_dict.get("gpid", ""))
@@ -1479,12 +1501,18 @@ def main() -> None:
         sli_metric_uuid=args.sli_metric_uuid,
         enabled=args.enable_publish_metrics,
     )
-    
+
     if args.enable_publish_metrics:
         if args.sli_metric_uuid:
-            logger.info(f"Metrics publishing enabled - connecting to {args.metrics_server_url} (SLI metric UUID: {args.sli_metric_uuid})")
+            logger.info(
+                f"Metrics publishing enabled - connecting to {args.metrics_server_url} "
+                f"(SLI metric UUID: {args.sli_metric_uuid})"
+            )
         else:
-            logger.info(f"Metrics publishing enabled - connecting to {args.metrics_server_url} (SLI metrics disabled - no UUID configured)")
+            logger.info(
+                f"Metrics publishing enabled - connecting to {args.metrics_server_url} "
+                "(SLI metrics disabled - no UUID configured)"
+            )
     else:
         logger.info("Metrics publishing disabled")
 
@@ -1615,7 +1643,7 @@ def main() -> None:
                 tls_cert_refresh_interval=args.tls_cert_refresh_interval,
             )
 
-            # Create dynamic profiler manager  
+            # Create dynamic profiler manager
             manager = DynamicGProfilerManager(args, heartbeat_client)
             manager.heartbeat_interval = args.heartbeat_interval
 
@@ -1651,10 +1679,10 @@ def main() -> None:
                 external_metadata_path=external_metadata_path,
                 heartbeat_file_path=heartbeat_file_path,
                 perfspect_path=perfspect_path,
-                perfspect_duration=getattr(args, "tool_perfspect_duration", None),
+                perfspect_duration=int(getattr(args, "tool_perfspect_duration", 60) or 60),
             )
             logger.info("gProfiler initialized and ready to start profiling")
-            
+
             if args.continuous:
                 gprofiler.run_continuous()
             else:
@@ -1673,7 +1701,7 @@ def main() -> None:
         sys.exit(1)
     finally:
         # Clean up metrics publisher
-        if 'metrics_publisher' in locals() and hasattr(metrics_publisher, 'flush_and_close'):
+        if "metrics_publisher" in locals() and hasattr(metrics_publisher, "flush_and_close"):
             try:
                 metrics_publisher.flush_and_close()
             except Exception as e:

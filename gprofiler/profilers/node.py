@@ -262,10 +262,12 @@ def generate_map_for_node_processes(processes: List[psutil.Process]) -> List[psu
             if _FILE_NOT_FOUND_ERROR in str(e) and _NODE_MODULE_PATH_MARKER in str(e):
                 try:
                     node_major_version = _get_node_major_version(process)
-                    logger.warning(f"Node.js debug symbols not available for version {node_major_version} (process {process.pid}). "
-                                 f"Profiling will continue without enhanced symbols. "
-                                 f"Consider updating gProfiler's Node.js support to include version {node_major_version}.")
-                except:
+                    logger.warning(
+                        f"Node.js debug symbols not available for version {node_major_version} "
+                        f"(process {process.pid}). Profiling will continue without enhanced symbols. "
+                        f"Consider updating gProfiler's Node.js support to include version {node_major_version}."
+                    )
+                except Exception:
                     logger.warning(f"Could not create debug symbols for pid {process.pid}. Reason: {e}")
             else:
                 logger.warning(f"Could not create debug symbols for pid {process.pid}. Reason: {e}", exc_info=True)
