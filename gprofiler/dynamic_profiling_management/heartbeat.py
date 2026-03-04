@@ -385,21 +385,24 @@ class DynamicGProfilerManager:
     # --- Decision helpers ---
 
     def _should_process(self, cmd: Optional[ProfilingCommand]) -> bool:
+        # If no command, nothing to do
         if cmd is None:
             return False
+
+        # If command already executing, skip (idempotency)
         if self.primary.is_running_command(cmd.command_id):
             return False
         if self.adhoc.is_running_command(cmd.command_id):
             return False
-        return self._ready_for_next()
 
-    def _ready_for_next(self) -> bool:
+        # Actual decision logic:
         if not self.primary.is_running():
+            return True
+        if self.adhoc.can_run(cmd, self.primary.profiler_types) and not self.adhoc.is_running():
             return True
         if self.primary.can_be_paused():
             return True
-        if not self.adhoc.is_running():
-            return True
+
         return False
 
     # --- Lifecycle ---
