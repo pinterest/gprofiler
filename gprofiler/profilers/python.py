@@ -69,6 +69,8 @@ from granulate_utils.python import DETECTED_PYTHON_PROCESSES_REGEX, _BLACKLISTED
 
 logger = get_logger_adapter(__name__)
 
+_PYTHON_WSGI_ASGI_SERVERS_RE = r"^(uwsgi|gunicorn|uvicorn)$"
+
 _module_name_in_stack = re.compile(r"\((?P<module_info>(?P<filename>[^\)]+?\.py):\d+)\)")
 
 
@@ -110,15 +112,40 @@ def _add_versions_to_stacks(
 class PythonMetadata(ApplicationMetadata):
     _PYTHON_TIMEOUT = 3
 
+    _PYTHON_VERSION_FROM_MAPS_PATTERNS = [
+        re.compile(r"/libpython(\d+\.\d+)"),               # libpython3.12.so (shared builds)
+        re.compile(r"/python(\d+\.\d+)/"),                  # /usr/lib/python3.12/lib-dynload/...
+        re.compile(r"\.cpython-(\d)(\d+)[-.]"),             # _ssl.cpython-312-x86_64-linux-gnu.so
+    ]
+
+    def _get_python_version_from_maps(self, process: Process) -> Optional[str]:
+        """Extract Python version from the process memory maps.
+
+        Used for WSGI/ASGI servers (uwsgi, gunicorn, uvicorn) whose exe may not be
+        the Python interpreter itself. Tries multiple patterns:
+        1. libpython shared library filename (shared builds)
+        2. Python stdlib directory paths (works with static builds)
+        3. CPython extension module ABI tags (works with static builds)
+
+        Returns major.minor only (e.g. "Python 3.12").
+        """
+        maps_content = read_proc_file(process, "maps").decode()
+        for pattern in self._PYTHON_VERSION_FROM_MAPS_PATTERNS:
+            match = pattern.search(maps_content)
+            if match:
+                if match.lastindex == 2:
+                    # cpython ABI tag: groups are (major, minor) e.g. ("3", "12")
+                    return f"Python {match.group(1)}.{match.group(2)}"
+                return f"Python {match.group(1)}"
+        return None
+
     def _get_python_version(self, process: Process) -> Optional[str]:
         try:
             if is_process_basename_matching(process, application_identifiers._PYTHON_BIN_RE):
                 version_arg = "-V"
                 prefix = ""
-            elif is_process_basename_matching(process, r"^uwsgi$"):
-                version_arg = "--python-version"
-                # for compatibility, we add this prefix (to match python -V)
-                prefix = "Python "
+            elif is_process_basename_matching(process, _PYTHON_WSGI_ASGI_SERVERS_RE):
+                return self._get_python_version_from_maps(process)
             else:
                 # TODO: for dynamic executables, find the python binary that works with the loaded libpython, and
                 # check it instead. For static executables embedding libpython - :shrug:
@@ -501,11 +528,11 @@ class PySpyProfiler(SpawningProcessProfilerBase):
     
     def _is_likely_python_interpreter(self, exe_basename: str, cmdline: str) -> bool:
         """Check if this looks like an actual Python interpreter."""
-        # Direct Python interpreter executables
+        # Direct Python interpreter executables and well-known Python application servers
         python_interpreter_patterns = [
             r"^python[\d.]*$",          # python, python3, python3.9, etc.
             r"^python[\d.]*-config$",   # python3-config
-            r"^uwsgi$",                 # uWSGI is a Python WSGI server
+            _PYTHON_WSGI_ASGI_SERVERS_RE,
         ]
         
         for pattern in python_interpreter_patterns:
