@@ -14,6 +14,8 @@
 # limitations under the License.
 #
 import os
+from threading import Event
+from unittest.mock import Mock, patch
 
 import psutil
 import pytest
@@ -21,7 +23,7 @@ from granulate_utils.linux.process import is_musl
 from granulate_utils.type_utils import assert_cast
 
 from gprofiler.profiler_state import ProfilerState
-from gprofiler.profilers.python import PythonProfiler
+from gprofiler.profilers.python import PythonMetadata, PythonProfiler
 from gprofiler.profilers.python_ebpf import PythonEbpfProfiler
 from tests.conftest import AssertInCollapsed
 from tests.utils import (
@@ -153,8 +155,7 @@ def test_python_matrix(
 
     assert profile.app_metadata is not None
     assert os.path.basename(assert_cast(str, profile.app_metadata["execfn"])) == app
-    # searching for "python_version.", because ours is without the patchlevel.
-    assert assert_cast(str, profile.app_metadata["python_version"]).startswith(f"Python {python_version}.")
+    assert assert_cast(str, profile.app_metadata["python_version"]).startswith(f"Python {python_version}")
     if python_version == "2.7" and app == "python":
         assert assert_cast(str, profile.app_metadata["sys_maxunicode"]) == "1114111"
     else:
@@ -192,3 +193,50 @@ def test_dso_name_in_pyperf_profile(
     assert insert_dso_name == is_pattern_in_collapsed(
         rf"{interpreter_frame} \(.+?/libpython{python_version}.*?\.so.*?\)_\[pn\]", collapsed
     )
+
+
+class TestPythonVersionFromMaps:
+    """Unit tests for _get_python_version_from_maps which extracts Python version
+    from /proc/pid/maps for WSGI/ASGI servers (uwsgi, gunicorn, uvicorn)."""
+
+    def _make_metadata(self) -> PythonMetadata:
+        return PythonMetadata(Event())
+
+    def _mock_maps(self, maps_content: str) -> "patch":
+        return patch(
+            "gprofiler.profilers.python.read_proc_file",
+            return_value=maps_content.encode(),
+        )
+
+    def test_libpython_shared(self) -> None:
+        maps = "7f5a12345000-7f5a12456000 r-xp 00000000 fd:01 67890 /usr/lib/x86_64-linux-gnu/libpython3.9.so.1.0\n"
+        with self._mock_maps(maps):
+            assert PythonMetadata(Event())._get_python_version_from_maps(Mock()) == "Python 3.9"
+
+    def test_python_stdlib_path(self) -> None:
+        maps = "7f5a12345000-7f5a12456000 r-xp 00000000 fd:01 12345 /usr/lib/python3.12/lib-dynload/_ssl.cpython-312-x86_64-linux-gnu.so\n"
+        with self._mock_maps(maps):
+            assert self._make_metadata()._get_python_version_from_maps(Mock()) == "Python 3.12"
+
+    def test_cpython_abi_tag(self) -> None:
+        maps = "7f5a12345000-7f5a12456000 r-xp 00000000 fd:01 12345 /home/user/.venv/lib/site-packages/yaml/_yaml.cpython-311-x86_64-linux-gnu.so\n"
+        with self._mock_maps(maps):
+            assert self._make_metadata()._get_python_version_from_maps(Mock()) == "Python 3.11"
+
+    def test_libpython_takes_priority(self) -> None:
+        """When both libpython and cpython ABI tag are present, libpython should win (first pattern)."""
+        maps = (
+            "7f5a12345000-7f5a12456000 r-xp 00000000 fd:01 67890 /usr/lib/libpython3.10.so.1.0\n"
+            "7f5a12456000-7f5a12567000 r-xp 00000000 fd:01 12345 /usr/lib/python3.10/lib-dynload/_json.cpython-310-x86_64-linux-gnu.so\n"
+        )
+        with self._mock_maps(maps):
+            assert self._make_metadata()._get_python_version_from_maps(Mock()) == "Python 3.10"
+
+    def test_no_python_in_maps(self) -> None:
+        maps = "7f5a12345000-7f5a12456000 r-xp 00000000 fd:01 12345 /usr/lib/libc.so.6\n"
+        with self._mock_maps(maps):
+            assert self._make_metadata()._get_python_version_from_maps(Mock()) is None
+
+    def test_empty_maps(self) -> None:
+        with self._mock_maps(""):
+            assert self._make_metadata()._get_python_version_from_maps(Mock()) is None
