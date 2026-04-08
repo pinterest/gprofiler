@@ -192,8 +192,8 @@ class PerfProcess:
                 "-m",
                 str(self._MMAP_SIZES[self._type]),
             ]
-            + extra_args  # Events must come before cgroups
-            + self._pid_args
+            + self._pid_args  # -a or --pid must come before extra_args which may contain --
+            + extra_args  # Events must come before cgroups; may contain -- cmd for discovery
             + self._cgroup_args
             + (["-k", "1"] if self._inject_jit else [])
         )

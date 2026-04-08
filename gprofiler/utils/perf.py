@@ -99,12 +99,10 @@ def discover_appropriate_perf_event(
                 "sleep",
                 "0.5",
             ]  # `sleep 0.5` is enough to be certain some samples should've been collected.
-            # For discovery, we need to ensure we can capture the 'sleep 0.5' command
-            # When using cgroups, the sleep command won't be in any target cgroup,
-            # so we use system-wide profiling for discovery regardless of the final mode
-            discovery_pids = None if use_cgroups else pids
-            discovery_use_cgroups = False  # Always use system-wide for discovery
-            
+            # For discovery, always use system-wide profiling so that `sleep 0.5` is captured
+            # regardless of the final profiling mode (pid-based or cgroup-based).
+            discovery_use_cgroups = False
+
             perf_process = PerfProcess(
                 frequency=11,
                 stop_event=stop_event,
@@ -112,7 +110,7 @@ def discover_appropriate_perf_event(
                 is_dwarf=False,
                 inject_jit=False,
                 extra_args=current_extra_args,
-                processes_to_profile=discovery_pids,
+                processes_to_profile=None,  # None -> system-wide (-a), placed before -- by _get_perf_cmd
                 switch_timeout_s=15,
                 use_cgroups=discovery_use_cgroups,
                 max_cgroups=max_cgroups,
