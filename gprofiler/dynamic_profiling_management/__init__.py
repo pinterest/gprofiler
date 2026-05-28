@@ -127,21 +127,21 @@ def _apply_profiler_configs(new_args: configargparse.Namespace, profiler_configs
         perf_events = validate_and_normalize_events(perf_events)
 
         if perf_mode == "enabled_restricted":
-            new_args.max_system_processes_for_system_profilers = 600
-            new_args.perf_max_docker_containers = 2
+            new_args.max_system_processes_for_system_profilers = new_args.heartbeat_perf_restricted_max_system_processes
+            new_args.perf_max_docker_containers = new_args.heartbeat_perf_restricted_max_docker_containers
         elif perf_mode == "enabled_aggressive":
-            new_args.max_system_processes_for_system_profilers = 1500
-            new_args.perf_max_docker_containers = 50
+            new_args.max_system_processes_for_system_profilers = new_args.heartbeat_perf_aggressive_max_system_processes
+            new_args.perf_max_docker_containers = new_args.heartbeat_perf_aggressive_max_docker_containers
         elif perf_mode == "disabled":
             new_args.perf_mode = "disabled"
         new_args.perf_events = ",".join(perf_events)
     else:
         if perf_config == "enabled_restricted":
-            new_args.max_system_processes_for_system_profilers = 600
-            new_args.perf_max_docker_containers = 2
+            new_args.max_system_processes_for_system_profilers = new_args.heartbeat_perf_restricted_max_system_processes
+            new_args.perf_max_docker_containers = new_args.heartbeat_perf_restricted_max_docker_containers
         elif perf_config == "enabled_aggressive":
-            new_args.max_system_processes_for_system_profilers = 1500
-            new_args.perf_max_docker_containers = 50
+            new_args.max_system_processes_for_system_profilers = new_args.heartbeat_perf_aggressive_max_system_processes
+            new_args.perf_max_docker_containers = new_args.heartbeat_perf_aggressive_max_docker_containers
         elif perf_config == "disabled":
             new_args.perf_mode = "disabled"
         new_args.perf_events = "cycles"
