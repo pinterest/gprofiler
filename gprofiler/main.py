@@ -1202,6 +1202,42 @@ def parse_cmd_args() -> configargparse.Namespace:
         help="Interval in seconds for sending heartbeats to server (default: %(default)s)",
     )
 
+    parser.add_argument(
+        "--heartbeat-perf-restricted-max-processes",
+        type=positive_integer,
+        dest="heartbeat_perf_restricted_max_system_processes",
+        default=600,
+        help="Max system processes threshold applied to perf when the heartbeat command uses"
+        " 'enabled_restricted' mode (default: %(default)s)",
+    )
+
+    parser.add_argument(
+        "--heartbeat-perf-restricted-max-containers",
+        type=positive_integer,
+        dest="heartbeat_perf_restricted_max_docker_containers",
+        default=2,
+        help="Max Docker containers to profile when the heartbeat command uses"
+        " 'enabled_restricted' mode (default: %(default)s)",
+    )
+
+    parser.add_argument(
+        "--heartbeat-perf-aggressive-max-processes",
+        type=positive_integer,
+        dest="heartbeat_perf_aggressive_max_system_processes",
+        default=1500,
+        help="Max system processes threshold applied to perf when the heartbeat command uses"
+        " 'enabled_aggressive' mode (default: %(default)s)",
+    )
+
+    parser.add_argument(
+        "--heartbeat-perf-aggressive-max-containers",
+        type=positive_integer,
+        dest="heartbeat_perf_aggressive_max_docker_containers",
+        default=50,
+        help="Max Docker containers to profile when the heartbeat command uses"
+        " 'enabled_aggressive' mode (default: %(default)s)",
+    )
+
     if is_linux() and not is_aarch64():
         hw_metrics_options = parser.add_argument_group("hardware metrics")
         hw_metrics_options.add_argument(
