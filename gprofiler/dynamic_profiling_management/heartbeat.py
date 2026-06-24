@@ -26,6 +26,7 @@ import requests
 from gprofiler.dynamic_profiling_management.ad_hoc import AdhocProfilerSlot
 from gprofiler.dynamic_profiling_management.command_control import CommandManager, ProfilingCommand
 from gprofiler.dynamic_profiling_management.continuous import ContinuousProfilerSlot
+from gprofiler.metadata.heartbeat_metadata import HeartbeatMetadataCollector
 from gprofiler.metadata.system_metadata import get_hostname
 from gprofiler.metrics_publisher import (
     MetricsPublisher,
@@ -77,6 +78,7 @@ class HeartbeatClient:
 
         self._init_session()
         self.pmu_manager = get_pmu_manager()
+        self.heartbeat_metadata_collector = HeartbeatMetadataCollector()
 
         if self.server_token:
             self.session.headers.update(
@@ -157,6 +159,7 @@ class HeartbeatClient:
     def send_heartbeat(self) -> Optional[Dict[str, Any]]:
         try:
             perf_supported_events = self.pmu_manager.get_supported_events()
+            inventory_metadata = self.heartbeat_metadata_collector.collect()
             heartbeat_data = {
                 "ip_address": self.ip_address,
                 "hostname": self.hostname,
@@ -167,6 +170,7 @@ class HeartbeatClient:
                 "received_command_ids": list(self.received_command_ids),
                 "executed_command_ids": list(self.executed_command_ids),
                 "perf_supported_events": perf_supported_events,
+                **inventory_metadata,
             }
             url = f"{self.api_server}/api/metrics/heartbeat"
             response = self.session.post(url, json=heartbeat_data, timeout=30)
