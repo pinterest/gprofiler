@@ -139,6 +139,53 @@ This design preserves compatibility with existing backends because:
 - the backend may ignore workload metadata safely
 - command delivery and completion flows are unchanged
 
+## Acceptance Tests
+
+These acceptance criteria define "done" for the agent side of workload-level
+profiling. They are written as Given/When/Then so they can drive spec-first
+development and be implemented as automated unit/integration tests.
+
+### Workload inventory reporting
+
+- **AT-A1 — Inventory attached when runtime available.** *Given* a supported
+  container runtime is present, *When* the agent builds a heartbeat, *Then* the
+  payload includes `containers[]` where each entry carries container identity,
+  best-effort `namespace`/`pod_name`/`workload_name`/`workload_kind`, and the
+  `processes[]` (pid + process_name) running in that container.
+- **AT-A2 — No runtime is graceful.** *Given* no container runtime is available,
+  *When* the heartbeat is built, *Then* `containers` is empty and the heartbeat
+  is still sent successfully (control plane is never blocked).
+- **AT-A3 — Discovery failure is non-fatal.** *Given* workload discovery raises
+  an error, *When* the heartbeat is built, *Then* the failure is logged as
+  diagnostic (not fatal), `containers` is published empty, and both heartbeat
+  delivery and command receipt continue.
+- **AT-A4 — Workload-name inference.** *Given* pod labels and/or a
+  ReplicaSet/StatefulSet-shaped pod name, *When* inferring a workload name,
+  *Then* the agent uses `app.kubernetes.io/name`, then `app`, then pod-name
+  normalization, treating the result as a best-effort selector only.
+- **AT-A5 — Agent-pod env fallback.** *Given* `POD_NAMESPACE`/`POD_NAME` are set
+  and richer sources are unavailable, *When* building metadata for the agent's
+  own pod, *Then* those env values are used as fallback.
+
+### Command execution (unchanged model)
+
+- **AT-A6 — Host-level command.** *Given* a host-scoped command for
+  `(hostname, service_name)`, *When* executed, *Then* the agent profiles
+  host-wide exactly as before workload support.
+- **AT-A7 — PID-level command.** *Given* a command whose config contains
+  backend-resolved `pids`, *When* executed, *Then* only those PIDs are profiled
+  via the existing `pids_to_profile` path; no second targeting model is
+  introduced in the agent.
+- **AT-A8 — Completion reporting.** *Given* a command finishes (success or
+  failure), *When* the agent reports back, *Then* it uses the existing
+  completion control plane keyed by `command_id`.
+
+### Compatibility
+
+- **AT-A9 — Additive heartbeat fields.** *Given* a backend that predates workload
+  support, *When* it receives the enriched heartbeat, *Then* it can ignore the
+  new fields without error and host-based behavior is unaffected.
+
 ## Spec-Driven Development Workflow
 
 Future workload-related changes in this repo should follow this sequence:
