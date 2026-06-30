@@ -5,6 +5,7 @@ import threading
 from pathlib import Path
 from typing import Dict, Any, Optional, TYPE_CHECKING
 
+import humanfriendly
 import configargparse
 
 if TYPE_CHECKING:
@@ -33,6 +34,10 @@ PROFILER_TYPE_MAP = {
 }
 
 ALL_PROFILER_TYPES = {"perf", "java", "python", "php", "ruby", "dotnet", "nodejs"}
+
+# Valid values for the async_profiler "time" config key.
+# Mirrors SUPPORTED_AP_MODES in java.py plus "auto" (which resolves cpu/itimer at runtime).
+_VALID_AP_TIME_MODES = frozenset({"cpu", "itimer", "wall", "auto", "alloc"})
 
 
 def get_enabled_profiler_types(profiling_command: Dict[str, Any]) -> set:
@@ -168,12 +173,38 @@ def _apply_profiler_configs(new_args: configargparse.Namespace, profiler_configs
         if not async_profiler_config.get("enabled", True):
             new_args.java_mode = "disabled"
         else:
-            new_args.java_async_profiler_mode = "wall" if async_profiler_config.get("time") == "wall" else "cpu"
+            time_mode = async_profiler_config.get("time", "cpu")
+            if time_mode not in _VALID_AP_TIME_MODES:
+                raise ValueError(
+                    f"Unknown async_profiler time mode {time_mode!r}. "
+                    f"Valid modes: {sorted(_VALID_AP_TIME_MODES)}"
+                )
+            if time_mode == "alloc":
+                # Allocation mode: profiling_mode drives _init_ap_mode to force alloc;
+                # frequency carries the alloc interval in bytes (as async-profiler expects).
+                new_args.profiling_mode = "allocation"
+                alloc_interval = async_profiler_config.get("alloc_interval", "2mb")
+                if not isinstance(alloc_interval, str) or not alloc_interval:
+                    raise ValueError(
+                        f"Invalid alloc_interval value {alloc_interval!r}: "
+                        "must be a non-empty string (e.g. '2mb', '512kb')"
+                    )
+                try:
+                    new_args.frequency = humanfriendly.parse_size(alloc_interval, binary=True)
+                except humanfriendly.InvalidSize as e:
+                    raise ValueError(
+                        f"Could not parse alloc_interval {alloc_interval!r}: {e}"
+                    ) from e
+            else:
+                new_args.java_async_profiler_mode = time_mode
     else:
         if async_profiler_config == "disabled":
             new_args.java_mode = "disabled"
         elif async_profiler_config == "enabled_wall":
-            new_args.java_async_profiler_mode = "itimer"
+            new_args.java_async_profiler_mode = "wall"
+        elif async_profiler_config == "enabled_alloc":
+            new_args.profiling_mode = "allocation"
+            new_args.frequency = humanfriendly.parse_size("2mb", binary=True)
         else:
             new_args.java_async_profiler_mode = "cpu"
 
