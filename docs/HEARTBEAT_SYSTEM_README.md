@@ -293,9 +293,38 @@ The `profiler_configs` object in `combined_config` controls which profilers are 
 
 ### Java Async Profiler
 
-- `{"enabled": true, "time": "cpu"}` — CPU time sampling
-- `{"enabled": true, "time": "wall"}` — Wall clock sampling
-- `{"enabled": false}` — Disabled
+The `async_profiler` key accepts a configuration dict or the shorthand string `"disabled"`.
+
+**Dict format:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `enabled` | bool | no (default `true`) | Set to `false` to disable Java profiling entirely |
+| `time` | string | no (default `"cpu"`) | Profiling mode — see table below |
+| `alloc_interval` | string | no (default `"2mb"`) | Allocation sampling interval; only used when `time` is `"alloc"` |
+
+**`time` mode values:**
+
+| Value | async-profiler mode | Description |
+|---|---|---|
+| `"cpu"` | `cpu` | CPU time via `perf_events` |
+| `"itimer"` | `itimer` | CPU time via `SIGPROF` (fallback when perf events are unavailable) |
+| `"wall"` | `wall` | Wall-clock time (includes threads waiting on I/O or sleeping) |
+| `"alloc"` | `alloc` | Allocation profiling; sets `profiling_mode` to `"allocation"`. Interval is controlled by `alloc_interval` (e.g. `"512kb"`, `"2mb"`) |
+| `"auto"` | `cpu` or `itimer` | Selects `cpu` if perf events are available on the host; falls back to `itimer` |
+
+**Examples:**
+
+```json
+{"enabled": true, "time": "cpu"}
+{"enabled": true, "time": "itimer"}
+{"enabled": true, "time": "wall"}
+{"enabled": true, "time": "alloc", "alloc_interval": "512kb"}
+{"enabled": true, "time": "auto"}
+{"enabled": false}
+```
+
+**String shorthand:** `"disabled"` is equivalent to `{"enabled": false}` and is supported for backward compatibility.
 
 ### Python
 
