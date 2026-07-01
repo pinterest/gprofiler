@@ -301,7 +301,7 @@ The `async_profiler` key accepts a configuration dict or the shorthand string `"
 |---|---|---|---|
 | `enabled` | bool | no (default `true`) | Set to `false` to disable Java profiling entirely |
 | `time` | string | no (default `"cpu"`) | Profiling mode — see table below |
-| `alloc_interval` | string | no (default `"2mb"`) | Allocation sampling interval; only used when `time` is `"alloc"` |
+| `alloc_interval` | string | no (default `"2MB"`) | Allocation sampling interval; only used when `time` is `"alloc"`. Uses [bitmath](https://pypi.org/project/bitmath/) notation (e.g. `"512KiB"`, `"2MB"`) |
 
 **`time` mode values:**
 
@@ -310,7 +310,7 @@ The `async_profiler` key accepts a configuration dict or the shorthand string `"
 | `"cpu"` | `cpu` | CPU time via `perf_events` |
 | `"itimer"` | `itimer` | CPU time via `SIGPROF` (fallback when perf events are unavailable) |
 | `"wall"` | `wall` | Wall-clock time (includes threads waiting on I/O or sleeping) |
-| `"alloc"` | `alloc` | Allocation profiling; sets `profiling_mode` to `"allocation"`. Interval is controlled by `alloc_interval` (e.g. `"512kb"`, `"2mb"`) |
+| `"alloc"` | `alloc` | Allocation profiling; sets `profiling_mode` to `"allocation"`. Interval is controlled by `alloc_interval` (e.g. `"512KiB"`, `"2MB"`) |
 | `"auto"` | `cpu` or `itimer` | Selects `cpu` if perf events are available on the host; falls back to `itimer` |
 
 **Examples:**
@@ -319,7 +319,7 @@ The `async_profiler` key accepts a configuration dict or the shorthand string `"
 {"enabled": true, "time": "cpu"}
 {"enabled": true, "time": "itimer"}
 {"enabled": true, "time": "wall"}
-{"enabled": true, "time": "alloc", "alloc_interval": "512kb"}
+{"enabled": true, "time": "alloc", "alloc_interval": "512KiB"}
 {"enabled": true, "time": "auto"}
 {"enabled": false}
 ```

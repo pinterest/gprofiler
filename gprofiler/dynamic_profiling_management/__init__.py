@@ -5,7 +5,7 @@ import threading
 from pathlib import Path
 from typing import Dict, Any, Optional, TYPE_CHECKING
 
-import humanfriendly
+import bitmath
 import configargparse
 
 if TYPE_CHECKING:
@@ -183,15 +183,15 @@ def _apply_profiler_configs(new_args: configargparse.Namespace, profiler_configs
                 # Allocation mode: profiling_mode drives _init_ap_mode to force alloc;
                 # frequency carries the alloc interval in bytes (as async-profiler expects).
                 new_args.profiling_mode = "allocation"
-                alloc_interval = async_profiler_config.get("alloc_interval", "2mb")
+                alloc_interval = async_profiler_config.get("alloc_interval", "2MB")
                 if not isinstance(alloc_interval, str) or not alloc_interval:
                     raise ValueError(
                         f"Invalid alloc_interval value {alloc_interval!r}: "
-                        "must be a non-empty string (e.g. '2mb', '512kb')"
+                        "must be a non-empty string (e.g. '2MB', '512KiB')"
                     )
                 try:
-                    new_args.frequency = humanfriendly.parse_size(alloc_interval, binary=True)
-                except humanfriendly.InvalidSize as e:
+                    new_args.frequency = int(bitmath.parse_string(alloc_interval).to_Byte())
+                except ValueError as e:
                     raise ValueError(
                         f"Could not parse alloc_interval {alloc_interval!r}: {e}"
                     ) from e
@@ -204,7 +204,7 @@ def _apply_profiler_configs(new_args: configargparse.Namespace, profiler_configs
             new_args.java_async_profiler_mode = "wall"
         elif async_profiler_config == "enabled_alloc":
             new_args.profiling_mode = "allocation"
-            new_args.frequency = humanfriendly.parse_size("2mb", binary=True)
+            new_args.frequency = int(bitmath.parse_string("2MB").to_Byte())
         else:
             new_args.java_async_profiler_mode = "cpu"
 
