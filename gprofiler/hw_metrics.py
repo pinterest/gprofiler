@@ -91,10 +91,21 @@ class HWMetricsMonitor(HWMetricsMonitorBase):
             str(self._perfspect_duration),
             "--output",
             PERFSPECT_DATA_DIRECTORY,
-            "--noroot",
         ]
 
-        self._ps_process = subprocess.Popen(ps_cmd, stdout=subprocess.PIPE)
+        # Clean environment to avoid PyInstaller LD_LIBRARY_PATH pollution
+        # that causes sudo to fail with library loading errors
+        env = os.environ.copy()
+        if 'LD_LIBRARY_PATH' in env:
+            ld_paths = env['LD_LIBRARY_PATH'].split(':')
+            # Filter out paths that contain _MEI (PyInstaller temp directories)
+            cleaned_paths = [p for p in ld_paths if '_MEI' not in p]
+            if cleaned_paths:
+                env['LD_LIBRARY_PATH'] = ':'.join(cleaned_paths)
+            else:
+                del env['LD_LIBRARY_PATH']
+        
+        self._ps_process = subprocess.Popen(ps_cmd, stdout=subprocess.PIPE, env=env)  # nosec B603
 
     def stop(self) -> None:
         if self._ps_process:
