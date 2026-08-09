@@ -106,12 +106,39 @@ def create_profiler_args(
             logger.error(f"PerfSpect not found at {perfspect_path}, hardware metrics disabled")
             new_args.collect_hw_metrics = False
 
+    # NVIDIA nsys GPU capture (host-detect; not bundled — see docs/NSYS_GPU_PROFILING.md)
+    if combined_config.get("enable_nsys", False):
+        from gprofiler.nsys_profiler import find_nsys
+
+        new_args.enable_nsys = True
+        nsys_path = combined_config.get("nsys_path") or None
+        found = find_nsys(nsys_path)
+        if found is not None:
+            new_args.nsys_path = str(found)
+            new_args.nsys_workload = combined_config.get("nsys_workload")
+            logger.info(f"enable_nsys: using nsys at {found}")
+        else:
+            logger.error(
+                "enable_nsys set but nsys not found on host "
+                "(install Nsight Systems or set NSYS_PATH / nsys_path); GPU capture disabled"
+            )
+            new_args.enable_nsys = False
+
     max_processes = combined_config.get("max_processes", 10)
     new_args.max_processes_per_profiler = max_processes
 
     profiler_configs = combined_config.get("profiler_configs", {})
     if profiler_configs:
         _apply_profiler_configs(new_args, profiler_configs)
+
+    # Tag after profiler_configs so Adhoc UI can show a GPU/nsys chip without
+    # being overwritten by perf event defaults.
+    if getattr(new_args, "enable_nsys", False):
+        existing = getattr(new_args, "perf_events", None) or "cycles"
+        events = [e.strip() for e in str(existing).split(",") if e.strip()]
+        if "nsys-cuda" not in events:
+            events.append("nsys-cuda")
+        new_args.perf_events = ",".join(events)
 
     return new_args
 

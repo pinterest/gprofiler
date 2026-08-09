@@ -168,6 +168,12 @@ class GProfiler:
         self._collect_hw_metrics = collect_hw_metrics
         self._perfspect_path = perfspect_path
         self._perfspect_duration = perfspect_duration
+        # NVIDIA nsys GPU capture (host-detect; optional)
+        self._enable_nsys = bool(user_args.get("enable_nsys", False))
+        self._nsys_path = user_args.get("nsys_path")
+        self._nsys_workload = user_args.get("nsys_workload")
+        self._nsys_thread: Optional[threading.Thread] = None
+        self._nsys_html: Optional[str] = None
         if self._collect_metadata:
             self._static_metadata = get_static_metadata(self._spawn_time, user_args, self._external_metadata_path)
 
@@ -379,6 +385,40 @@ class GProfiler:
                 logger.warning(f"Failed to start {prof.__class__.__name__}, continuing without it", exc_info=True)
                 self.process_profilers.remove(cast(ProcessProfilerBase, prof))
 
+        # Kick off NVIDIA nsys GPU capture in parallel with CPU profilers (adhoc).
+        if self._enable_nsys:
+            self._nsys_html = None
+            self._nsys_thread = threading.Thread(
+                target=self._run_nsys_capture_background,
+                name="nsys-capture",
+                daemon=True,
+            )
+            self._nsys_thread.start()
+            logger.info("Started background nsys GPU capture thread")
+
+    def _run_nsys_capture_background(self) -> None:
+        """Collect nsys GPU flamegraph HTML while CPU profilers run."""
+        try:
+            from gprofiler.nsys_profiler import collect_nsys_adhoc_html
+
+            def _gen(collapsed: str) -> Optional[str]:
+                # Approximate window; labels only.
+                end = datetime.datetime.utcnow()
+                start = end - datetime.timedelta(seconds=self._duration)
+                return self._generate_flamegraph_html(collapsed, start, end)
+
+            html = collect_nsys_adhoc_html(
+                duration_sec=self._duration,
+                nsys_path=self._nsys_path,
+                workload=self._nsys_workload,
+                stop_event=self._profiler_state.stop_event,
+                generate_html_fn=_gen,
+            )
+            self._nsys_html = html
+        except Exception:
+            logger.exception("Background nsys GPU capture failed")
+            self._nsys_html = None
+
     def stop(self) -> None:
         logger.info("Stopping ...")
         self._profiler_state.stop_event.set()
@@ -519,6 +559,17 @@ class GProfiler:
             )
             if flamegraph_html:
                 logger.info("Generated flamegraph HTML for profile data")
+
+        # Prefer nsys GPU HTML for Adhoc when enable_nsys produced a capture.
+        if self._enable_nsys:
+            if self._nsys_thread is not None and self._nsys_thread.is_alive():
+                logger.info("Waiting for background nsys GPU capture to finish...")
+                self._nsys_thread.join(timeout=max(60, self._duration + 120))
+            if self._nsys_html:
+                logger.info("Using nsys GPU flamegraph HTML for upload (preferred over CPU)")
+                flamegraph_html = self._nsys_html
+            else:
+                logger.warning("enable_nsys was set but no GPU HTML was produced; keeping CPU flamegraph if any")
 
         if NoopProfiler.is_noop_profiler(self.system_profiler):
             assert system_result == {}, system_result  # should be empty!
@@ -1263,6 +1314,31 @@ def parse_cmd_args() -> configargparse.Namespace:
             default=60,
             help="The default perfspect tool collection time is 60 second.",
         )
+
+    nsys_options = parser.add_argument_group("NVIDIA nsys GPU profiling")
+    nsys_options.add_argument(
+        "--enable-nsys",
+        action="store_true",
+        default=False,
+        dest="enable_nsys",
+        help="Enable NVIDIA Nsight Systems (nsys) GPU capture for adhoc flamegraphs. "
+        "Requires nsys installed on the host (not bundled).",
+    )
+    nsys_options.add_argument(
+        "--nsys-path",
+        type=str,
+        dest="nsys_path",
+        default=None,
+        help="Path to nsys binary (default: search PATH / NSYS_PATH / common install dirs).",
+    )
+    nsys_options.add_argument(
+        "--nsys-workload",
+        type=str,
+        dest="nsys_workload",
+        default=None,
+        help="Command line for nsys to wrap (e.g. '/path/to/cuda_burn 30'). "
+        "Recommended for useful CUDA kernel frames.",
+    )
 
     args = parser.parse_args()
 
