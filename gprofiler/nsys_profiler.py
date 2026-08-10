@@ -43,6 +43,35 @@ DEFAULT_NSYS_CANDIDATES = (
 )
 
 
+def _workload_env() -> dict:
+    """Environment for the nsys-wrapped workload.
+
+    gProfiler runs as a PyInstaller bundle that prepends its own lib dir
+    (/tmp/_MEIxxxx) to LD_LIBRARY_PATH; a spawned workload (e.g. dynamically-linked
+    PyTorch) would otherwise pick up the bundle's older libstdc++ and fail to
+    import (CXXABI_1.3.8 not found). Prefer PyInstaller's saved *_ORIG value; if it
+    is absent, strip any _MEI bundle path from LD_LIBRARY_PATH / LD_PRELOAD so the
+    child resolves the system libraries.
+    """
+    env = os.environ.copy()
+    for var in ("LD_LIBRARY_PATH", "LD_PRELOAD"):
+        orig = env.pop(f"{var}_ORIG", None)
+        if orig is not None:
+            if orig:
+                env[var] = orig
+            else:
+                env.pop(var, None)
+            continue
+        current = env.get(var)
+        if current:
+            cleaned = os.pathsep.join(p for p in current.split(os.pathsep) if p and "/_MEI" not in p)
+            if cleaned:
+                env[var] = cleaned
+            else:
+                env.pop(var, None)
+    return env
+
+
 def find_nsys(explicit_path: Optional[str] = None) -> Optional[Path]:
     """Locate an executable nsys binary.
 
@@ -128,6 +157,7 @@ def run_nsys_capture(
             stderr=subprocess.STDOUT,
             timeout=timeout,
             check=False,
+            env=_workload_env(),
         )
         if proc.stdout:
             logger.info("nsys profile output (tail): %s", proc.stdout.decode("utf-8", "replace")[-2000:])
