@@ -68,3 +68,29 @@ Fallback if kern sum is empty:
 ```
 gpu;nsys;cuda_api;cudaLaunchKernel 213
 ```
+
+## Reading the flamegraph
+
+- The `gpu;nsys;cuda_kernel` prefix is a constant category, **not a call stack**;
+  `cuda_gpu_kern_sum` is a flat per-kernel summary, so each kernel is a leaf and
+  the only meaningful axis is width.
+- Weights are **GPU time in microseconds** from CUPTI activity tracing (total ns
+  per kernel across all launches, divided by 1000) — not samples, despite the
+  renderer's "samples" label, and not PMU counters.
+- The `nsys-cuda` entry in `perf_events` is a capture-type tag for the Adhoc UI
+  chip, not a hardware event.
+- For a real ML workload the frames are library kernels the framework dispatched
+  (e.g. `cutlass_80_tensorop_*gemm_*` for a PyTorch fp16 matmul on Tensor Cores;
+  a `_relu` infix means the activation was fused into the GEMM epilogue).
+
+## Workload environment (PyInstaller caveat)
+
+gProfiler runs as a PyInstaller bundle that prepends its unpack dir
+(`/tmp/_MEIxxxx`) to `LD_LIBRARY_PATH`. The nsys workload is spawned with a
+cleaned environment (`_workload_env()`): PyInstaller's saved `*_ORIG` values are
+restored, and any `_MEI` path is stripped otherwise. Without this, a
+**dynamically-linked** workload (python/torch, most real binaries) loads the
+bundle's older `libstdc++` and fails to start (`CXXABI_... not found`), yielding
+an empty capture; statically-linked workloads are unaffected. If `enable_nsys`
+produces a bare `root` flamegraph, check the agent log for
+`ImportError`/`CXXABI` from the workload.
