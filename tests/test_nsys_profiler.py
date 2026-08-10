@@ -25,6 +25,7 @@ import pytest
 
 from gprofiler.nsys_profiler import (
     _csv_to_collapsed,
+    _workload_env,
     find_nsys,
     nsys_stats_to_collapsed,
 )
@@ -84,6 +85,48 @@ def test_find_nsys_prefers_explicit(tmp_path: Path):
     found = find_nsys(str(fake))
     assert found is not None
     assert found == fake.resolve()
+
+
+def test_workload_env_restores_original_ld_library_path(monkeypatch):
+    # PyInstaller bundle sets LD_LIBRARY_PATH to its own libs and saves the
+    # pre-launch value in *_ORIG. The spawned workload must get the original.
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/tmp/_MEIxxxx")
+    monkeypatch.setenv("LD_LIBRARY_PATH_ORIG", "/usr/lib/x86_64-linux-gnu")
+    env = _workload_env()
+    assert env["LD_LIBRARY_PATH"] == "/usr/lib/x86_64-linux-gnu"
+    assert "LD_LIBRARY_PATH_ORIG" not in env
+
+
+def test_workload_env_empty_orig_unsets_var(monkeypatch):
+    # When *_ORIG is empty, the var was unset before the bundle ran: unset it.
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/tmp/_MEIxxxx")
+    monkeypatch.setenv("LD_LIBRARY_PATH_ORIG", "")
+    env = _workload_env()
+    assert "LD_LIBRARY_PATH" not in env
+
+
+def test_workload_env_noop_without_orig(monkeypatch):
+    # Not running under PyInstaller (no *_ORIG, no _MEI): leave the env as-is.
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/keep/this")
+    monkeypatch.delenv("LD_LIBRARY_PATH_ORIG", raising=False)
+    env = _workload_env()
+    assert env["LD_LIBRARY_PATH"] == "/keep/this"
+
+
+def test_workload_env_strips_mei_when_no_orig(monkeypatch):
+    # No *_ORIG saved, but LD_LIBRARY_PATH carries a PyInstaller _MEI bundle dir:
+    # drop the bundle path, keep the rest so the child finds system libs.
+    monkeypatch.delenv("LD_LIBRARY_PATH_ORIG", raising=False)
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/tmp/_MEIabc123:/usr/lib/x86_64-linux-gnu")
+    env = _workload_env()
+    assert env["LD_LIBRARY_PATH"] == "/usr/lib/x86_64-linux-gnu"
+
+
+def test_workload_env_unsets_when_only_mei(monkeypatch):
+    monkeypatch.delenv("LD_LIBRARY_PATH_ORIG", raising=False)
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/tmp/_MEIabc123")
+    env = _workload_env()
+    assert "LD_LIBRARY_PATH" not in env
 
 
 def test_nsys_stats_to_collapsed_uses_kern(tmp_path: Path, monkeypatch):
