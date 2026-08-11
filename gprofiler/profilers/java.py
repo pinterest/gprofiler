@@ -495,7 +495,7 @@ class AsyncProfiledProcess:
     Represents a process profiled with async-profiler.
     """
 
-    FORMAT_PARAMS = "ann,sig"
+    FORMAT_PARAMS = "ann,sig,threads"
     OUTPUT_FORMAT = "collapsed"
     OUTPUTS_MODE = 0o622  # readable by root, writable by all
 
