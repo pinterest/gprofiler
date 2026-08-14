@@ -45,6 +45,26 @@ When `enable_nsys` succeeds, the uploaded `flamegraph_html` is the **GPU**
 flamegraph (preferred over CPU). `run_arguments.perf_events` also gains
 `nsys-cuda` so the Adhoc UI can show a **GPU / nsys** chip.
 
+## CPU/GPU timeline mode (`--nsys-timeline` / `nsys_timeline`)
+
+The same capture (`-t cuda,nvtx -s none`) already records both sides with
+timestamps: `cuda_gpu_trace` (per-kernel Start/Duration/Device/Stream) and
+`cuda_api_trace` (per-call Start/Duration/Pid/Tid — `-s none` only disables CPU
+*stack sampling*, CUDA API tracing stays on). Both share one nsys clock and a
+`CorrID` linking each CPU-side launch to the GPU kernel it produced.
+
+With `--nsys-timeline` (CLI) or `combined_config.nsys_timeline: true`
+(heartbeat, alongside `enable_nsys`), the agent exports those two trace reports
+instead of the kern/api summaries and uploads a **self-contained timeline HTML**
+through the same adhoc path: swim lanes per CPU thread issuing CUDA calls and
+per GPU device/stream, wheel-zoom / drag-pan, and click-to-highlight CorrID so a
+`cudaLaunchKernel` and its kernel light up together. If the trace export yields
+no events, the agent falls back to the GPU flamegraph. `perf_events` also gains
+`nsys-timeline` (next to `nsys-cuda`) so the UI can distinguish the view.
+
+Captures with more than 20,000 events keep the longest ones (the HTML notes
+"showing N of M") to bound upload size.
+
 ## Kind / sandbox topology
 
 Kind runs the Studio control plane only. The agent that invokes nsys must run on

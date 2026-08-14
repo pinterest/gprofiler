@@ -172,6 +172,7 @@ class GProfiler:
         self._enable_nsys = bool(user_args.get("enable_nsys", False))
         self._nsys_path = user_args.get("nsys_path")
         self._nsys_workload = user_args.get("nsys_workload")
+        self._nsys_timeline = bool(user_args.get("nsys_timeline", False))
         self._nsys_thread: Optional[threading.Thread] = None
         self._nsys_html: Optional[str] = None
         if self._collect_metadata:
@@ -413,6 +414,7 @@ class GProfiler:
                 workload=self._nsys_workload,
                 stop_event=self._profiler_state.stop_event,
                 generate_html_fn=_gen,
+                timeline=self._nsys_timeline,
             )
             self._nsys_html = html
         except Exception:
@@ -566,7 +568,8 @@ class GProfiler:
                 logger.info("Waiting for background nsys GPU capture to finish...")
                 self._nsys_thread.join(timeout=max(60, self._duration + 120))
             if self._nsys_html:
-                logger.info("Using nsys GPU flamegraph HTML for upload (preferred over CPU)")
+                kind = "CPU/GPU timeline" if self._nsys_timeline else "GPU flamegraph"
+                logger.info(f"Using nsys {kind} HTML for upload (preferred over CPU)")
                 flamegraph_html = self._nsys_html
             else:
                 logger.warning("enable_nsys was set but no GPU HTML was produced; keeping CPU flamegraph if any")
@@ -1338,6 +1341,14 @@ def parse_cmd_args() -> configargparse.Namespace:
         default=None,
         help="Command line for nsys to wrap (e.g. '/path/to/cuda_burn 30'). "
         "Recommended for useful CUDA kernel frames.",
+    )
+    nsys_options.add_argument(
+        "--nsys-timeline",
+        action="store_true",
+        default=False,
+        dest="nsys_timeline",
+        help="With --enable-nsys, upload a CPU/GPU timeline (cuda_gpu_trace + "
+        "cuda_api_trace swim lanes, CorrID-linked) instead of the GPU flamegraph.",
     )
 
     args = parser.parse_args()

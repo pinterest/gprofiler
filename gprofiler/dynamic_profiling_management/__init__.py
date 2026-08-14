@@ -116,6 +116,7 @@ def create_profiler_args(
         if found is not None:
             new_args.nsys_path = str(found)
             new_args.nsys_workload = combined_config.get("nsys_workload")
+            new_args.nsys_timeline = bool(combined_config.get("nsys_timeline", False))
             logger.info(f"enable_nsys: using nsys at {found}")
         else:
             logger.error(
@@ -138,6 +139,8 @@ def create_profiler_args(
         events = [e.strip() for e in str(existing).split(",") if e.strip()]
         if "nsys-cuda" not in events:
             events.append("nsys-cuda")
+        if getattr(new_args, "nsys_timeline", False) and "nsys-timeline" not in events:
+            events.append("nsys-timeline")
         new_args.perf_events = ",".join(events)
 
     return new_args

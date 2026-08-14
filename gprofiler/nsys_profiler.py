@@ -243,56 +243,61 @@ def _csv_to_collapsed(csv_text: str, frame_prefix: str) -> Optional[str]:
     return "\n".join(lines) if lines else None
 
 
+def _export_stats_csv(nsys: Path, nsys_rep: Path, work_dir: Path, report: str, out_prefix: Path) -> Optional[str]:
+    """Run `nsys stats --report=<report> --format=csv` and return the CSV text, or None."""
+    cmd = [
+        str(nsys),
+        "stats",
+        f"--report={report}",
+        "--format=csv",
+        "--force-export=true",
+        "-o",
+        str(out_prefix),
+        str(nsys_rep),
+    ]
+    try:
+        proc = subprocess.run(  # nosec B603
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=120,
+            check=False,
+        )
+        if proc.returncode != 0:
+            logger.warning(
+                "nsys stats %s failed (rc=%s): %s",
+                report,
+                proc.returncode,
+                (proc.stdout or b"")[-1000:].decode("utf-8", "replace"),
+            )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        logger.warning("nsys stats %s error: %s", report, exc)
+        return None
+
+    matches = sorted(work_dir.glob(out_prefix.name + "*.csv"))
+    # Also check CWD-relative names nsys sometimes writes
+    matches += sorted(Path(".").glob(out_prefix.name + "*.csv"))
+    matches += sorted(nsys_rep.parent.glob(out_prefix.name + "*.csv"))
+    # Dedup
+    seen = set()
+    unique = []
+    for m in matches:
+        rp = str(m.resolve()) if m.exists() else str(m)
+        if rp not in seen and m.is_file() and m.stat().st_size > 0:
+            seen.add(rp)
+            unique.append(m)
+    if not unique:
+        logger.info("nsys stats %s produced no non-empty CSV", report)
+        return None
+    return unique[0].read_text(encoding="utf-8", errors="replace")
+
+
 def nsys_stats_to_collapsed(nsys: Path, nsys_rep: Path, work_dir: Path) -> Optional[str]:
     """Export cuda_gpu_kern_sum (fallback cuda_api_sum) and convert to collapsed stacks."""
     work_dir.mkdir(parents=True, exist_ok=True)
 
     def _export(report: str, out_prefix: Path) -> Optional[str]:
-        cmd = [
-            str(nsys),
-            "stats",
-            f"--report={report}",
-            "--format=csv",
-            "--force-export=true",
-            "-o",
-            str(out_prefix),
-            str(nsys_rep),
-        ]
-        try:
-            proc = subprocess.run(  # nosec B603
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                timeout=120,
-                check=False,
-            )
-            if proc.returncode != 0:
-                logger.warning(
-                    "nsys stats %s failed (rc=%s): %s",
-                    report,
-                    proc.returncode,
-                    (proc.stdout or b"")[-1000:].decode("utf-8", "replace"),
-                )
-        except (subprocess.TimeoutExpired, OSError) as exc:
-            logger.warning("nsys stats %s error: %s", report, exc)
-            return None
-
-        matches = sorted(work_dir.glob(out_prefix.name + "*.csv"))
-        # Also check CWD-relative names nsys sometimes writes
-        matches += sorted(Path(".").glob(out_prefix.name + "*.csv"))
-        matches += sorted(nsys_rep.parent.glob(out_prefix.name + "*.csv"))
-        # Dedup
-        seen = set()
-        unique = []
-        for m in matches:
-            rp = str(m.resolve()) if m.exists() else str(m)
-            if rp not in seen and m.is_file() and m.stat().st_size > 0:
-                seen.add(rp)
-                unique.append(m)
-        if not unique:
-            logger.info("nsys stats %s produced no non-empty CSV", report)
-            return None
-        return unique[0].read_text(encoding="utf-8", errors="replace")
+        return _export_stats_csv(nsys, nsys_rep, work_dir, report, out_prefix)
 
     kern_csv = _export("cuda_gpu_kern_sum", work_dir / "kern")
     if kern_csv:
@@ -310,6 +315,296 @@ def nsys_stats_to_collapsed(nsys: Path, nsys_rep: Path, work_dir: Path) -> Optio
 
     logger.error("No usable nsys stats CSV (cuda_gpu_kern_sum / cuda_api_sum)")
     return None
+
+
+# --- CPU/GPU timeline (cuda_gpu_trace + cuda_api_trace) ---------------------
+
+# Self-contained timeline HTML gets large fast; keep the longest events if the
+# capture has more than this many.
+MAX_TIMELINE_EVENTS = 20000
+
+
+def _find_column(fieldnames: List[str], *needles: str) -> Optional[str]:
+    """First column whose lowercase name contains any needle (checked in order)."""
+    lowered = [(f, f.lower()) for f in fieldnames]
+    for needle in needles:
+        for original, low in lowered:
+            if needle in low:
+                return original
+    return None
+
+
+def _parse_trace_csv(csv_text: str, kind: str) -> List[dict]:
+    """Parse an nsys cuda_gpu_trace / cuda_api_trace CSV into timeline events.
+
+    kind is "gpu" or "api". Returns events with keys:
+    start (ns), dur (ns), name, corr (int|None), lane (str).
+    GPU lanes group by device+stream; API lanes group by pid/tid.
+    """
+    reader = csv.DictReader(io.StringIO(csv_text))
+    if not reader.fieldnames:
+        return []
+    fieldnames = [f.strip().lstrip("\ufeff") for f in reader.fieldnames]
+    reader.fieldnames = fieldnames
+
+    start_key = _find_column(fieldnames, "start (ns)", "start")
+    dur_key = _find_column(fieldnames, "duration (ns)", "duration")
+    name_key = next((f for f in fieldnames if f.lower() in ("name", "kernel name", "kernel")), None)
+    corr_key = _find_column(fieldnames, "corrid")
+    if start_key is None or dur_key is None or name_key is None:
+        logger.warning("nsys %s trace CSV missing start/duration/name columns: %s", kind, fieldnames)
+        return []
+
+    device_key = stream_key = pid_key = tid_key = None
+    if kind == "gpu":
+        device_key = _find_column(fieldnames, "device")
+        stream_key = _find_column(fieldnames, "strm", "stream")
+    else:
+        pid_key = _find_column(fieldnames, "pid")
+        tid_key = _find_column(fieldnames, "tid")
+
+    events: List[dict] = []
+    for row in reader:
+        cleaned = {(k or "").strip().lstrip("\ufeff"): (v or "").strip() for k, v in row.items()}
+        name = cleaned.get(name_key, "").strip().strip('"')
+        if not name:
+            continue
+        try:
+            start = int(float(cleaned.get(start_key, "")))
+            dur = max(0, int(float(cleaned.get(dur_key, ""))))
+        except ValueError:
+            continue
+        corr: Optional[int] = None
+        if corr_key:
+            try:
+                corr = int(float(cleaned.get(corr_key, "")))
+            except ValueError:
+                corr = None
+        if kind == "gpu":
+            device = cleaned.get(device_key, "") if device_key else ""
+            stream = cleaned.get(stream_key, "") if stream_key else ""
+            lane = f"GPU {device or '?'} stream {stream or '?'}"
+        else:
+            pid = cleaned.get(pid_key, "") if pid_key else ""
+            tid = cleaned.get(tid_key, "") if tid_key else ""
+            lane = f"CPU pid {pid or '?'} tid {tid or '?'}"
+        events.append({"start": start, "dur": dur, "name": name, "corr": corr, "lane": lane})
+    return events
+
+
+def nsys_trace_to_timeline_events(nsys: Path, nsys_rep: Path, work_dir: Path) -> Optional[dict]:
+    """Export cuda_gpu_trace + cuda_api_trace and parse them into timeline events.
+
+    Returns {"gpu": [...], "api": [...]} (either list may be empty), or None if
+    neither trace produced events.
+    """
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    gpu_events: List[dict] = []
+    api_events: List[dict] = []
+
+    gpu_csv = _export_stats_csv(nsys, nsys_rep, work_dir, "cuda_gpu_trace", work_dir / "gpu_trace")
+    if gpu_csv:
+        gpu_events = _parse_trace_csv(gpu_csv, "gpu")
+    api_csv = _export_stats_csv(nsys, nsys_rep, work_dir, "cuda_api_trace", work_dir / "api_trace")
+    if api_csv:
+        api_events = _parse_trace_csv(api_csv, "api")
+
+    if not gpu_events and not api_events:
+        logger.error("No usable nsys trace CSV (cuda_gpu_trace / cuda_api_trace)")
+        return None
+    logger.info(
+        "Parsed nsys timeline traces: %d GPU events, %d CUDA API events", len(gpu_events), len(api_events)
+    )
+    return {"gpu": gpu_events, "api": api_events}
+
+
+def generate_nsys_timeline_html(events: dict, title: str = "nsys CPU/GPU timeline") -> Optional[str]:
+    """Render timeline events as a self-contained HTML swim-lane view.
+
+    Lanes: one per CPU thread issuing CUDA API calls, one per GPU device/stream.
+    CorrID links a CPU-side launch to the GPU kernel it produced (click to
+    highlight). No external assets; suitable for the Studio Adhoc iframe.
+    """
+    import json
+
+    all_events: List[dict] = []
+    for kind in ("api", "gpu"):
+        for ev in events.get(kind, []):
+            all_events.append({**ev, "kind": kind})
+    if not all_events:
+        return None
+
+    total_events = len(all_events)
+    truncated = total_events > MAX_TIMELINE_EVENTS
+    if truncated:
+        all_events.sort(key=lambda e: -e["dur"])
+        all_events = all_events[:MAX_TIMELINE_EVENTS]
+
+    t0 = min(e["start"] for e in all_events)
+    span = max(1, max(e["start"] + e["dur"] for e in all_events) - t0)
+    all_events.sort(key=lambda e: e["start"])
+
+    # CPU lanes first, then GPU lanes, each sorted by name for stable order.
+    lane_names = sorted({e["lane"] for e in all_events if e["kind"] == "api"}) + sorted(
+        {e["lane"] for e in all_events if e["kind"] == "gpu"}
+    )
+    lane_index = {name: i for i, name in enumerate(lane_names)}
+
+    name_table: List[str] = []
+    name_index: dict = {}
+    packed = []
+    for e in all_events:
+        idx = name_index.get(e["name"])
+        if idx is None:
+            idx = len(name_table)
+            name_index[e["name"]] = idx
+            name_table.append(e["name"])
+        corr = e["corr"] if e["corr"] is not None else -1
+        packed.append([e["start"] - t0, e["dur"], lane_index[e["lane"]], corr, idx])
+
+    data = {
+        "lanes": lane_names,
+        "cpuLanes": sum(1 for n in lane_names if n.startswith("CPU")),
+        "names": name_table,
+        "events": packed,
+        "span": span,
+        "total": total_events,
+        "shown": len(all_events),
+    }
+    data_json = json.dumps(data, separators=(",", ":"))
+
+    template = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>__TITLE__</title>
+<style>
+body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 16px; background: #0b1020; color: #e8ecf5; }
+h1 { font-size: 1.1rem; font-weight: 600; margin: 0 0 4px 0; }
+.meta { color: #9aa3b5; font-size: 0.8rem; margin-bottom: 10px; }
+#wrap { position: relative; background: #151b2e; border-radius: 8px; padding: 8px; }
+#tl { display: block; width: 100%; cursor: crosshair; }
+#tip { position: absolute; display: none; pointer-events: none; background: #222b45; color: #e8ecf5;
+  border: 1px solid #3a4568; border-radius: 4px; padding: 6px 8px; font-size: 0.75rem; max-width: 480px;
+  white-space: pre-wrap; word-break: break-all; z-index: 10; }
+</style></head><body>
+<h1>__TITLE__</h1>
+<p class="meta" id="meta"></p>
+<div id="wrap"><canvas id="tl"></canvas><div id="tip"></div></div>
+<script>
+const DATA = __DATA__;
+const LANE_H = 22, LABEL_W = 190, AXIS_H = 18;
+const canvas = document.getElementById('tl'), tip = document.getElementById('tip');
+let viewStart = 0, viewSpan = DATA.span, selCorr = -1;
+const heightPx = AXIS_H + DATA.lanes.length * LANE_H;
+function fmtNs(ns) {
+  if (ns >= 1e9) return (ns / 1e9).toFixed(3) + ' s';
+  if (ns >= 1e6) return (ns / 1e6).toFixed(3) + ' ms';
+  if (ns >= 1e3) return (ns / 1e3).toFixed(1) + ' us';
+  return ns + ' ns';
+}
+document.getElementById('meta').textContent =
+  'CUDA API calls (CPU threads) + GPU kernels/memops from nsys cuda_api_trace / cuda_gpu_trace. ' +
+  'Span ' + fmtNs(DATA.span) + '. Showing ' + DATA.shown + ' of ' + DATA.total + ' events' +
+  (DATA.shown < DATA.total ? ' (longest kept)' : '') +
+  '. Wheel: zoom - drag: pan - click: highlight CorrID (CPU launch <-> GPU kernel).';
+function draw() {
+  const cssW = canvas.clientWidth || 800;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = cssW * dpr; canvas.height = heightPx * dpr;
+  canvas.style.height = heightPx + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, heightPx);
+  const plotW = cssW - LABEL_W;
+  ctx.font = '11px ui-sans-serif, system-ui, sans-serif';
+  // lane labels + separators
+  for (let i = 0; i < DATA.lanes.length; i++) {
+    const y = AXIS_H + i * LANE_H;
+    ctx.fillStyle = i % 2 ? '#181f36' : '#151b2e';
+    ctx.fillRect(LABEL_W, y, plotW, LANE_H);
+    ctx.fillStyle = '#9aa3b5';
+    ctx.fillText(DATA.lanes[i], 4, y + LANE_H - 7, LABEL_W - 8);
+  }
+  // time axis ticks
+  ctx.fillStyle = '#9aa3b5';
+  const ticks = 6;
+  for (let i = 0; i <= ticks; i++) {
+    const t = viewStart + viewSpan * i / ticks;
+    const x = LABEL_W + plotW * i / ticks;
+    ctx.fillText(fmtNs(t), Math.min(x, cssW - 60), 12);
+  }
+  // events
+  for (const [s, d, lane, corr, nameIdx] of DATA.events) {
+    if (s + d < viewStart || s > viewStart + viewSpan) continue;
+    const x = LABEL_W + (s - viewStart) / viewSpan * plotW;
+    const w = Math.max(1, d / viewSpan * plotW);
+    const y = AXIS_H + lane * LANE_H + 3;
+    const isCpu = lane < DATA.cpuLanes;
+    if (selCorr >= 0 && corr === selCorr) ctx.fillStyle = '#f5e663';
+    else ctx.fillStyle = isCpu ? '#5c8ae6' : '#e6a15c';
+    ctx.fillRect(x, y, w, LANE_H - 6);
+  }
+}
+function hit(mx, my) {
+  const plotW = (canvas.clientWidth || 800) - LABEL_W;
+  if (mx < LABEL_W || my < AXIS_H) return null;
+  const lane = Math.floor((my - AXIS_H) / LANE_H);
+  const t = viewStart + (mx - LABEL_W) / plotW * viewSpan;
+  const minW = viewSpan / plotW; // 1px in time units
+  let best = null;
+  for (const ev of DATA.events) {
+    if (ev[2] !== lane) continue;
+    if (t >= ev[0] && t <= ev[0] + Math.max(ev[1], minW)) best = ev;
+  }
+  return best;
+}
+canvas.addEventListener('mousemove', (e) => {
+  const r = canvas.getBoundingClientRect();
+  const ev = hit(e.clientX - r.left, e.clientY - r.top);
+  if (ev) {
+    tip.style.display = 'block';
+    tip.style.left = (e.clientX - r.left + 12) + 'px';
+    tip.style.top = (e.clientY - r.top + 12) + 'px';
+    tip.textContent = DATA.names[ev[4]] + '\\nstart ' + fmtNs(ev[0]) + '  dur ' + fmtNs(ev[1]) +
+      (ev[3] >= 0 ? '\\nCorrID ' + ev[3] : '');
+  } else {
+    tip.style.display = 'none';
+  }
+});
+canvas.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
+canvas.addEventListener('click', (e) => {
+  const r = canvas.getBoundingClientRect();
+  const ev = hit(e.clientX - r.left, e.clientY - r.top);
+  selCorr = ev && ev[3] >= 0 && ev[3] !== selCorr ? ev[3] : -1;
+  draw();
+});
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const r = canvas.getBoundingClientRect();
+  const plotW = (canvas.clientWidth || 800) - LABEL_W;
+  const mx = e.clientX - r.left - LABEL_W;
+  if (mx < 0) return;
+  const t = viewStart + mx / plotW * viewSpan;
+  const factor = e.deltaY > 0 ? 1.25 : 0.8;
+  viewSpan = Math.min(DATA.span, Math.max(1000, viewSpan * factor));
+  viewStart = Math.min(Math.max(0, t - mx / plotW * viewSpan), DATA.span - viewSpan);
+  draw();
+}, { passive: false });
+let dragX = null;
+canvas.addEventListener('mousedown', (e) => { dragX = e.clientX; });
+window.addEventListener('mouseup', () => { dragX = null; });
+window.addEventListener('mousemove', (e) => {
+  if (dragX === null) return;
+  const plotW = (canvas.clientWidth || 800) - LABEL_W;
+  viewStart = Math.min(Math.max(0, viewStart - (e.clientX - dragX) / plotW * viewSpan), DATA.span - viewSpan);
+  dragX = e.clientX;
+  draw();
+});
+window.addEventListener('resize', draw);
+draw();
+</script>
+</body></html>
+"""
+    return template.replace("__TITLE__", title).replace("__DATA__", data_json)
 
 
 def _simple_gpu_flamegraph_html(collapsed: str, title: str = "nsys GPU profile") -> str:
@@ -416,8 +711,14 @@ def collect_nsys_adhoc_html(
     work_dir: Optional[str] = None,
     stop_event=None,
     generate_html_fn: Optional[Callable[[str], Optional[str]]] = None,
+    timeline: bool = False,
 ) -> Optional[str]:
-    """End-to-end: find nsys → capture → collapsed → HTML. Returns HTML or None."""
+    """End-to-end: find nsys → capture → collapsed → HTML. Returns HTML or None.
+
+    With timeline=True the same capture is exported as cuda_gpu_trace +
+    cuda_api_trace and rendered as a CPU/GPU timeline instead of a flamegraph
+    (falling back to the flamegraph if the trace export yields no events).
+    """
     nsys = find_nsys(nsys_path)
     if nsys is None:
         logger.error(
@@ -447,6 +748,15 @@ def collect_nsys_adhoc_html(
     )
     if rep is None:
         return None
+
+    if timeline:
+        events = nsys_trace_to_timeline_events(nsys, rep, base)
+        if events:
+            html = generate_nsys_timeline_html(events)
+            if html:
+                logger.info("Generated nsys CPU/GPU timeline HTML (%d bytes)", len(html))
+                return html
+        logger.warning("nsys timeline requested but no trace events; falling back to GPU flamegraph")
 
     collapsed = nsys_stats_to_collapsed(nsys, rep, base)
     if not collapsed:
