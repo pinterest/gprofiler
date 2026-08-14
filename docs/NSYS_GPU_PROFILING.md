@@ -65,6 +65,11 @@ no events, the agent falls back to the GPU flamegraph. `perf_events` also gains
 Captures with more than 20,000 events keep the longest ones (the HTML notes
 "showing N of M") to bound upload size.
 
+The view opens auto-zoomed to a window where the median event is a few pixels
+wide (a "Full span" button resets), and at low zoom sub-pixel events shade the
+lane by occupancy instead of tiling solid 1px bars — so a fully-packed lane
+looks different from a half-idle one even when zoomed out.
+
 ## Kind / sandbox topology
 
 Kind runs the Studio control plane only. The agent that invokes nsys must run on

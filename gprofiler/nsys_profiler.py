@@ -501,11 +501,32 @@ function fmtNs(ns) {
   if (ns >= 1e3) return (ns / 1e3).toFixed(1) + ' us';
   return ns + ' ns';
 }
-document.getElementById('meta').textContent =
+// Open auto-zoomed so the median event is a few pixels wide; at full span
+// most captures collapse into a solid smear. "0" or the button resets.
+let autoZoomed = false;
+function initView() {
+  const durs = DATA.events.map((e) => e[1]).filter((d) => d > 0).sort((a, b) => a - b);
+  if (!durs.length) return;
+  const med = durs[Math.floor(durs.length / 2)];
+  const plotW = (canvas.clientWidth || 800) - LABEL_W;
+  const target = Math.max(1000, med * plotW / 6);
+  if (target < DATA.span * 0.9) {
+    viewSpan = target;
+    viewStart = Math.max(0, (DATA.span - viewSpan) / 2);
+    autoZoomed = true;
+  }
+}
+function fullSpan() { viewStart = 0; viewSpan = DATA.span; draw(); }
+initView();
+document.getElementById('meta').innerHTML =
   'CUDA API calls (CPU threads) + GPU kernels/memops from nsys cuda_api_trace / cuda_gpu_trace. ' +
   'Span ' + fmtNs(DATA.span) + '. Showing ' + DATA.shown + ' of ' + DATA.total + ' events' +
   (DATA.shown < DATA.total ? ' (longest kept)' : '') +
-  '. Wheel: zoom - drag: pan - click: highlight CorrID (CPU launch <-> GPU kernel).';
+  '. Wheel: zoom - drag: pan - click: highlight CorrID (CPU launch <-> GPU kernel)' +
+  (autoZoomed ? '. Auto-zoomed to the middle of the capture; sub-pixel events fade by lane occupancy at low zoom. ' : '. ') +
+  '<button id="fit" style="font: inherit; background: #222b45; color: #e8ecf5; border: 1px solid #3a4568;' +
+  ' border-radius: 4px; cursor: pointer; padding: 1px 8px;">Full span</button>';
+document.getElementById('fit').addEventListener('click', fullSpan);
 function draw() {
   const cssW = canvas.clientWidth || 800;
   const dpr = window.devicePixelRatio || 1;
@@ -533,15 +554,35 @@ function draw() {
     ctx.fillText(fmtNs(t), Math.min(x, cssW - 60), 12);
   }
   // events
+  // Sub-pixel events don't get a solid 1px bar each (thousands of them tile
+  // into a misleading solid strip); instead they accumulate per-pixel
+  // occupancy and the column is shaded by how busy the lane actually is.
+  const pxT = viewSpan / plotW; // time units per pixel
+  const density = DATA.lanes.map(() => new Float32Array(Math.max(1, Math.ceil(plotW))));
   for (const [s, d, lane, corr, nameIdx] of DATA.events) {
     if (s + d < viewStart || s > viewStart + viewSpan) continue;
     const x = LABEL_W + (s - viewStart) / viewSpan * plotW;
-    const w = Math.max(1, d / viewSpan * plotW);
+    const w = d / viewSpan * plotW;
     const y = AXIS_H + lane * LANE_H + 3;
-    const isCpu = lane < DATA.cpuLanes;
-    if (selCorr >= 0 && corr === selCorr) ctx.fillStyle = '#f5e663';
-    else ctx.fillStyle = isCpu ? '#5c8ae6' : '#e6a15c';
-    ctx.fillRect(x, y, w, LANE_H - 6);
+    const isSel = selCorr >= 0 && corr === selCorr;
+    if (w < 1 && !isSel) {
+      const col = Math.min(density[lane].length - 1, Math.max(0, Math.floor(x - LABEL_W)));
+      density[lane][col] = Math.min(1, density[lane][col] + Math.max(0.05, w));
+      continue;
+    }
+    if (isSel) ctx.fillStyle = '#f5e663';
+    else ctx.fillStyle = lane < DATA.cpuLanes ? '#5c8ae6' : '#e6a15c';
+    ctx.fillRect(x, y, Math.max(1, w), LANE_H - 6);
+  }
+  for (let lane = 0; lane < density.length; lane++) {
+    const col = density[lane];
+    const y = AXIS_H + lane * LANE_H + 3;
+    const rgb = lane < DATA.cpuLanes ? '92,138,230' : '230,161,92';
+    for (let i = 0; i < col.length; i++) {
+      if (col[i] <= 0) continue;
+      ctx.fillStyle = 'rgba(' + rgb + ',' + (0.25 + 0.75 * col[i]).toFixed(2) + ')';
+      ctx.fillRect(LABEL_W + i, y, 1, LANE_H - 6);
+    }
   }
 }
 function hit(mx, my) {
