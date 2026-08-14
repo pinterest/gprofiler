@@ -29,8 +29,10 @@ from gprofiler.nsys_profiler import (
     _workload_env,
     find_nsys,
     generate_nsys_timeline_html,
+    load_callchains_from_sqlite,
     nsys_stats_to_collapsed,
     nsys_trace_to_timeline_events,
+    run_nsys_capture,
 )
 
 
@@ -237,6 +239,144 @@ def test_nsys_trace_to_timeline_events(tmp_path: Path, monkeypatch):
     assert events is not None
     assert len(events["gpu"]) == 2
     assert len(events["api"]) == 3
+
+
+def _make_callchain_sqlite(path: Path, with_tables: bool = True) -> None:
+    """Build a minimal nsys-shaped SQLite export with two API calls sharing a callchain."""
+    import sqlite3
+
+    conn = sqlite3.connect(path)
+    if with_tables:
+        conn.executescript(
+            """
+            CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value TEXT);
+            CREATE TABLE CUDA_CALLCHAINS (id INTEGER, symbol INTEGER, module INTEGER, stackDepth INTEGER);
+            CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME (correlationId INTEGER, callchainId INTEGER);
+            INSERT INTO StringIds VALUES
+                (1, 'cudaLaunchKernel'), (2, '/usr/lib/libcudart.so'),
+                (3, 'at::native::gemm_launch'), (4, '/usr/lib/libtorch_cuda.so'),
+                (5, 'main'), (6, '/usr/bin/python3');
+            INSERT INTO CUDA_CALLCHAINS VALUES
+                (10, 1, 2, 0), (10, 3, 4, 1), (10, 5, 6, 2),
+                (11, 5, 6, 0);
+            INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (101, 10), (102, 10), (103, 11);
+            """
+        )
+    else:
+        conn.execute("CREATE TABLE unrelated (x INTEGER)")
+    conn.commit()
+    conn.close()
+
+
+def test_load_callchains_from_sqlite(tmp_path: Path):
+    db = tmp_path / "cap.sqlite"
+    _make_callchain_sqlite(db)
+    corr_to_stack, stacks = load_callchains_from_sqlite(db)
+    # 101 and 102 share callchain 10 → same deduped stack index
+    assert corr_to_stack[101] == corr_to_stack[102]
+    assert corr_to_stack[103] != corr_to_stack[101]
+    assert len(stacks) == 2
+    shared = stacks[corr_to_stack[101]]
+    # innermost first, "symbol (module)" format, ordered by stackDepth
+    assert shared == [
+        "cudaLaunchKernel (/usr/lib/libcudart.so)",
+        "at::native::gemm_launch (/usr/lib/libtorch_cuda.so)",
+        "main (/usr/bin/python3)",
+    ]
+
+
+def test_load_callchains_missing_tables_is_empty(tmp_path: Path):
+    db = tmp_path / "no_chains.sqlite"
+    _make_callchain_sqlite(db, with_tables=False)
+    assert load_callchains_from_sqlite(db) == ({}, [])
+
+
+def test_load_callchains_corrupt_file_is_empty(tmp_path: Path):
+    db = tmp_path / "corrupt.sqlite"
+    db.write_bytes(b"not a sqlite file at all")
+    assert load_callchains_from_sqlite(db) == ({}, [])
+
+
+def test_run_nsys_capture_backtraces_flags(tmp_path: Path, monkeypatch):
+    nsys = tmp_path / "nsys"
+    nsys.write_text("#!/bin/sh\n")
+    nsys.chmod(0o755)
+    seen_cmds = []
+
+    def fake_run(cmd, **kwargs):
+        seen_cmds.append(cmd)
+        Path(str(cmd[cmd.index("-o") + 1]) + ".nsys-rep").write_bytes(b"fake")
+        return mock.Mock(returncode=0, stdout=b"ok")
+
+    monkeypatch.setattr("gprofiler.nsys_profiler.subprocess.run", fake_run)
+
+    run_nsys_capture(nsys, tmp_path / "a" / "cap", duration_sec=5)
+    assert "-s" in seen_cmds[0] and seen_cmds[0][seen_cmds[0].index("-s") + 1] == "none"
+    assert not any(a.startswith("--cudabacktrace") for a in seen_cmds[0])
+
+    run_nsys_capture(nsys, tmp_path / "b" / "cap", duration_sec=5, backtraces=True)
+    cmd = seen_cmds[1]
+    assert cmd[cmd.index("-s") + 1] == "process-tree"
+    assert cmd[cmd.index("-b") + 1] == "dwarf"
+    assert "--cudabacktrace=kernel" in cmd
+
+
+def test_nsys_trace_to_timeline_events_with_stacks(tmp_path: Path, monkeypatch):
+    nsys = tmp_path / "nsys"
+    nsys.write_text("#!/bin/sh\n")
+    nsys.chmod(0o755)
+    rep = tmp_path / "cap.nsys-rep"
+    rep.write_bytes(b"fake")
+    work = tmp_path / "work"
+    work.mkdir()
+
+    def fake_run(cmd, **kwargs):
+        if "export" in cmd:
+            _make_callchain_sqlite(Path(cmd[cmd.index("--output") + 1]))
+        else:
+            out_prefix = Path(cmd[cmd.index("-o") + 1])
+            report = next(a for a in cmd if a.startswith("--report=")).split("=", 1)[1]
+            csv_text = GPU_TRACE_CSV if report == "cuda_gpu_trace" else API_TRACE_CSV
+            Path(str(out_prefix) + f"_{report}.csv").write_text(csv_text)
+        return mock.Mock(returncode=0, stdout=b"ok")
+
+    monkeypatch.setattr("gprofiler.nsys_profiler.subprocess.run", fake_run)
+    events = nsys_trace_to_timeline_events(nsys, rep, work, with_stacks=True)
+    assert events is not None
+    assert len(events["stacks"]) == 2
+    # CorrID 101/102 (kernels + their launches) carry the shared stack; 103 the other
+    launches = {e["corr"]: e for e in events["api"]}
+    kernels = {e["corr"]: e for e in events["gpu"]}
+    assert launches[101]["stack"] == launches[102]["stack"] == kernels[101]["stack"]
+    assert launches[103]["stack"] != launches[101]["stack"]
+    assert events["stacks"][launches[101]["stack"]][0].startswith("cudaLaunchKernel")
+
+
+def test_generate_timeline_html_with_stacks():
+    events = {
+        "gpu": _parse_trace_csv(GPU_TRACE_CSV, "gpu"),
+        "api": _parse_trace_csv(API_TRACE_CSV, "api"),
+        "stacks": [["cudaLaunchKernel (libcudart.so)", "main (python3)"]],
+    }
+    for ev in events["api"] + events["gpu"]:
+        ev["stack"] = 0 if ev["corr"] in (101, 102) else -1
+    html = generate_nsys_timeline_html(events)
+    assert html is not None
+    assert '"stacks":[[' in html
+    assert "cudaLaunchKernel (libcudart.so)" in html
+    assert "showStack" in html
+    # events pack 6 fields: start, dur, lane, corr, nameIdx, stackIdx
+    assert ",0]" in html and ",-1]" in html
+
+
+def test_generate_timeline_html_without_stacks_still_renders():
+    events = {
+        "gpu": _parse_trace_csv(GPU_TRACE_CSV, "gpu"),
+        "api": _parse_trace_csv(API_TRACE_CSV, "api"),
+    }
+    html = generate_nsys_timeline_html(events)
+    assert html is not None
+    assert '"stacks":[]' in html
 
 
 def test_nsys_trace_to_timeline_events_none_when_empty(tmp_path: Path, monkeypatch):

@@ -70,6 +70,28 @@ wide (a "Full span" button resets), and at low zoom sub-pixel events shade the
 lane by occupancy instead of tiling solid 1px bars — so a fully-packed lane
 looks different from a half-idle one even when zoomed out.
 
+### Click-for-stack mode (`--nsys-timeline-stacks` / `nsys_timeline_stacks`)
+
+With `--nsys-timeline-stacks` (CLI) or `combined_config.nsys_timeline_stacks:
+true` (heartbeat, alongside `nsys_timeline`), the capture adds
+`--cudabacktrace=kernel -s process-tree -b dwarf` so nsys records a CPU
+backtrace at each kernel-launching CUDA API call (`--cudabacktrace` requires
+CPU sampling, so this mode gives up `-s none`; NVIDIA warns of significant
+runtime overhead — keep it for deep dives, not the default timeline). Launches
+shorter than the nsys default 1µs threshold get no backtrace.
+
+The backtraces are not in any `nsys stats` report; the agent additionally runs
+`nsys export --type sqlite` and joins `CUPTI_ACTIVITY_KIND_RUNTIME.callchainId`
+→ `CUDA_CALLCHAINS` → `StringIds` (stdlib `sqlite3`, no new dependency).
+Identical callchains are deduped into a `stacks` table in the HTML payload, so
+thousands of events typically add only a few hundred distinct stacks. Clicking
+an event opens a panel under the timeline with the launch's stack, innermost
+frame first; clicking a **GPU kernel** shows the stack of the CPU call that
+launched it (resolved through CorrID). Frames are native C++ symbols
+(libtorch/aten/libcudart), not Python lines. `perf_events` gains `nsys-stacks`.
+If the SQLite export has no callchains, the timeline still renders — clicks
+just highlight CorrIDs as before.
+
 ## Kind / sandbox topology
 
 Kind runs the Studio control plane only. The agent that invokes nsys must run on

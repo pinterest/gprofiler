@@ -173,6 +173,7 @@ class GProfiler:
         self._nsys_path = user_args.get("nsys_path")
         self._nsys_workload = user_args.get("nsys_workload")
         self._nsys_timeline = bool(user_args.get("nsys_timeline", False))
+        self._nsys_timeline_stacks = bool(user_args.get("nsys_timeline_stacks", False))
         self._nsys_thread: Optional[threading.Thread] = None
         self._nsys_html: Optional[str] = None
         if self._collect_metadata:
@@ -415,6 +416,7 @@ class GProfiler:
                 stop_event=self._profiler_state.stop_event,
                 generate_html_fn=_gen,
                 timeline=self._nsys_timeline,
+                timeline_stacks=self._nsys_timeline_stacks,
             )
             self._nsys_html = html
         except Exception:
@@ -1349,6 +1351,15 @@ def parse_cmd_args() -> configargparse.Namespace:
         dest="nsys_timeline",
         help="With --enable-nsys, upload a CPU/GPU timeline (cuda_gpu_trace + "
         "cuda_api_trace swim lanes, CorrID-linked) instead of the GPU flamegraph.",
+    )
+    nsys_options.add_argument(
+        "--nsys-timeline-stacks",
+        action="store_true",
+        default=False,
+        dest="nsys_timeline_stacks",
+        help="With --nsys-timeline, also record a CPU backtrace per kernel launch "
+        "(--cudabacktrace=kernel; enables CPU sampling — noticeably heavier) and "
+        "show it when an event is clicked in the timeline.",
     )
 
     args = parser.parse_args()
