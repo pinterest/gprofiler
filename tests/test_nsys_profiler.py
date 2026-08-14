@@ -208,6 +208,10 @@ def test_generate_timeline_html_links_corrid():
     assert "101" in html and "102" in html
     # no external assets — must render standalone in the Studio iframe
     assert "http://" not in html and "https://" not in html
+    # auto-zoom on load + density shading for sub-pixel events
+    assert "initView()" in html
+    assert "Full span" in html
+    assert "density" in html
 
 
 def test_generate_timeline_html_empty():
