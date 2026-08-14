@@ -121,8 +121,14 @@ def run_nsys_capture(
     duration_sec: int,
     workload_cmd: Optional[Sequence[str]] = None,
     stop_event=None,
+    backtraces: bool = False,
 ) -> Optional[Path]:
-    """Run `nsys profile` and return the path to the `.nsys-rep` file, or None."""
+    """Run `nsys profile` and return the path to the `.nsys-rep` file, or None.
+
+    backtraces=True records a CPU backtrace per kernel-launching CUDA API call
+    (--cudabacktrace needs CPU sampling on, so it swaps -s none for
+    process-tree sampling — measurably heavier; keep it opt-in).
+    """
     output_prefix.parent.mkdir(parents=True, exist_ok=True)
     duration_sec = max(1, int(duration_sec))
 
@@ -132,12 +138,14 @@ def run_nsys_capture(
         "-o",
         str(output_prefix),
         "--force-overwrite=true",
-        # CUDA-focused, skip heavy CPU sampling / slow symbol waits where possible.
         "-t",
         "cuda,nvtx",
-        "-s",
-        "none",
     ]
+    if backtraces:
+        cmd.extend(["-s", "process-tree", "-b", "dwarf", "--cudabacktrace=kernel"])
+    else:
+        # CUDA-focused, skip heavy CPU sampling / slow symbol waits where possible.
+        cmd.extend(["-s", "none"])
 
     workload = list(workload_cmd) if workload_cmd else None
     if workload:
@@ -392,11 +400,125 @@ def _parse_trace_csv(csv_text: str, kind: str) -> List[dict]:
     return events
 
 
-def nsys_trace_to_timeline_events(nsys: Path, nsys_rep: Path, work_dir: Path) -> Optional[dict]:
+def nsys_export_sqlite(nsys: Path, nsys_rep: Path, work_dir: Path) -> Optional[Path]:
+    """Run `nsys export --type sqlite` and return the .sqlite path, or None."""
+    out = work_dir / (nsys_rep.stem + ".sqlite")
+    cmd = [
+        str(nsys),
+        "export",
+        "--type",
+        "sqlite",
+        "--force-overwrite",
+        "true",
+        "--output",
+        str(out),
+        str(nsys_rep),
+    ]
+    try:
+        proc = subprocess.run(  # nosec B603
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=300,
+            check=False,
+        )
+        if proc.returncode != 0:
+            logger.warning(
+                "nsys export sqlite failed (rc=%s): %s",
+                proc.returncode,
+                (proc.stdout or b"")[-1000:].decode("utf-8", "replace"),
+            )
+            return None
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        logger.warning("nsys export sqlite error: %s", exc)
+        return None
+    if not out.is_file() or out.stat().st_size == 0:
+        logger.warning("nsys export sqlite produced no file at %s", out)
+        return None
+    return out
+
+
+def load_callchains_from_sqlite(sqlite_path: Path) -> tuple:
+    """Read CUDA API backtraces from an nsys SQLite export.
+
+    Returns (corr_to_stack, stacks): correlationId → index into stacks, where
+    each stack is a list of "symbol (module)" frames, innermost first. Stacks
+    are deduped — CUDA_CALLCHAINS rows are shared across API calls already,
+    and identical symbol sequences from different callchain ids collapse too.
+    Empty results (no --cudabacktrace in the capture, or old schema) are not
+    an error: ({}, []).
+    """
+    import sqlite3
+
+    corr_to_stack: dict = {}
+    stacks: List[List[str]] = []
+    try:
+        conn = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
+        try:
+            tables = {
+                row[0]
+                for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            required = {"CUPTI_ACTIVITY_KIND_RUNTIME", "CUDA_CALLCHAINS", "StringIds"}
+            if not required.issubset(tables):
+                logger.info(
+                    "nsys sqlite export lacks callchain tables (missing %s); no stacks",
+                    ",".join(sorted(required - tables)),
+                )
+                return {}, []
+            corr_to_chain = dict(
+                conn.execute(
+                    "SELECT correlationId, callchainId FROM CUPTI_ACTIVITY_KIND_RUNTIME "
+                    "WHERE callchainId IS NOT NULL"
+                ).fetchall()
+            )
+            frame_rows = conn.execute(
+                "SELECT c.id, c.stackDepth, COALESCE(s.value, '?'), COALESCE(m.value, '') "
+                "FROM CUDA_CALLCHAINS c "
+                "LEFT JOIN StringIds s ON s.id = c.symbol "
+                "LEFT JOIN StringIds m ON m.id = c.module "
+                "ORDER BY c.id, c.stackDepth"
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        logger.warning("Failed to read callchains from %s: %s", sqlite_path, exc)
+        return {}, []
+
+    chain_frames: dict = {}
+    for chain_id, depth, symbol, module in frame_rows:
+        frames = chain_frames.setdefault(chain_id, [])
+        frames.append((depth, f"{symbol} ({module})" if module else str(symbol)))
+
+    stack_index: dict = {}
+    chain_to_stack: dict = {}
+    for chain_id, frames in chain_frames.items():
+        ordered = [f for _, f in sorted(frames, key=lambda x: x[0])]
+        key = tuple(ordered)
+        idx = stack_index.get(key)
+        if idx is None:
+            idx = len(stacks)
+            stack_index[key] = idx
+            stacks.append(ordered)
+        chain_to_stack[chain_id] = idx
+
+    for corr, chain_id in corr_to_chain.items():
+        idx = chain_to_stack.get(chain_id)
+        if idx is not None:
+            corr_to_stack[int(corr)] = idx
+    return corr_to_stack, stacks
+
+
+def nsys_trace_to_timeline_events(
+    nsys: Path, nsys_rep: Path, work_dir: Path, with_stacks: bool = False
+) -> Optional[dict]:
     """Export cuda_gpu_trace + cuda_api_trace and parse them into timeline events.
 
-    Returns {"gpu": [...], "api": [...]} (either list may be empty), or None if
-    neither trace produced events.
+    Returns {"gpu": [...], "api": [...], "stacks": [...]} (lists may be empty),
+    or None if neither trace produced events. With with_stacks=True the report
+    is also exported to SQLite and each event whose CorrID has a recorded CPU
+    backtrace gets a "stack" index into the "stacks" table (GPU kernels resolve
+    through the launching API call's CorrID).
     """
     work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -413,10 +535,31 @@ def nsys_trace_to_timeline_events(nsys: Path, nsys_rep: Path, work_dir: Path) ->
     if not gpu_events and not api_events:
         logger.error("No usable nsys trace CSV (cuda_gpu_trace / cuda_api_trace)")
         return None
+
+    stacks: List[List[str]] = []
+    if with_stacks:
+        sqlite_path = nsys_export_sqlite(nsys, nsys_rep, work_dir)
+        if sqlite_path is not None:
+            corr_to_stack, stacks = load_callchains_from_sqlite(sqlite_path)
+            if corr_to_stack:
+                for ev in api_events + gpu_events:
+                    if ev["corr"] is not None:
+                        ev["stack"] = corr_to_stack.get(ev["corr"], -1)
+            logger.info(
+                "Attached CPU backtraces: %d distinct stacks over %d CorrIDs",
+                len(stacks),
+                len(corr_to_stack),
+            )
+        if not stacks:
+            logger.warning(
+                "nsys timeline stacks requested but the SQLite export has no callchains "
+                "(capture without --cudabacktrace, or unwinding produced nothing)"
+            )
+
     logger.info(
         "Parsed nsys timeline traces: %d GPU events, %d CUDA API events", len(gpu_events), len(api_events)
     )
-    return {"gpu": gpu_events, "api": api_events}
+    return {"gpu": gpu_events, "api": api_events, "stacks": stacks}
 
 
 def generate_nsys_timeline_html(events: dict, title: str = "nsys CPU/GPU timeline") -> Optional[str]:
@@ -424,7 +567,10 @@ def generate_nsys_timeline_html(events: dict, title: str = "nsys CPU/GPU timelin
 
     Lanes: one per CPU thread issuing CUDA API calls, one per GPU device/stream.
     CorrID links a CPU-side launch to the GPU kernel it produced (click to
-    highlight). No external assets; suitable for the Studio Adhoc iframe.
+    highlight). When events carry a "stack" index into events["stacks"]
+    (--cudabacktrace capture), clicking also opens a panel with the CPU
+    backtrace that issued the launch. No external assets; suitable for the
+    Studio Adhoc iframe.
     """
     import json
 
@@ -461,13 +607,15 @@ def generate_nsys_timeline_html(events: dict, title: str = "nsys CPU/GPU timelin
             name_index[e["name"]] = idx
             name_table.append(e["name"])
         corr = e["corr"] if e["corr"] is not None else -1
-        packed.append([e["start"] - t0, e["dur"], lane_index[e["lane"]], corr, idx])
+        stack = e.get("stack", -1)
+        packed.append([e["start"] - t0, e["dur"], lane_index[e["lane"]], corr, idx, stack])
 
     data = {
         "lanes": lane_names,
         "cpuLanes": sum(1 for n in lane_names if n.startswith("CPU")),
         "names": name_table,
         "events": packed,
+        "stacks": events.get("stacks") or [],
         "span": span,
         "total": total_events,
         "shown": len(all_events),
@@ -485,10 +633,17 @@ h1 { font-size: 1.1rem; font-weight: 600; margin: 0 0 4px 0; }
 #tip { position: absolute; display: none; pointer-events: none; background: #222b45; color: #e8ecf5;
   border: 1px solid #3a4568; border-radius: 4px; padding: 6px 8px; font-size: 0.75rem; max-width: 480px;
   white-space: pre-wrap; word-break: break-all; z-index: 10; }
+#stack { display: none; background: #151b2e; border-radius: 8px; padding: 10px 12px; margin-top: 8px;
+  font-size: 0.75rem; }
+#stack h2 { font-size: 0.8rem; font-weight: 600; margin: 0 0 6px 0; word-break: break-all; }
+#stack ol { margin: 0; padding-left: 22px; font-family: ui-monospace, monospace; }
+#stack li { color: #c5cde0; word-break: break-all; padding: 1px 0; }
+#stack .none { color: #9aa3b5; }
 </style></head><body>
 <h1>__TITLE__</h1>
 <p class="meta" id="meta"></p>
 <div id="wrap"><canvas id="tl"></canvas><div id="tip"></div></div>
+<div id="stack"></div>
 <script>
 const DATA = __DATA__;
 const LANE_H = 22, LABEL_W = 190, AXIS_H = 18;
@@ -523,6 +678,7 @@ document.getElementById('meta').innerHTML =
   'Span ' + fmtNs(DATA.span) + '. Showing ' + DATA.shown + ' of ' + DATA.total + ' events' +
   (DATA.shown < DATA.total ? ' (longest kept)' : '') +
   '. Wheel: zoom - drag: pan - click: highlight CorrID (CPU launch <-> GPU kernel)' +
+  (DATA.stacks.length ? ' and show the CPU backtrace of the launch' : '') +
   (autoZoomed ? '. Auto-zoomed to the middle of the capture; sub-pixel events fade by lane occupancy at low zoom. ' : '. ') +
   '<button id="fit" style="font: inherit; background: #222b45; color: #e8ecf5; border: 1px solid #3a4568;' +
   ' border-radius: 4px; cursor: pointer; padding: 1px 8px;">Full span</button>';
@@ -612,10 +768,38 @@ canvas.addEventListener('mousemove', (e) => {
   }
 });
 canvas.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
+const stackEl = document.getElementById('stack');
+function showStack(ev) {
+  if (!ev || !DATA.stacks.length) { stackEl.style.display = 'none'; return; }
+  stackEl.textContent = '';
+  const h = document.createElement('h2');
+  h.textContent = DATA.names[ev[4]] + (ev[3] >= 0 ? ' - CorrID ' + ev[3] : '') +
+    (ev[2] >= DATA.cpuLanes ? ' (stack of the CPU launch)' : '');
+  stackEl.appendChild(h);
+  const frames = ev[5] >= 0 ? DATA.stacks[ev[5]] : null;
+  if (frames && frames.length) {
+    const ol = document.createElement('ol');
+    for (const f of frames) {
+      const li = document.createElement('li');
+      li.textContent = f;
+      ol.appendChild(li);
+    }
+    stackEl.appendChild(ol);
+  } else {
+    const p = document.createElement('div');
+    p.className = 'none';
+    p.textContent = 'No backtrace recorded for this event (below the --cudabacktrace ' +
+      'threshold, or not a kernel launch).';
+    stackEl.appendChild(p);
+  }
+  stackEl.style.display = 'block';
+}
 canvas.addEventListener('click', (e) => {
   const r = canvas.getBoundingClientRect();
   const ev = hit(e.clientX - r.left, e.clientY - r.top);
-  selCorr = ev && ev[3] >= 0 && ev[3] !== selCorr ? ev[3] : -1;
+  const deselect = !ev || (ev[3] >= 0 && ev[3] === selCorr);
+  selCorr = ev && ev[3] >= 0 && !deselect ? ev[3] : -1;
+  showStack(deselect ? null : ev);
   draw();
 });
 canvas.addEventListener('wheel', (e) => {
@@ -753,12 +937,15 @@ def collect_nsys_adhoc_html(
     stop_event=None,
     generate_html_fn: Optional[Callable[[str], Optional[str]]] = None,
     timeline: bool = False,
+    timeline_stacks: bool = False,
 ) -> Optional[str]:
     """End-to-end: find nsys → capture → collapsed → HTML. Returns HTML or None.
 
     With timeline=True the same capture is exported as cuda_gpu_trace +
     cuda_api_trace and rendered as a CPU/GPU timeline instead of a flamegraph
     (falling back to the flamegraph if the trace export yields no events).
+    timeline_stacks=True additionally captures CPU backtraces per kernel launch
+    (--cudabacktrace; heavier) and shows them on click in the timeline.
     """
     nsys = find_nsys(nsys_path)
     if nsys is None:
@@ -786,12 +973,13 @@ def collect_nsys_adhoc_html(
         duration_sec=duration_sec,
         workload_cmd=workload_cmd,
         stop_event=stop_event,
+        backtraces=timeline and timeline_stacks,
     )
     if rep is None:
         return None
 
     if timeline:
-        events = nsys_trace_to_timeline_events(nsys, rep, base)
+        events = nsys_trace_to_timeline_events(nsys, rep, base, with_stacks=timeline_stacks)
         if events:
             html = generate_nsys_timeline_html(events)
             if html:
