@@ -448,7 +448,14 @@ def load_callchains_from_sqlite(sqlite_path: Path) -> tuple:
     Empty results (no --cudabacktrace in the capture, or old schema) are not
     an error: ({}, []).
     """
-    import sqlite3
+    try:
+        import sqlite3
+    except ImportError:
+        logger.warning(
+            "Python was built without the sqlite3 module; nsys timeline stacks "
+            "are unavailable (timeline still renders without backtraces)"
+        )
+        return {}, []
 
     corr_to_stack: dict = {}
     stacks: List[List[str]] = []
