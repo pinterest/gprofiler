@@ -70,6 +70,12 @@ wide (a "Full span" button resets), and at low zoom sub-pixel events shade the
 lane by occupancy instead of tiling solid 1px bars — so a fully-packed lane
 looks different from a half-idle one even when zoomed out.
 
+Navigation: an overview strip above the lanes shows the full capture (CPU
+density on top, GPU below) with a highlighted viewport box — drag on it to
+jump anywhere without zooming out first. Wheel or `+`/`-` zoom, drag or
+arrow keys pan, `n`/`p` select the next/previous event in view (highlighting
+its CorrID pair and stack panel), `0` resets to full span.
+
 ### Click-for-stack mode (`--nsys-timeline-stacks` / `nsys_timeline_stacks`)
 
 With `--nsys-timeline-stacks` (CLI) or `combined_config.nsys_timeline_stacks:
