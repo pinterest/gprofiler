@@ -637,9 +637,12 @@ h1 { font-size: 1.1rem; font-weight: 600; margin: 0 0 4px 0; }
 .meta { color: #9aa3b5; font-size: 0.8rem; margin-bottom: 10px; }
 #wrap { position: relative; background: #151b2e; border-radius: 8px; padding: 8px; }
 #tl { display: block; width: 100%; cursor: crosshair; }
-#tip { position: absolute; display: none; pointer-events: none; background: #222b45; color: #e8ecf5;
+#tip, #fgtip { position: absolute; display: none; pointer-events: none; background: #222b45; color: #e8ecf5;
   border: 1px solid #3a4568; border-radius: 4px; padding: 6px 8px; font-size: 0.75rem; max-width: 480px;
   white-space: pre-wrap; word-break: break-all; z-index: 10; }
+#fgsec { display: none; }
+#fgwrap { position: relative; background: #151b2e; border-radius: 8px; padding: 8px; }
+#fg { display: block; width: 100%; cursor: pointer; }
 #stack { display: none; background: #151b2e; border-radius: 8px; padding: 10px 12px; margin-top: 8px;
   font-size: 0.75rem; }
 #stack h2 { font-size: 0.8rem; font-weight: 600; margin: 0 0 6px 0; word-break: break-all; }
@@ -651,6 +654,11 @@ h1 { font-size: 1.1rem; font-weight: 600; margin: 0 0 4px 0; }
 <p class="meta" id="meta"></p>
 <div id="wrap"><canvas id="tl"></canvas><div id="tip"></div></div>
 <div id="stack"></div>
+<div id="fgsec">
+<h1 style="margin-top:14px">Launch-stack flamegraph</h1>
+<p class="meta" id="fgmeta"></p>
+<div id="fgwrap"><canvas id="fg"></canvas><div id="fgtip"></div></div>
+</div>
 <script>
 const DATA = __DATA__;
 const LANE_H = 22, LABEL_W = 190, AXIS_H = 18;
@@ -831,6 +839,119 @@ window.addEventListener('mousemove', (e) => {
   dragX = e.clientX;
   draw();
 });
+// Aggregate launch-stack flamegraph: every backtraced event contributes its
+// duration to its stack's frames (outermost at the top). GPU-lane events are
+// preferred (widths = GPU kernel time); if none carry stacks, CPU launch
+// durations are used instead.
+const FG = (() => {
+  if (!DATA.stacks.length) return null;
+  let evs = DATA.events.filter((e) => e[5] >= 0 && e[2] >= DATA.cpuLanes);
+  const weightKind = evs.length ? 'GPU kernel time' : 'CPU launch time';
+  if (!evs.length) evs = DATA.events.filter((e) => e[5] >= 0);
+  if (!evs.length) return null;
+  const root = { name: 'all', value: 0, children: new Map() };
+  for (const ev of evs) {
+    const frames = DATA.stacks[ev[5]];
+    if (!frames || !frames.length) continue;
+    root.value += ev[1];
+    let node = root;
+    for (let i = frames.length - 1; i >= 0; i--) {  // outermost first
+      let child = node.children.get(frames[i]);
+      if (!child) { child = { name: frames[i], value: 0, children: new Map() }; node.children.set(frames[i], child); }
+      child.value += ev[1];
+      node = child;
+    }
+    // leaf: the kernel/API name itself, so different kernels from one call site split
+    const leafName = DATA.names[ev[4]];
+    let leaf = node.children.get(leafName);
+    if (!leaf) { leaf = { name: leafName, value: 0, children: new Map() }; node.children.set(leafName, leaf); }
+    leaf.value += ev[1];
+  }
+  return root.value > 0 ? { root, weightKind } : null;
+})();
+let fgFocus = FG ? FG.root : null;
+let fgRects = [];  // {x, y, w, node, depth} in css px, rebuilt each draw
+if (FG) {
+  const FROW = 20;
+  const fgCanvas = document.getElementById('fg'), fgTip = document.getElementById('fgtip');
+  document.getElementById('fgsec').style.display = 'block';
+  function depthOf(node) {
+    let d = 1;
+    for (const c of node.children.values()) d = Math.max(d, 1 + depthOf(c));
+    return d;
+  }
+  const fgDepth = depthOf(FG.root);
+  document.getElementById('fgmeta').textContent =
+    'Same backtraces, aggregated: frame width = total ' + FG.weightKind +
+    ' attributed to that call path (outermost frame on top, kernel name at the leaf). ' +
+    'Click a frame to zoom into its subtree, click the root row to reset.';
+  function fgColor(name, depth) {
+    let h = 0;
+    for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+    return 'hsl(' + (18 + (h % 42)) + ',' + (62 + (h >> 8) % 20) + '%,' + (46 + depth % 3 * 4) + '%)';
+  }
+  function fgDraw() {
+    const cssW = fgCanvas.clientWidth || 800;
+    const dpr = window.devicePixelRatio || 1;
+    const cssH = fgDepth * FROW + FROW;
+    fgCanvas.width = cssW * dpr; fgCanvas.height = cssH * dpr;
+    fgCanvas.style.height = cssH + 'px';
+    const ctx = fgCanvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+    ctx.font = '11px ui-monospace, monospace';
+    ctx.textBaseline = 'middle';
+    fgRects = [];
+    function rec(node, x, w, depth) {
+      if (w < 0.5) return;
+      const y = depth * FROW;
+      ctx.fillStyle = depth ? fgColor(node.name, depth) : '#3a4568';
+      ctx.fillRect(x, y + 1, Math.max(w - 0.5, 0.5), FROW - 2);
+      if (w > 30) {
+        ctx.fillStyle = '#10131f';
+        ctx.save();
+        ctx.beginPath(); ctx.rect(x + 3, y, w - 6, FROW); ctx.clip();
+        ctx.fillText(depth ? node.name : 'all (' + fmtNs(fgFocus.value) + ')', x + 4, y + FROW / 2);
+        ctx.restore();
+      }
+      fgRects.push({ x, y, w, node, depth });
+      let cx = x;
+      for (const c of node.children.values()) {
+        const cw = w * c.value / node.value;
+        rec(c, cx, cw, depth + 1);
+        cx += cw;
+      }
+    }
+    rec(fgFocus, 0, cssW, 0);
+  }
+  function fgHit(mx, my) {
+    for (const r of fgRects) if (mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + FROW) return r;
+    return null;
+  }
+  fgCanvas.addEventListener('mousemove', (e) => {
+    const b = fgCanvas.getBoundingClientRect();
+    const r = fgHit(e.clientX - b.left, e.clientY - b.top);
+    if (r) {
+      fgTip.style.display = 'block';
+      fgTip.style.left = (e.clientX - b.left + 12) + 'px';
+      fgTip.style.top = (e.clientY - b.top + 12) + 'px';
+      fgTip.textContent = r.node.name + '\\n' + fmtNs(r.node.value) + '  (' +
+        (100 * r.node.value / FG.root.value).toFixed(1) + '% of all, ' +
+        (100 * r.node.value / fgFocus.value).toFixed(1) + '% of view)';
+    } else {
+      fgTip.style.display = 'none';
+    }
+  });
+  fgCanvas.addEventListener('mouseleave', () => { fgTip.style.display = 'none'; });
+  fgCanvas.addEventListener('click', (e) => {
+    const b = fgCanvas.getBoundingClientRect();
+    const r = fgHit(e.clientX - b.left, e.clientY - b.top);
+    fgFocus = r ? (r.depth === 0 ? FG.root : r.node) : FG.root;
+    fgDraw();
+  });
+  window.addEventListener('resize', fgDraw);
+  fgDraw();
+}
 window.addEventListener('resize', draw);
 draw();
 </script>

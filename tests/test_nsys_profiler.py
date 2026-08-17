@@ -369,6 +369,20 @@ def test_generate_timeline_html_with_stacks():
     assert ",0]" in html and ",-1]" in html
 
 
+def test_generate_timeline_html_with_stacks_has_flamegraph():
+    events = {
+        "gpu": _parse_trace_csv(GPU_TRACE_CSV, "gpu"),
+        "api": _parse_trace_csv(API_TRACE_CSV, "api"),
+        "stacks": [["cudaLaunchKernel (libcudart.so)", "main (python3)"]],
+    }
+    for ev in events["api"] + events["gpu"]:
+        ev["stack"] = 0 if ev["corr"] in (101, 102) else -1
+    html = generate_nsys_timeline_html(events)
+    assert html is not None
+    assert "Launch-stack flamegraph" in html
+    assert "fgDraw" in html
+
+
 def test_generate_timeline_html_without_stacks_still_renders():
     events = {
         "gpu": _parse_trace_csv(GPU_TRACE_CSV, "gpu"),
