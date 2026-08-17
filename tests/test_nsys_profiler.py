@@ -393,6 +393,18 @@ def test_generate_timeline_html_without_stacks_still_renders():
     assert '"stacks":[]' in html
 
 
+def test_generate_timeline_html_has_minimap_and_keys():
+    events = {
+        "gpu": _parse_trace_csv(GPU_TRACE_CSV, "gpu"),
+        "api": _parse_trace_csv(API_TRACE_CSV, "api"),
+    }
+    html = generate_nsys_timeline_html(events)
+    assert html is not None
+    assert 'id="mini"' in html
+    assert "drawMini" in html
+    assert "keydown" in html
+
+
 def test_nsys_trace_to_timeline_events_none_when_empty(tmp_path: Path, monkeypatch):
     nsys = tmp_path / "nsys"
     nsys.write_text("#!/bin/sh\n")

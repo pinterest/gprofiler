@@ -636,7 +636,9 @@ body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 16px; backgrou
 h1 { font-size: 1.1rem; font-weight: 600; margin: 0 0 4px 0; }
 .meta { color: #9aa3b5; font-size: 0.8rem; margin-bottom: 10px; }
 #wrap { position: relative; background: #151b2e; border-radius: 8px; padding: 8px; }
+#mini { display: block; width: 100%; height: 36px; cursor: grab; margin-bottom: 6px; }
 #tl { display: block; width: 100%; cursor: crosshair; }
+.lg { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 3px -1px 8px; }
 #tip, #fgtip { position: absolute; display: none; pointer-events: none; background: #222b45; color: #e8ecf5;
   border: 1px solid #3a4568; border-radius: 4px; padding: 6px 8px; font-size: 0.75rem; max-width: 480px;
   white-space: pre-wrap; word-break: break-all; z-index: 10; }
@@ -652,7 +654,7 @@ h1 { font-size: 1.1rem; font-weight: 600; margin: 0 0 4px 0; }
 </style></head><body>
 <h1>__TITLE__</h1>
 <p class="meta" id="meta"></p>
-<div id="wrap"><canvas id="tl"></canvas><div id="tip"></div></div>
+<div id="wrap"><canvas id="mini"></canvas><canvas id="tl"></canvas><div id="tip"></div></div>
 <div id="stack"></div>
 <div id="fgsec">
 <h1 style="margin-top:14px">Launch-stack flamegraph</h1>
@@ -689,14 +691,18 @@ function initView() {
 function fullSpan() { viewStart = 0; viewSpan = DATA.span; draw(); }
 initView();
 document.getElementById('meta').innerHTML =
-  'CUDA API calls (CPU threads) + GPU kernels/memops from nsys cuda_api_trace / cuda_gpu_trace. ' +
-  'Span ' + fmtNs(DATA.span) + '. Showing ' + DATA.shown + ' of ' + DATA.total + ' events' +
+  '<span class="lg" style="background:#5c8ae6"></span>CPU lanes: CUDA API calls per thread (a launch is the ' +
+  'CPU asking for work).<span class="lg" style="background:#e6a15c"></span>GPU lanes: kernels/memcpys per ' +
+  'stream (the work itself, usually later and longer). Each launch and its kernel share a correlation ID, ' +
+  'so clicking either <span class="lg" style="background:#f5e663"></span>highlights both' +
+  (DATA.stacks.length ? ' and shows the CPU backtrace of the launch' : '') +
+  '.<br>Span ' + fmtNs(DATA.span) + ', ' + DATA.shown + ' of ' + DATA.total + ' events' +
   (DATA.shown < DATA.total ? ' (longest kept)' : '') +
-  '. Wheel: zoom - drag: pan - click: highlight CorrID (CPU launch <-> GPU kernel)' +
-  (DATA.stacks.length ? ' and show the CPU backtrace of the launch' : '') +
-  (autoZoomed ? '. Auto-zoomed to the middle of the capture; sub-pixel events fade by lane occupancy at low zoom. ' : '. ') +
+  '. Drag on the overview strip to jump anywhere. Wheel or +/- keys: zoom' +
+  ' - drag or arrow keys: pan - n/p keys: select next/previous event in view - 0: ' +
   '<button id="fit" style="font: inherit; background: #222b45; color: #e8ecf5; border: 1px solid #3a4568;' +
-  ' border-radius: 4px; cursor: pointer; padding: 1px 8px;">Full span</button>';
+  ' border-radius: 4px; cursor: pointer; padding: 1px 8px;">Full span</button>' +
+  (autoZoomed ? '. Opened auto-zoomed to the middle of the capture; sub-pixel events fade by lane occupancy.' : '.');
 document.getElementById('fit').addEventListener('click', fullSpan);
 function draw() {
   const cssW = canvas.clientWidth || 800;
@@ -755,7 +761,66 @@ function draw() {
       ctx.fillRect(LABEL_W + i, y, 1, LANE_H - 6);
     }
   }
+  drawMini();
 }
+// Overview strip: full-capture density with a draggable viewport window, so
+// you always see where you are and can jump without scroll-zooming out first.
+const mini = document.getElementById('mini');
+const MINI_H = 36;
+let miniDensity = null;  // per-pixel [cpu, gpu] occupancy over the full span, cached per width
+function drawMini() {
+  const cssW = mini.clientWidth || 800;
+  const dpr = window.devicePixelRatio || 1;
+  mini.width = cssW * dpr; mini.height = MINI_H * dpr;
+  mini.style.height = MINI_H + 'px';
+  const ctx = mini.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#10152a';
+  ctx.fillRect(0, 0, cssW, MINI_H);
+  if (!miniDensity || miniDensity.cpu.length !== cssW) {
+    miniDensity = { cpu: new Float32Array(cssW), gpu: new Float32Array(cssW) };
+    for (const [s, d, lane] of DATA.events) {
+      const a = Math.max(0, Math.floor(s / DATA.span * cssW));
+      const b = Math.min(cssW - 1, Math.floor((s + d) / DATA.span * cssW));
+      const arr = lane < DATA.cpuLanes ? miniDensity.cpu : miniDensity.gpu;
+      for (let i = a; i <= b; i++) arr[i] = Math.min(1, arr[i] + 0.15);
+    }
+  }
+  const half = (MINI_H - 6) / 2;
+  for (let i = 0; i < cssW; i++) {
+    if (miniDensity.cpu[i] > 0) {
+      ctx.fillStyle = 'rgba(92,138,230,' + (0.3 + 0.7 * miniDensity.cpu[i]).toFixed(2) + ')';
+      ctx.fillRect(i, 3, 1, half);
+    }
+    if (miniDensity.gpu[i] > 0) {
+      ctx.fillStyle = 'rgba(230,161,92,' + (0.3 + 0.7 * miniDensity.gpu[i]).toFixed(2) + ')';
+      ctx.fillRect(i, 3 + half, 1, half);
+    }
+  }
+  const vx = viewStart / DATA.span * cssW;
+  const vw = Math.max(3, viewSpan / DATA.span * cssW);
+  ctx.strokeStyle = '#f5e663';
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(vx + 0.75, 1, vw - 1.5, MINI_H - 2);
+  ctx.fillStyle = 'rgba(245,230,99,0.12)';
+  ctx.fillRect(vx, 1, vw, MINI_H - 2);
+}
+function miniJump(clientX) {
+  const r = mini.getBoundingClientRect();
+  const frac = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+  viewStart = Math.min(Math.max(0, frac * DATA.span - viewSpan / 2), DATA.span - viewSpan);
+  draw();
+}
+let miniDrag = false;
+mini.addEventListener('mousedown', (e) => { miniDrag = true; miniJump(e.clientX); });
+window.addEventListener('mousemove', (e) => { if (miniDrag) miniJump(e.clientX); });
+window.addEventListener('mouseup', () => { miniDrag = false; });
+mini.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  viewSpan = Math.min(DATA.span, Math.max(1000, viewSpan * (e.deltaY > 0 ? 1.25 : 0.8)));
+  viewStart = Math.min(Math.max(0, viewStart), DATA.span - viewSpan);
+  draw();
+}, { passive: false });
 function hit(mx, my) {
   const plotW = (canvas.clientWidth || 800) - LABEL_W;
   if (mx < LABEL_W || my < AXIS_H) return null;
@@ -952,6 +1017,44 @@ if (FG) {
   window.addEventListener('resize', fgDraw);
   fgDraw();
 }
+// Keyboard: arrows pan, +/- zoom, n/p step through events in view (selecting
+// each so its CorrID pair lights up and the stack panel follows), 0 resets.
+let stepIdx = -1;
+function selectEvent(ev) {
+  selCorr = ev[3] >= 0 ? ev[3] : -1;
+  showStack(ev);
+  // keep the stepped event in view
+  if (ev[0] < viewStart || ev[0] > viewStart + viewSpan) {
+    viewStart = Math.min(Math.max(0, ev[0] - viewSpan / 2), DATA.span - viewSpan);
+  }
+  draw();
+}
+function step(dir) {
+  const inView = [];
+  for (let i = 0; i < DATA.events.length; i++) {
+    const e = DATA.events[i];
+    if (e[0] + e[1] >= viewStart && e[0] <= viewStart + viewSpan) inView.push(i);
+  }
+  if (!inView.length) return;
+  const pos = inView.indexOf(stepIdx);
+  stepIdx = inView[(pos + dir + inView.length) % inView.length];
+  selectEvent(DATA.events[stepIdx]);
+}
+window.addEventListener('keydown', (e) => {
+  if (e.target && /INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
+  const panBy = viewSpan * 0.15;
+  if (e.key === 'ArrowLeft') viewStart = Math.max(0, viewStart - panBy);
+  else if (e.key === 'ArrowRight') viewStart = Math.min(DATA.span - viewSpan, viewStart + panBy);
+  else if (e.key === '+' || e.key === '=') viewSpan = Math.max(1000, viewSpan * 0.7);
+  else if (e.key === '-' || e.key === '_') viewSpan = Math.min(DATA.span, viewSpan * 1.4);
+  else if (e.key === '0') { fullSpan(); return; }
+  else if (e.key === 'n') { step(1); return; }
+  else if (e.key === 'p') { step(-1); return; }
+  else return;
+  e.preventDefault();
+  viewStart = Math.min(Math.max(0, viewStart), Math.max(0, DATA.span - viewSpan));
+  draw();
+});
 window.addEventListener('resize', draw);
 draw();
 </script>
