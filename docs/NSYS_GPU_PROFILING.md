@@ -92,6 +92,15 @@ launched it (resolved through CorrID). Frames are native C++ symbols
 If the SQLite export has no callchains, the timeline still renders — clicks
 just highlight CorrIDs as before.
 
+When backtraces are present, the HTML also renders a **launch-stack
+flamegraph** below the timeline: every backtraced event contributes its
+duration to its call path, so frame width = total GPU kernel time attributed
+to that path (outermost frame on top, the kernel name as the leaf; falls back
+to CPU launch time if no GPU-side event carries a stack). Click a frame to
+zoom into its subtree, click the root row to reset. This answers "which call
+paths cost the most GPU time overall" while the per-event panel answers "who
+launched this specific kernel".
+
 ## Kind / sandbox topology
 
 Kind runs the Studio control plane only. The agent that invokes nsys must run on
