@@ -332,7 +332,14 @@ class DynamicGProfilerManager:
             timestamp=datetime.datetime.now(),
             is_paused=False,
         )
-        self.command_manager.enqueue_command(cmd)
+        if not self.command_manager.enqueue_command(cmd):
+            logger.warning(f"Command {command_id} rejected: queue is full")
+            self.heartbeat_client.send_command_completion(
+                command_id=command_id,
+                status="failed",
+                execution_time=0,
+                error_message="Agent command queue is full",
+            )
 
     def _process_command(self, cmd: ProfilingCommand) -> None:
         if cmd.command_type == "stop":

@@ -50,27 +50,29 @@ class CommandManager:
         self.continuous_queue: Deque[ProfilingCommand] = deque()  # For continuous commands (continuous=True)
         self.queue_lock = threading.Lock()  # Thread-safe queue operations
 
-    def enqueue_command(self, command: ProfilingCommand) -> ProfilingCommand:
-        """Enqueue a command to the appropriate queue
+    def enqueue_command(self, command: ProfilingCommand) -> bool:
+        """Enqueue a command to the appropriate queue, enforcing queue size limits.
+
+        Stop and continuous commands are singleton slots: a new command replaces
+        any queued (not yet running) one, since the newest intent supersedes it.
+        Ad-hoc commands go to a bounded FIFO queue and are rejected when full.
 
         Args:
             command: ProfilingCommand object to enqueue
 
         Returns:
-            ProfilingCommand object that was enqueued
+            True if the command was enqueued, False if it was rejected
         """
-        # Add to appropriate queue
         with self.queue_lock:
             if command.command_type == "stop":
-                # Warn if stop queue exceeds limit
                 if len(self.stop_queue) >= STOP_QUEUE_MAX_SIZE:
-                    logger.warning(f"Stop queue exceeds limit (max: {STOP_QUEUE_MAX_SIZE}, current: {len(self.stop_queue)}), but adding command {command.command_id} anyway")
+                    logger.info(f"Replacing {len(self.stop_queue)} queued stop command(s) with new command {command.command_id}")
+                    self.stop_queue.clear()
 
                 self.stop_queue.append(command)
                 logger.info(f"Enqueued stop command {command.command_id} (queue size: {len(self.stop_queue)})")
             elif command.is_continuous:
-                # No need for warnings. The queue is always cleared before adding a new continuous command.
-                # Clear continuous queue before adding new continuous command
+                # Continuous is a singleton slot: clear before adding the new command
                 if self.continuous_queue:
                     logger.info(f"Clearing {len(self.continuous_queue)} existing continuous commands before adding new command {command.command_id}")
                     self.continuous_queue.clear()
@@ -78,14 +80,14 @@ class CommandManager:
                 self.continuous_queue.append(command)
                 logger.info(f"Enqueued continuous command {command.command_id} (queue size: {len(self.continuous_queue)})")
             else:
-                # Warn if ad-hoc queue exceeds limit
                 if len(self.adhoc_queue) >= ADHOC_QUEUE_MAX_SIZE:
-                    logger.warning(f"Ad-hoc queue exceeds limit (max: {ADHOC_QUEUE_MAX_SIZE}, current: {len(self.adhoc_queue)}), but adding command {command.command_id} anyway")
+                    logger.warning(f"Ad-hoc queue is full (max: {ADHOC_QUEUE_MAX_SIZE}), rejecting command {command.command_id}")
+                    return False
 
                 self.adhoc_queue.append(command)
                 logger.info(f"Enqueued ad-hoc command {command.command_id} (queue size: {len(self.adhoc_queue)})")
 
-        return command
+        return True
 
     def get_next_command(self) -> Optional[ProfilingCommand]:
         """Peek at the next command to execute based on priority logic without removing it.

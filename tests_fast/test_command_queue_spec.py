@@ -50,6 +50,8 @@ _spec.loader.exec_module(command_control)
 
 CommandManager = command_control.CommandManager
 ProfilingCommand = command_control.ProfilingCommand
+ADHOC_QUEUE_MAX_SIZE = command_control.ADHOC_QUEUE_MAX_SIZE
+STOP_QUEUE_MAX_SIZE = command_control.STOP_QUEUE_MAX_SIZE
 
 
 def _cmd(command_id, command_type="start", is_continuous=False, profiling_command=None):
@@ -101,6 +103,32 @@ class TestContinuousSingletonSpec:
         manager.enqueue_command(_cmd("cont-2", is_continuous=True))
         assert len(manager.continuous_queue) == 1
         assert manager.get_next_command().command_id == "cont-2"
+
+
+class TestQueueBoundsSpec:
+    def test_adhoc_queue_rejects_when_full(self, manager):
+        for i in range(ADHOC_QUEUE_MAX_SIZE):
+            assert manager.enqueue_command(_cmd(f"a{i}")) is True
+        assert manager.enqueue_command(_cmd("overflow")) is False
+        assert len(manager.adhoc_queue) == ADHOC_QUEUE_MAX_SIZE
+        # FIFO order preserved; the rejected command is not in the queue.
+        assert manager.get_next_command().command_id == "a0"
+        assert all(c.command_id != "overflow" for c in manager.adhoc_queue)
+
+    def test_adhoc_queue_accepts_again_after_dequeue(self, manager):
+        for i in range(ADHOC_QUEUE_MAX_SIZE):
+            manager.enqueue_command(_cmd(f"a{i}"))
+        assert manager.dequeue_command("a0") is True
+        assert manager.enqueue_command(_cmd("a-new")) is True
+
+    def test_new_stop_replaces_queued_stop(self, manager):
+        assert manager.enqueue_command(_cmd("stop-1", command_type="stop")) is True
+        assert manager.enqueue_command(_cmd("stop-2", command_type="stop")) is True
+        assert len(manager.stop_queue) == STOP_QUEUE_MAX_SIZE
+        assert manager.get_next_command().command_id == "stop-2"
+
+    def test_continuous_enqueue_reports_success(self, manager):
+        assert manager.enqueue_command(_cmd("cont", is_continuous=True)) is True
 
 
 class TestDequeueSpec:
