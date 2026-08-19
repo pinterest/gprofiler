@@ -1,4 +1,4 @@
-FROM alpine as gprofiler
+FROM alpine:3.24.1 AS gprofiler
 
 ARG ARCH
 ARG EXE_PATH=build/${ARCH}/gprofiler
