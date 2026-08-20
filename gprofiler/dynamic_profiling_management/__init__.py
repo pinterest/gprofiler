@@ -118,6 +118,7 @@ def create_profiler_args(
             new_args.nsys_workload = combined_config.get("nsys_workload")
             new_args.nsys_timeline = bool(combined_config.get("nsys_timeline", False))
             new_args.nsys_timeline_stacks = bool(combined_config.get("nsys_timeline_stacks", False))
+            new_args.nsys_upload_rep = bool(combined_config.get("nsys_upload_rep", False))
             logger.info(f"enable_nsys: using nsys at {found}")
         else:
             logger.error(
