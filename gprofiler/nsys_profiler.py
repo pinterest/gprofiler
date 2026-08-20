@@ -1169,6 +1169,7 @@ def collect_nsys_adhoc_html(
     generate_html_fn: Optional[Callable[[str], Optional[str]]] = None,
     timeline: bool = False,
     timeline_stacks: bool = False,
+    on_rep: Optional[Callable[[Path], None]] = None,
 ) -> Optional[str]:
     """End-to-end: find nsys → capture → collapsed → HTML. Returns HTML or None.
 
@@ -1177,6 +1178,8 @@ def collect_nsys_adhoc_html(
     (falling back to the flamegraph if the trace export yields no events).
     timeline_stacks=True additionally captures CPU backtraces per kernel launch
     (--cudabacktrace; heavier) and shows them on click in the timeline.
+    on_rep is called with the .nsys-rep path right after a successful capture,
+    so callers can keep/upload the raw report alongside the rendered HTML.
     """
     nsys = find_nsys(nsys_path)
     if nsys is None:
@@ -1208,6 +1211,12 @@ def collect_nsys_adhoc_html(
     )
     if rep is None:
         return None
+
+    if on_rep is not None:
+        try:
+            on_rep(rep)
+        except Exception:
+            logger.exception("on_rep callback failed; continuing with HTML generation")
 
     if timeline:
         events = nsys_trace_to_timeline_events(nsys, rep, base, with_stacks=timeline_stacks)

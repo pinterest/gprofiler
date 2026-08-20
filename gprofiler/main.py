@@ -174,8 +174,10 @@ class GProfiler:
         self._nsys_workload = user_args.get("nsys_workload")
         self._nsys_timeline = bool(user_args.get("nsys_timeline", False))
         self._nsys_timeline_stacks = bool(user_args.get("nsys_timeline_stacks", False))
+        self._nsys_upload_rep = bool(user_args.get("nsys_upload_rep", False))
         self._nsys_thread: Optional[threading.Thread] = None
         self._nsys_html: Optional[str] = None
+        self._nsys_rep_path: Optional[Path] = None
         if self._collect_metadata:
             self._static_metadata = get_static_metadata(self._spawn_time, user_args, self._external_metadata_path)
 
@@ -409,6 +411,9 @@ class GProfiler:
                 start = end - datetime.timedelta(seconds=self._duration)
                 return self._generate_flamegraph_html(collapsed, start, end)
 
+            def _keep_rep(rep: Path) -> None:
+                self._nsys_rep_path = rep
+
             html = collect_nsys_adhoc_html(
                 duration_sec=self._duration,
                 nsys_path=self._nsys_path,
@@ -417,11 +422,23 @@ class GProfiler:
                 generate_html_fn=_gen,
                 timeline=self._nsys_timeline,
                 timeline_stacks=self._nsys_timeline_stacks,
+                on_rep=_keep_rep if self._nsys_upload_rep else None,
             )
             self._nsys_html = html
         except Exception:
             logger.exception("Background nsys GPU capture failed")
             self._nsys_html = None
+
+    def _upload_nsys_rep(self, start_time: datetime.datetime) -> None:
+        rep_path = self._nsys_rep_path
+        self._nsys_rep_path = None
+        try:
+            size_mb = os.path.getsize(rep_path) / (1024 * 1024)
+            logger.info(f"Uploading nsys rep {rep_path} ({size_mb:.1f}MB) to the server")
+            self._profiler_api_client.submit_nsys_rep(start_time, str(rep_path))
+            logger.info("Successfully uploaded nsys rep to the server")
+        except Exception:
+            logger.exception("Failed to upload nsys rep to the server")
 
     def stop(self) -> None:
         logger.info("Stopping ...")
@@ -615,6 +632,8 @@ class GProfiler:
                 metrics,
                 self._gpid,
             )
+            if self._nsys_upload_rep and self._nsys_rep_path is not None:
+                self._upload_nsys_rep(local_start_time)
         if time.monotonic() - self._last_diagnostics > DIAGNOSTICS_INTERVAL_S:
             self._last_diagnostics = time.monotonic()
             log_diagnostics()
@@ -1360,6 +1379,15 @@ def parse_cmd_args() -> configargparse.Namespace:
         help="With --nsys-timeline, also record a CPU backtrace per kernel launch "
         "(--cudabacktrace=kernel; enables CPU sampling — noticeably heavier) and "
         "show it when an event is clicked in the timeline.",
+    )
+    nsys_options.add_argument(
+        "--nsys-upload-rep",
+        action="store_true",
+        default=False,
+        dest="nsys_upload_rep",
+        help="With --enable-nsys and --upload-results, also upload the raw .nsys-rep "
+        "capture to the Performance Studio so it can be downloaded and opened in "
+        "NVIDIA Nsight Systems. Reports can be large (tens to hundreds of MB).",
     )
 
     args = parser.parse_args()

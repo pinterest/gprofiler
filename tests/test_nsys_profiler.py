@@ -27,6 +27,7 @@ from gprofiler.nsys_profiler import (
     _csv_to_collapsed,
     _parse_trace_csv,
     _workload_env,
+    collect_nsys_adhoc_html,
     find_nsys,
     generate_nsys_timeline_html,
     load_callchains_from_sqlite,
@@ -417,3 +418,45 @@ def test_nsys_trace_to_timeline_events_none_when_empty(tmp_path: Path, monkeypat
 
     monkeypatch.setattr("gprofiler.nsys_profiler.subprocess.run", fake_run)
     assert nsys_trace_to_timeline_events(nsys, rep, tmp_path / "work") is None
+
+
+def test_collect_adhoc_html_on_rep_callback(tmp_path: Path, monkeypatch):
+    nsys = tmp_path / "nsys"
+    nsys.write_text("#!/bin/sh\n")
+    nsys.chmod(0o755)
+
+    def fake_run(cmd, **kwargs):
+        if cmd[1] == "profile":
+            Path(str(cmd[cmd.index("-o") + 1]) + ".nsys-rep").write_bytes(b"fake")
+            return mock.Mock(returncode=0, stdout=b"ok")
+        # nsys stats: write the kern CSV where _export_stats_csv looks for it
+        out_prefix = Path(cmd[cmd.index("-o") + 1])
+        out_prefix.parent.mkdir(parents=True, exist_ok=True)
+        (out_prefix.parent / (out_prefix.name + "_cuda_gpu_kern_sum.csv")).write_text(KERN_CSV)
+        return mock.Mock(returncode=0, stdout=b"ok")
+
+    monkeypatch.setattr("gprofiler.nsys_profiler.subprocess.run", fake_run)
+    monkeypatch.setattr("gprofiler.nsys_profiler.find_nsys", lambda explicit_path=None: nsys)
+
+    seen_reps = []
+    html = collect_nsys_adhoc_html(
+        duration_sec=1,
+        work_dir=str(tmp_path / "work"),
+        generate_html_fn=lambda collapsed: "<html>ok</html>",
+        on_rep=seen_reps.append,
+    )
+    assert html == "<html>ok</html>"
+    assert len(seen_reps) == 1
+    assert seen_reps[0].name.endswith(".nsys-rep") and seen_reps[0].is_file()
+
+    # a failing callback must not break HTML generation
+    def boom(rep: Path) -> None:
+        raise RuntimeError("boom")
+
+    html = collect_nsys_adhoc_html(
+        duration_sec=1,
+        work_dir=str(tmp_path / "work2"),
+        generate_html_fn=lambda collapsed: "<html>ok</html>",
+        on_rep=boom,
+    )
+    assert html == "<html>ok</html>"
