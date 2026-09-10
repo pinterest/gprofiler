@@ -104,16 +104,36 @@ class TestWorkloadNameInferenceSpec:
     def test_app_label_is_second_choice(self):
         assert hb._best_effort_workload_name("web-5d4b8c7f9c-tl6qw", {"app": "cart"}) == "cart"
 
-    def test_vendor_crd_name_label_is_used_when_app_labels_absent(self):
-        # Pinterest CRD clusters surface the workload name here, not under app*.
+    def test_vendor_crd_name_label_is_used_when_configured(self):
+        # A deployment can configure vendor/CRD label keys; they are probed first and
+        # win over pod-name normalization. Here the label value differs from the
+        # normalized pod name to prove the label (not the regex) produced the result.
         assert (
-            hb._best_effort_workload_name("validation-85ff989f55-tl6qw", {"pinterest.com/crd_name": "validation"})
+            hb._best_effort_workload_name(
+                "validation-85ff989f55-tl6qw",
+                {"pinterest.com/crd_name": "billing-validation"},
+                None,
+                ("pinterest.com/crd_name",) + hb.DEFAULT_WORKLOAD_NAME_LABELS,
+            )
+            == "billing-validation"
+        )
+
+    def test_unconfigured_vendor_name_label_is_ignored(self):
+        # With only the vendor-neutral defaults, a vendor key is not consulted, so we
+        # fall back to pod-name normalization.
+        assert (
+            hb._best_effort_workload_name("validation-85ff989f55-tl6qw", {"pinterest.com/crd_name": "billing"})
             == "validation"
         )
 
     def test_placeholder_label_values_are_ignored(self):
         assert (
-            hb._best_effort_workload_name("kube-proxy-node1", {"pinterest.com/crd_name": "unknown"})
+            hb._best_effort_workload_name(
+                "kube-proxy-node1",
+                {"pinterest.com/crd_name": "unknown"},
+                None,
+                ("pinterest.com/crd_name",),
+            )
             == "kube-proxy-node1"
         )
 
@@ -147,6 +167,7 @@ class TestWorkloadNameInferenceSpec:
                 "cronjobcontroller-7bf9b-zhs2o",
                 {},
                 {"pinterest.com/crd_name": "cronjobcontroller"},
+                ("pinterest.com/crd_name",),
             )
             == "cronjobcontroller"
         )
@@ -169,10 +190,23 @@ class TestWorkloadNameInferenceSpec:
 
 
 class TestWorkloadKindInferenceSpec:
-    def test_vendor_crd_type_label_wins(self):
+    def test_vendor_crd_type_label_wins_when_configured(self):
+        assert (
+            hb._best_effort_workload_kind(
+                "metrics-agent-lvpdm",
+                {"pinterest.com/crd_type": "PinterestDaemon"},
+                None,
+                ("pinterest.com/crd_type",),
+            )
+            == "PinterestDaemon"
+        )
+
+    def test_unconfigured_vendor_kind_label_is_ignored(self):
+        # With no configured kind labels, the vendor key is not consulted; the kind is
+        # inferred from the pod-name shape instead.
         assert (
             hb._best_effort_workload_kind("metrics-agent-lvpdm", {"pinterest.com/crd_type": "PinterestDaemon"})
-            == "PinterestDaemon"
+            == "DaemonSet"
         )
 
     def test_vendor_crd_type_from_pod_sandbox_labels(self):
@@ -181,13 +215,20 @@ class TestWorkloadKindInferenceSpec:
                 "cronjobcontroller-7bf9b-zhs2o",
                 {},
                 {"pinterest.com/crd_type": "PinApp"},
+                ("pinterest.com/crd_type",),
             )
             == "PinApp"
         )
 
     def test_placeholder_crd_type_falls_through_to_inference(self):
         assert (
-            hb._best_effort_workload_kind("metrics-agent-lvpdm", {"pinterest.com/crd_type": "unknown"}) == "DaemonSet"
+            hb._best_effort_workload_kind(
+                "metrics-agent-lvpdm",
+                {"pinterest.com/crd_type": "unknown"},
+                None,
+                ("pinterest.com/crd_type",),
+            )
+            == "DaemonSet"
         )
 
     def test_replicaset_pod_name_infers_deployment(self):
@@ -220,6 +261,8 @@ def collector():
     inst._last_snapshot_at = 0.0
     inst._last_snapshot = {"containers": []}
     inst._containers_client = None
+    inst._workload_name_labels = hb.DEFAULT_WORKLOAD_NAME_LABELS
+    inst._workload_kind_labels = hb.DEFAULT_WORKLOAD_KIND_LABELS
     return inst
 
 
@@ -317,7 +360,10 @@ class TestInventoryAttachedSpec:
 
     def test_workload_name_resolved_from_pod_sandbox_labels(self, collector, monkeypatch):
         # AT-A4: EKS-style node where container labels lack workload identity but the
-        # pod sandbox carries it. Inventory must surface the sandbox-derived name.
+        # pod sandbox carries it under configured vendor keys. Inventory must surface
+        # the sandbox-derived name and kind.
+        collector._workload_name_labels = ("pinterest.com/crd_name",) + hb.DEFAULT_WORKLOAD_NAME_LABELS
+        collector._workload_kind_labels = ("pinterest.com/crd_type",) + hb.DEFAULT_WORKLOAD_KIND_LABELS
         container = _FakeContainer(
             id="c2",
             name="cronjobcontroller",

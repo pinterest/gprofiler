@@ -17,7 +17,7 @@
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from granulate_utils.containers.client import ContainersClient
 from granulate_utils.exceptions import NoContainerRuntimesError
@@ -30,24 +30,23 @@ from gprofiler.metadata.system_metadata import get_run_mode
 
 logger = get_logger_adapter(__name__)
 
-# Container-runtime (CRI) labels that carry an owner/workload name, most
-# authoritative first. On vanilla clusters the pod's user labels are exposed
-# here; some distributions (e.g. Pinterest CRDs) surface the owning workload
-# name under a vendor key instead, so we probe several before giving up.
-WORKLOAD_NAME_LABELS = (
+# Vendor-neutral pod/container label keys that carry a workload name, most
+# authoritative first. These are the standardized Kubernetes labels; deployments
+# that expose the workload name under a vendor-specific key (e.g. a CRD label)
+# can add those keys via configuration — they are probed before these defaults.
+DEFAULT_WORKLOAD_NAME_LABELS = (
     "app.kubernetes.io/name",
     "app.kubernetes.io/instance",
     "app",
     "k8s-app",
-    "pinterest.com/crd_name",
 )
+# There is no standardized Kubernetes label for the workload kind, so by default
+# it is inferred from the pod-name shape. Deployments that expose the kind under
+# a vendor-specific key can supply those keys via configuration.
+DEFAULT_WORKLOAD_KIND_LABELS: Tuple[str, ...] = ()
+
 # Sentinel label values that carry no real workload name.
 _PLACEHOLDER_LABEL_VALUES = frozenset({"unknown", "none", ""})
-
-# Container-runtime (CRI) labels that carry the workload kind, most authoritative
-# first. Some distributions (e.g. Pinterest CRDs) expose the owning workload kind
-# (PinterestDaemon / PinterestService / PinApp) under a vendor key.
-WORKLOAD_KIND_LABELS = ("pinterest.com/crd_type",)
 
 # Kubernetes derives generated pod-name suffixes (the ReplicaSet
 # pod-template-hash and the trailing random token) from a vowel-free "safe"
@@ -71,7 +70,7 @@ _POD_NAME_KIND_RES = (
 
 
 def _first_label_value(
-    keys: Tuple[str, ...],
+    keys: Sequence[str],
     labels: Dict[str, str],
     pod_labels: Optional[Dict[str, str]],
 ) -> Optional[str]:
@@ -91,9 +90,10 @@ def _best_effort_workload_name(
     pod_name: Optional[str],
     labels: Dict[str, str],
     pod_labels: Optional[Dict[str, str]] = None,
+    name_labels: Sequence[str] = DEFAULT_WORKLOAD_NAME_LABELS,
 ) -> Optional[str]:
     # Labels first; pod-name normalization is a last resort when no label is available.
-    name = _first_label_value(WORKLOAD_NAME_LABELS, labels, pod_labels)
+    name = _first_label_value(name_labels, labels, pod_labels)
     if name is not None:
         return name
 
@@ -112,10 +112,11 @@ def _best_effort_workload_kind(
     pod_name: Optional[str],
     labels: Dict[str, str],
     pod_labels: Optional[Dict[str, str]] = None,
+    kind_labels: Sequence[str] = DEFAULT_WORKLOAD_KIND_LABELS,
 ) -> str:
     # Labels first; then infer the controller kind from the pod-name shape. Fall back
     # to the generic k8s/container distinction when nothing else is determinable.
-    kind = _first_label_value(WORKLOAD_KIND_LABELS, labels, pod_labels)
+    kind = _first_label_value(kind_labels, labels, pod_labels)
     if kind is not None:
         return kind
 
@@ -131,8 +132,17 @@ def _best_effort_workload_kind(
 
 
 class HeartbeatMetadataCollector:
-    def __init__(self, refresh_interval_seconds: int = 30) -> None:
+    def __init__(
+        self,
+        refresh_interval_seconds: int = 30,
+        workload_name_labels: Optional[Sequence[str]] = None,
+        workload_kind_labels: Optional[Sequence[str]] = None,
+    ) -> None:
         self._refresh_interval_seconds = refresh_interval_seconds
+        # Configured (e.g. vendor-specific) label keys are probed before the built-in
+        # defaults, so a deployment can override without losing standard k8s coverage.
+        self._workload_name_labels: Tuple[str, ...] = tuple(workload_name_labels or ()) + DEFAULT_WORKLOAD_NAME_LABELS
+        self._workload_kind_labels: Tuple[str, ...] = tuple(workload_kind_labels or ()) + DEFAULT_WORKLOAD_KIND_LABELS
         self._last_snapshot_at = 0.0
         self._last_snapshot: Dict[str, Any] = {
             "agent_version": __version__,
@@ -207,8 +217,12 @@ class HeartbeatMetadataCollector:
                     "runtime": getattr(container, "runtime", None),
                     "namespace": namespace,
                     "pod_name": pod_name,
-                    "workload_name": _best_effort_workload_name(pod_name, labels, pod_labels),
-                    "workload_kind": _best_effort_workload_kind(pod_name, labels, pod_labels),
+                    "workload_name": _best_effort_workload_name(
+                        pod_name, labels, pod_labels, self._workload_name_labels
+                    ),
+                    "workload_kind": _best_effort_workload_kind(
+                        pod_name, labels, pod_labels, self._workload_kind_labels
+                    ),
                     "processes": sorted(
                         processes_by_container.get(getattr(container, "id", ""), []),
                         key=lambda process_info: process_info["pid"],

@@ -52,23 +52,18 @@ from gprofiler.client import (
 from gprofiler.consts import CPU_PROFILING_MODE
 from gprofiler.containers_client import ContainerNamesClient
 from gprofiler.diagnostics import log_diagnostics, set_diagnostics
-from gprofiler.exceptions import APIError, NoProfilersEnabledError
-from gprofiler.gprofiler_types import ProcessToProfileData, UserArgs, integers_list, positive_integer
 from gprofiler.dynamic_profiling_management.heartbeat import DynamicGProfilerManager, HeartbeatClient
+from gprofiler.exceptions import APIError, NoProfilersEnabledError
+from gprofiler.gprofiler_types import (
+    ProcessToProfileData,
+    UserArgs,
+    comma_separated_list,
+    integers_list,
+    positive_integer,
+)
 from gprofiler.hw_metrics import HWMetricsMonitor, HWMetricsMonitorBase, NoopHWMetricsMonitor
 from gprofiler.log import RemoteLogsHandler, initial_root_logger_setup
 from gprofiler.memory_manager import MemoryManager
-from gprofiler.metrics_publisher import (
-    MetricsPublisher, METRIC_BASE_NAME,
-    ERROR_TYPE_PROCESS_PROFILER_FAILURE, ERROR_TYPE_PERF_FAILURE, ERROR_TYPE_PROFILING_RUN_FAILURE,
-    ERROR_TYPE_UPLOAD_ERROR,
-    COMPONENT_SYSTEM_PROFILER, COMPONENT_API_CLIENT, COMPONENT_GPROFILER_MAIN,
-    SEVERITY_ERROR, SEVERITY_WARNING, SEVERITY_CRITICAL,
-    ERROR_MSG_PROCESS_PROFILER_FAILURE, ERROR_MSG_PERF_FAILURE, ERROR_MSG_PROFILING_RUN_FAILURE,
-    ERROR_MSG_UPLOAD_ERROR,
-    ERROR_CATEGORY_UPLOAD_TIMEOUT, ERROR_CATEGORY_UPLOAD_API_ERROR, ERROR_CATEGORY_UPLOAD_REQUEST_EXCEPTION,
-    get_current_method_name,
-)
 from gprofiler.merge import concatenate_from_external_file, concatenate_profiles, merge_profiles
 from gprofiler.metadata import ProfileMetadata
 from gprofiler.metadata.application_identifiers import ApplicationIdentifiers
@@ -76,6 +71,28 @@ from gprofiler.metadata.enrichment import EnrichmentOptions
 from gprofiler.metadata.external_metadata import ExternalMetadataStaleError, read_external_metadata
 from gprofiler.metadata.metadata_collector import get_current_metadata, get_static_metadata
 from gprofiler.metadata.system_metadata import get_hostname, get_run_mode, get_static_system_info
+from gprofiler.metrics_publisher import (
+    COMPONENT_API_CLIENT,
+    COMPONENT_GPROFILER_MAIN,
+    COMPONENT_SYSTEM_PROFILER,
+    ERROR_CATEGORY_UPLOAD_API_ERROR,
+    ERROR_CATEGORY_UPLOAD_REQUEST_EXCEPTION,
+    ERROR_CATEGORY_UPLOAD_TIMEOUT,
+    ERROR_MSG_PERF_FAILURE,
+    ERROR_MSG_PROCESS_PROFILER_FAILURE,
+    ERROR_MSG_PROFILING_RUN_FAILURE,
+    ERROR_MSG_UPLOAD_ERROR,
+    ERROR_TYPE_PERF_FAILURE,
+    ERROR_TYPE_PROCESS_PROFILER_FAILURE,
+    ERROR_TYPE_PROFILING_RUN_FAILURE,
+    ERROR_TYPE_UPLOAD_ERROR,
+    METRIC_BASE_NAME,
+    SEVERITY_CRITICAL,
+    SEVERITY_ERROR,
+    SEVERITY_WARNING,
+    MetricsPublisher,
+    get_current_method_name,
+)
 from gprofiler.platform import is_aarch64, is_linux, is_windows
 from gprofiler.profiler_state import ProfilerState
 from gprofiler.profilers.factory import get_profilers
@@ -252,12 +269,12 @@ class GProfiler:
         local_end_time: datetime.datetime,
     ) -> Optional[str]:
         """Generate flamegraph HTML from collapsed stack data.
-        
+
         Args:
             collapsed_data: Collapsed stack data (with metadata stripped)
             local_start_time: Profile start time
             local_end_time: Profile end time
-            
+
         Returns:
             Flamegraph HTML as a string, or None if generation fails
         """
@@ -280,7 +297,7 @@ class GProfiler:
                 .replace(b"{{{START_TIME}}}", start_ts.encode())
                 .replace(b"{{{END_TIME}}}", end_ts.encode())
             )
-            return flamegraph_html.decode('utf-8')
+            return flamegraph_html.decode("utf-8")
         except Exception as e:
             logger.warning(f"Failed to generate flamegraph HTML: {e}")
             return None
@@ -303,13 +320,9 @@ class GProfiler:
 
         if self._flamegraph:
             flamegraph_path = base_filename + ".html"
-            flamegraph_html = self._generate_flamegraph_html(
-                stripped_collapsed_data,
-                local_start_time,
-                local_end_time
-            )
+            flamegraph_html = self._generate_flamegraph_html(stripped_collapsed_data, local_start_time, local_end_time)
             if flamegraph_html:
-                Path(flamegraph_path).write_bytes(flamegraph_html.encode('utf-8'))
+                Path(flamegraph_path).write_bytes(flamegraph_html.encode("utf-8"))
 
                 # point last_flamegraph.html at the new file; and possibly, delete the previous one.
                 self._update_last_output("last_flamegraph.html", flamegraph_path)
@@ -348,26 +361,30 @@ class GProfiler:
                         f"Runtime profilers (py-spy, Java, etc.) will continue normally."
                     )
                 else:
-                    logger.debug(f"System process count: {total_processes} (threshold: {self._profiler_state.max_system_processes_for_system_profilers})")
+                    logger.debug(
+                        f"System process count: {total_processes} (threshold: {self._profiler_state.max_system_processes_for_system_profilers})"
+                    )
             except Exception as e:
                 logger.warning(f"Could not count system processes, continuing with all profilers: {e}")
 
         for prof in list(self.all_profilers):
             try:
                 # Skip system profilers if threshold exceeded, unless they override the logic
-                if skip_system_profilers and hasattr(prof, '_is_system_profiler') and prof._is_system_profiler:
+                if skip_system_profilers and hasattr(prof, "_is_system_profiler") and prof._is_system_profiler:
                     # Check if the profiler has custom logic for system threshold skipping
-                    if hasattr(prof, 'should_skip_due_to_system_threshold'):
+                    if hasattr(prof, "should_skip_due_to_system_threshold"):
                         should_skip = prof.should_skip_due_to_system_threshold()
                     else:
                         should_skip = True
-                    
+
                     if should_skip:
                         logger.info(f"Skipping {prof.__class__.__name__} due to high system process count")
                         continue
                     else:
-                        logger.info(f"Not skipping {prof.__class__.__name__} despite high system process count (cgroup-based profiling requested)")
-                    
+                        logger.info(
+                            f"Not skipping {prof.__class__.__name__} despite high system process count (cgroup-based profiling requested)"
+                        )
+
                 prof.start()
             except Exception:
                 # the SystemProfiler is handled separately - let the user run with '--perf-mode none' if they
@@ -382,19 +399,19 @@ class GProfiler:
     def stop(self) -> None:
         logger.info("Stopping ...")
         self._profiler_state.stop_event.set()
-        
+
         # Stop system metrics monitor with exception protection
         try:
             self._system_metrics_monitor.stop()
         except Exception as e:
             logger.error(f"Error stopping system metrics monitor: {e}")
-        
+
         # Stop hardware metrics monitor with exception protection
         try:
             self._hw_metrics_monitor.stop()
         except Exception as e:
             logger.error(f"Error stopping hardware metrics monitor: {e}")
-        
+
         # Stop all profilers with individual exception protection
         for prof in self.all_profilers:
             try:
@@ -403,7 +420,7 @@ class GProfiler:
             except Exception as e:
                 logger.error(f"Error stopping profiler {prof.name}: {e}")
 
-    def _snapshot(self) -> None:   
+    def _snapshot(self) -> None:
         local_start_time = datetime.datetime.utcnow()
         monotonic_start_time = time.monotonic()
         process_profilers_futures = []
@@ -438,7 +455,7 @@ class GProfiler:
         local_end_time = local_start_time + datetime.timedelta(seconds=(time.monotonic() - monotonic_start_time))
 
         try:
-            system_result = system_future.result()            
+            system_result = system_future.result()
         except Exception:
             logger.critical(
                 "Running perf failed; consider running gProfiler with '--perf-mode disabled' to avoid using perf",
@@ -507,16 +524,12 @@ class GProfiler:
                     hwmetrics=hwmetrics,
                     external_app_metadata=external_app_metadata,
                 )
-            
+
             # Strip metadata to get just the stacks
             stripped_collapsed_data = self._strip_extra_data(temp_merged)
-            
+
             # Generate flamegraph HTML using the extracted method
-            flamegraph_html = self._generate_flamegraph_html(
-                stripped_collapsed_data,
-                local_start_time,
-                local_end_time
-            )
+            flamegraph_html = self._generate_flamegraph_html(stripped_collapsed_data, local_start_time, local_end_time)
             if flamegraph_html:
                 logger.info("Generated flamegraph HTML for profile data")
 
@@ -549,7 +562,7 @@ class GProfiler:
             self._generate_output_files(merged_result, local_start_time, local_end_time)
 
         if self._profiler_api_client:
-            self._gpid =             _submit_profile_logged(
+            self._gpid = _submit_profile_logged(
                 self._profiler_api_client,
                 local_start_time,
                 local_end_time,
@@ -1238,6 +1251,28 @@ def parse_cmd_args() -> configargparse.Namespace:
         " 'enabled_aggressive' mode (default: %(default)s)",
     )
 
+    parser.add_argument(
+        "--heartbeat-workload-name-labels",
+        type=comma_separated_list,
+        dest="heartbeat_workload_name_labels",
+        default=[],
+        help="Comma-separated pod/container label keys, in priority order, to probe when inferring the"
+        " workload name for the heartbeat inventory. Probed before the built-in Kubernetes labels"
+        " (app.kubernetes.io/name, app, k8s-app, ...). Use to surface a vendor/CRD-specific name label,"
+        " e.g. 'mycompany.com/workload-name'.",
+    )
+
+    parser.add_argument(
+        "--heartbeat-workload-kind-labels",
+        type=comma_separated_list,
+        dest="heartbeat_workload_kind_labels",
+        default=[],
+        help="Comma-separated pod/container label keys, in priority order, to probe when inferring the"
+        " workload kind for the heartbeat inventory. When unset, the kind is inferred from the pod-name"
+        " shape (Deployment/StatefulSet/DaemonSet). Use to surface a vendor/CRD-specific kind label,"
+        " e.g. 'mycompany.com/workload-kind'.",
+    )
+
     if is_linux() and not is_aarch64():
         hw_metrics_options = parser.add_argument_group("hardware metrics")
         hw_metrics_options.add_argument(
@@ -1515,12 +1550,16 @@ def main() -> None:
         sli_metric_uuid=args.sli_metric_uuid,
         enabled=args.enable_publish_metrics,
     )
-    
+
     if args.enable_publish_metrics:
         if args.sli_metric_uuid:
-            logger.info(f"Metrics publishing enabled - connecting to {args.metrics_server_url} (SLI metric UUID: {args.sli_metric_uuid})")
+            logger.info(
+                f"Metrics publishing enabled - connecting to {args.metrics_server_url} (SLI metric UUID: {args.sli_metric_uuid})"
+            )
         else:
-            logger.info(f"Metrics publishing enabled - connecting to {args.metrics_server_url} (SLI metrics disabled - no UUID configured)")
+            logger.info(
+                f"Metrics publishing enabled - connecting to {args.metrics_server_url} (SLI metrics disabled - no UUID configured)"
+            )
     else:
         logger.info("Metrics publishing disabled")
 
@@ -1649,9 +1688,11 @@ def main() -> None:
                 tls_ca_bundle=args.tls_ca_bundle,
                 tls_cert_refresh_enabled=args.tls_cert_refresh_enabled,
                 tls_cert_refresh_interval=args.tls_cert_refresh_interval,
+                workload_name_labels=args.heartbeat_workload_name_labels,
+                workload_kind_labels=args.heartbeat_workload_kind_labels,
             )
 
-            # Create dynamic profiler manager  
+            # Create dynamic profiler manager
             manager = DynamicGProfilerManager(args, heartbeat_client)
             manager.heartbeat_interval = args.heartbeat_interval
 
@@ -1690,7 +1731,7 @@ def main() -> None:
                 perfspect_duration=getattr(args, "tool_perfspect_duration", None),
             )
             logger.info("gProfiler initialized and ready to start profiling")
-            
+
             if args.continuous:
                 gprofiler.run_continuous()
             else:
@@ -1709,7 +1750,7 @@ def main() -> None:
         sys.exit(1)
     finally:
         # Clean up metrics publisher
-        if 'metrics_publisher' in locals() and hasattr(metrics_publisher, 'flush_and_close'):
+        if "metrics_publisher" in locals() and hasattr(metrics_publisher, "flush_and_close"):
             try:
                 metrics_publisher.flush_and_close()
             except Exception as e:
