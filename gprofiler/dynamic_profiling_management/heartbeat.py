@@ -18,7 +18,7 @@ import datetime
 import logging
 import socket
 import threading
-from typing import Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 
 import configargparse
 import requests
@@ -28,11 +28,7 @@ from gprofiler.dynamic_profiling_management.command_control import CommandManage
 from gprofiler.dynamic_profiling_management.continuous import ContinuousProfilerSlot
 from gprofiler.metadata.heartbeat_metadata import HeartbeatMetadataCollector
 from gprofiler.metadata.system_metadata import get_hostname
-from gprofiler.metrics_publisher import (
-    MetricsPublisher,
-    RESPONSE_TYPE_SUCCESS,
-    RESPONSE_TYPE_FAILURE,
-)
+from gprofiler.metrics_publisher import RESPONSE_TYPE_FAILURE, RESPONSE_TYPE_SUCCESS, MetricsPublisher
 from gprofiler.profilers.pmu_manager import get_pmu_manager
 
 logger = logging.getLogger(__name__)
@@ -57,6 +53,8 @@ class HeartbeatClient:
         tls_ca_bundle: Optional[str] = None,
         tls_cert_refresh_enabled: bool = False,
         tls_cert_refresh_interval: int = 21600,
+        workload_name_labels: Optional[List[str]] = None,
+        workload_kind_labels: Optional[List[str]] = None,
     ):
         self.api_server = api_server.rstrip("/")
         self.service_name = service_name
@@ -78,7 +76,10 @@ class HeartbeatClient:
 
         self._init_session()
         self.pmu_manager = get_pmu_manager()
-        self.heartbeat_metadata_collector = HeartbeatMetadataCollector()
+        self.heartbeat_metadata_collector = HeartbeatMetadataCollector(
+            workload_name_labels=workload_name_labels,
+            workload_kind_labels=workload_kind_labels,
+        )
 
         if self.server_token:
             self.session.headers.update(
@@ -372,9 +373,7 @@ class DynamicGProfilerManager:
                 self.continuous.start(cmd.profiling_command, cmd.command_id)
                 started = True
             elif self.continuous.can_be_paused():
-                logger.info(
-                    "Replacing current continuous profiler with command %s", cmd.command_id
-                )
+                logger.info("Replacing current continuous profiler with command %s", cmd.command_id)
                 self.command_manager.pause_command(self.continuous.command.command_id)
                 self.continuous.stop()
                 self.continuous.start(cmd.profiling_command, cmd.command_id)
