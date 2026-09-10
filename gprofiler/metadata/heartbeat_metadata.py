@@ -17,7 +17,7 @@
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from granulate_utils.containers.client import ContainersClient
 from granulate_utils.exceptions import NoContainerRuntimesError
@@ -44,6 +44,11 @@ WORKLOAD_NAME_LABELS = (
 # Sentinel label values that carry no real workload name.
 _PLACEHOLDER_LABEL_VALUES = frozenset({"unknown", "none", ""})
 
+# Container-runtime (CRI) labels that carry the workload kind, most authoritative
+# first. Some distributions (e.g. Pinterest CRDs) expose the owning workload kind
+# (PinterestDaemon / PinterestService / PinApp) under a vendor key.
+WORKLOAD_KIND_LABELS = ("pinterest.com/crd_type",)
+
 # Kubernetes derives generated pod-name suffixes (the ReplicaSet
 # pod-template-hash and the trailing random token) from a vowel-free "safe"
 # alphabet to avoid forming words. Matching that exact alphabet keeps us from
@@ -57,13 +62,40 @@ STATEFULSET_SUFFIX_RE = re.compile(r"^(?P<name>.+)-\d+$")
 DAEMONSET_SUFFIX_RE = re.compile(rf"^(?P<name>.+)-[{_K8S_RAND}]{{5}}$")
 
 _POD_NAME_SUFFIX_RES = (REPLICASET_SUFFIX_RE, STATEFULSET_SUFFIX_RE, DAEMONSET_SUFFIX_RE)
+# Pod-name shape -> the controller kind that generates it, best-effort.
+_POD_NAME_KIND_RES = (
+    (REPLICASET_SUFFIX_RE, "Deployment"),
+    (STATEFULSET_SUFFIX_RE, "StatefulSet"),
+    (DAEMONSET_SUFFIX_RE, "DaemonSet"),
+)
 
 
-def _best_effort_workload_name(pod_name: Optional[str], labels: Dict[str, str]) -> Optional[str]:
-    for key in WORKLOAD_NAME_LABELS:
-        value = labels.get(key)
-        if value and value.lower() not in _PLACEHOLDER_LABEL_VALUES:
-            return value
+def _first_label_value(
+    keys: Tuple[str, ...],
+    labels: Dict[str, str],
+    pod_labels: Optional[Dict[str, str]],
+) -> Optional[str]:
+    # Pod-sandbox labels carry the real workload identity across clusters; container
+    # labels are only a fallback (some runtimes surface pod labels there too).
+    for source in (pod_labels, labels):
+        if not source:
+            continue
+        for key in keys:
+            value = source.get(key)
+            if value and value.lower() not in _PLACEHOLDER_LABEL_VALUES:
+                return value
+    return None
+
+
+def _best_effort_workload_name(
+    pod_name: Optional[str],
+    labels: Dict[str, str],
+    pod_labels: Optional[Dict[str, str]] = None,
+) -> Optional[str]:
+    # Labels first; pod-name normalization is a last resort when no label is available.
+    name = _first_label_value(WORKLOAD_NAME_LABELS, labels, pod_labels)
+    if name is not None:
+        return name
 
     if pod_name is None:
         return None
@@ -74,6 +106,28 @@ def _best_effort_workload_name(pod_name: Optional[str], labels: Dict[str, str]) 
             return str(match.group("name"))
 
     return pod_name
+
+
+def _best_effort_workload_kind(
+    pod_name: Optional[str],
+    labels: Dict[str, str],
+    pod_labels: Optional[Dict[str, str]] = None,
+) -> str:
+    # Labels first; then infer the controller kind from the pod-name shape. Fall back
+    # to the generic k8s/container distinction when nothing else is determinable.
+    kind = _first_label_value(WORKLOAD_KIND_LABELS, labels, pod_labels)
+    if kind is not None:
+        return kind
+
+    if not pod_name and not labels.get("io.kubernetes.pod.namespace"):
+        return "container"
+
+    if pod_name is not None:
+        for suffix_re, controller_kind in _POD_NAME_KIND_RES:
+            if suffix_re.match(pod_name):
+                return controller_kind
+
+    return "k8s"
 
 
 class HeartbeatMetadataCollector:
@@ -141,6 +195,7 @@ class HeartbeatMetadataCollector:
         workload_inventory: List[Dict[str, Any]] = []
         for container in containers:
             labels = getattr(container, "labels", {}) or {}
+            pod_labels = getattr(container, "pod_labels", {}) or {}
             namespace = labels.get("io.kubernetes.pod.namespace")
             pod_name = labels.get("io.kubernetes.pod.name")
             container_name = labels.get("io.kubernetes.container.name") or getattr(container, "name", None)
@@ -152,8 +207,8 @@ class HeartbeatMetadataCollector:
                     "runtime": getattr(container, "runtime", None),
                     "namespace": namespace,
                     "pod_name": pod_name,
-                    "workload_name": _best_effort_workload_name(pod_name, labels),
-                    "workload_kind": "k8s" if namespace or pod_name else "container",
+                    "workload_name": _best_effort_workload_name(pod_name, labels, pod_labels),
+                    "workload_kind": _best_effort_workload_kind(pod_name, labels, pod_labels),
                     "processes": sorted(
                         processes_by_container.get(getattr(container, "id", ""), []),
                         key=lambda process_info: process_info["pid"],
