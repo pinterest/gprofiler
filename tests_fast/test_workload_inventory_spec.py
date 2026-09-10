@@ -104,13 +104,36 @@ class TestWorkloadNameInferenceSpec:
         assert name == "checkout"
 
     def test_app_label_is_second_choice(self):
-        assert hb._best_effort_workload_name("web-5d4b8c7f9c-abcde", {"app": "cart"}) == "cart"
+        assert hb._best_effort_workload_name("web-5d4b8c7f9c-tl6qw", {"app": "cart"}) == "cart"
+
+    def test_vendor_crd_name_label_is_used_when_app_labels_absent(self):
+        # Pinterest CRD clusters surface the workload name here, not under app*.
+        assert (
+            hb._best_effort_workload_name("validation-85ff989f55-tl6qw", {"pinterest.com/crd_name": "validation"})
+            == "validation"
+        )
+
+    def test_placeholder_label_values_are_ignored(self):
+        assert (
+            hb._best_effort_workload_name("kube-proxy-node1", {"pinterest.com/crd_name": "unknown"})
+            == "kube-proxy-node1"
+        )
 
     def test_replicaset_pod_name_is_normalized(self):
-        assert hb._best_effort_workload_name("web-5d4b8c7f9c-abcde", {}) == "web"
+        assert hb._best_effort_workload_name("web-5d4b8c7f9c-tl6qw", {}) == "web"
 
     def test_statefulset_pod_name_is_normalized(self):
         assert hb._best_effort_workload_name("postgres-0", {}) == "postgres"
+
+    def test_daemonset_pod_name_is_normalized(self):
+        assert hb._best_effort_workload_name("metrics-agent-lvpdm", {}) == "metrics-agent"
+
+    def test_standalone_pod_name_with_random_suffix_is_normalized(self):
+        assert hb._best_effort_workload_name("visibilitymetrics-pinapp-test-0", {}) == "visibilitymetrics-pinapp-test"
+
+    def test_name_tail_with_vowels_is_not_stripped(self):
+        # "redis" contains vowels, so it is not a k8s-generated suffix.
+        assert hb._best_effort_workload_name("service-redis", {}) == "service-redis"
 
     def test_plain_pod_name_is_returned_as_is(self):
         assert hb._best_effort_workload_name("standalone", {}) == "standalone"

@@ -30,25 +30,48 @@ from gprofiler.metadata.system_metadata import get_run_mode
 
 logger = get_logger_adapter(__name__)
 
-REPLICASET_SUFFIX_RE = re.compile(r"^(?P<name>.+)-[a-f0-9]{8,10}-[a-z0-9]{5}$")
+# Container-runtime (CRI) labels that carry an owner/workload name, most
+# authoritative first. On vanilla clusters the pod's user labels are exposed
+# here; some distributions (e.g. Pinterest CRDs) surface the owning workload
+# name under a vendor key instead, so we probe several before giving up.
+WORKLOAD_NAME_LABELS = (
+    "app.kubernetes.io/name",
+    "app.kubernetes.io/instance",
+    "app",
+    "k8s-app",
+    "pinterest.com/crd_name",
+)
+# Sentinel label values that carry no real workload name.
+_PLACEHOLDER_LABEL_VALUES = frozenset({"unknown", "none", ""})
+
+# Kubernetes derives generated pod-name suffixes (the ReplicaSet
+# pod-template-hash and the trailing random token) from a vowel-free "safe"
+# alphabet to avoid forming words. Matching that exact alphabet keeps us from
+# stripping legitimate tokens (e.g. "-redis", "-mysql") off standalone names.
+_K8S_RAND = "bcdfghjklmnpqrstvwxz2456789"
+# Deployment/ReplicaSet pod: <name>-<pod-template-hash>-<random-suffix>.
+REPLICASET_SUFFIX_RE = re.compile(rf"^(?P<name>.+)-[{_K8S_RAND}]{{6,10}}-[{_K8S_RAND}]{{5}}$")
+# StatefulSet pod: <name>-<ordinal>.
 STATEFULSET_SUFFIX_RE = re.compile(r"^(?P<name>.+)-\d+$")
+# DaemonSet / ReplicationController / bare generateName pod: <name>-<random-suffix>.
+DAEMONSET_SUFFIX_RE = re.compile(rf"^(?P<name>.+)-[{_K8S_RAND}]{{5}}$")
+
+_POD_NAME_SUFFIX_RES = (REPLICASET_SUFFIX_RE, STATEFULSET_SUFFIX_RE, DAEMONSET_SUFFIX_RE)
 
 
 def _best_effort_workload_name(pod_name: Optional[str], labels: Dict[str, str]) -> Optional[str]:
-    if labels.get("app.kubernetes.io/name"):
-        return labels["app.kubernetes.io/name"]
-    if labels.get("app"):
-        return labels["app"]
+    for key in WORKLOAD_NAME_LABELS:
+        value = labels.get(key)
+        if value and value.lower() not in _PLACEHOLDER_LABEL_VALUES:
+            return value
+
     if pod_name is None:
         return None
 
-    match = REPLICASET_SUFFIX_RE.match(pod_name)
-    if match is not None:
-        return str(match.group("name"))
-
-    match = STATEFULSET_SUFFIX_RE.match(pod_name)
-    if match is not None:
-        return str(match.group("name"))
+    for suffix_re in _POD_NAME_SUFFIX_RES:
+        match = suffix_re.match(pod_name)
+        if match is not None:
+            return str(match.group("name"))
 
     return pod_name
 
