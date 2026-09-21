@@ -272,7 +272,7 @@ The `profiler_configs` object in `combined_config` controls which profilers are 
 {
   "profiler_configs": {
     "perf": {"mode": "enabled_restricted", "events": ["cycles", "cache-misses"]},
-    "async_profiler": {"enabled": true, "time": "cpu"},
+    "async_profiler": {"enabled": true, "time": "cpu", "per_thread": true},
     "pyperf": "enabled",
     "pyspy": "enabled_fallback",
     "phpspy": "enabled",
@@ -302,6 +302,7 @@ The `async_profiler` key accepts a configuration dict or the shorthand string `"
 | `enabled` | bool | no (default `true`) | Set to `false` to disable Java profiling entirely |
 | `time` | string | no (default `"cpu"`) | Profiling mode — see table below |
 | `alloc_interval` | string | no (default `"2MB"`) | Allocation sampling interval; only used when `time` is `"alloc"`. Uses [bitmath](https://pypi.org/project/bitmath/) notation (e.g. `"512KiB"`, `"2MB"`) |
+| `per_thread` | bool | no (default `false`) | Emit async-profiler's `threads` output so samples are split per thread name (required for Spark task attribution) |
 
 **`time` mode values:**
 
@@ -320,6 +321,7 @@ The `async_profiler` key accepts a configuration dict or the shorthand string `"
 {"enabled": true, "time": "itimer"}
 {"enabled": true, "time": "wall"}
 {"enabled": true, "time": "alloc", "alloc_interval": "512KiB"}
+{"enabled": true, "time": "cpu", "per_thread": true}
 {"enabled": true, "time": "auto"}
 {"enabled": false}
 ```
