@@ -173,6 +173,7 @@ def _apply_profiler_configs(new_args: configargparse.Namespace, profiler_configs
         if not async_profiler_config.get("enabled", True):
             new_args.java_mode = "disabled"
         else:
+            new_args.java_async_profiler_per_thread = bool(async_profiler_config.get("per_thread", False))
             time_mode = async_profiler_config.get("time", "cpu")
             if time_mode not in _VALID_AP_TIME_MODES:
                 raise ValueError(

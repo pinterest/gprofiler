@@ -495,7 +495,7 @@ class AsyncProfiledProcess:
     Represents a process profiled with async-profiler.
     """
 
-    FORMAT_PARAMS = "ann,sig,threads"
+    FORMAT_PARAMS = "ann,sig"
     OUTPUT_FORMAT = "collapsed"
     OUTPUTS_MODE = 0o622  # readable by root, writable by all
 
@@ -518,6 +518,7 @@ class AsyncProfiledProcess:
         collect_meminfo: bool = True,
         include_method_modifiers: bool = False,
         java_line_numbers: str = "none",
+        per_thread: bool = False,
     ):
         self.process = process
         self._profiler_state = profiler_state
@@ -569,6 +570,7 @@ class AsyncProfiledProcess:
         self._collect_meminfo = collect_meminfo
         self._include_method_modifiers = ",includemm" if include_method_modifiers else ""
         self._include_line_numbers = ",includeln" if java_line_numbers == "line-of-function" else ""
+        self._include_threads = ",threads" if per_thread else ""
 
     def _find_rw_exec_dir(self) -> str:
         """
@@ -709,7 +711,7 @@ class AsyncProfiledProcess:
     def _get_ap_output_args(self) -> str:
         return (
             f",file={self._output_path_process},{self.OUTPUT_FORMAT},"
-            + f"{self.FORMAT_PARAMS}{self._include_method_modifiers}{self._include_line_numbers}"
+            + f"{self.FORMAT_PARAMS}{self._include_method_modifiers}{self._include_line_numbers}{self._include_threads}"
         )
 
     def _get_interval_arg(self, interval: int) -> str:
@@ -962,6 +964,14 @@ class AsyncProfiledProcess:
             default="none",
             help="Select if async-profiler should add line numbers to frames",
         ),
+        ProfilerArgument(
+            "--java-async-profiler-per-thread",
+            dest="java_async_profiler_per_thread",
+            action="store_true",
+            default=False,
+            help="Enable async-profiler per-thread profiling (the 'threads' output option, disabled by default)."
+            " Per-thread profiling splits samples by thread name, which is required for Spark task attribution.",
+        ),
     ],
     supported_profiling_modes=["cpu", "allocation"],
 )
@@ -1008,6 +1018,7 @@ class JavaProfiler(SpawningProcessProfilerBase):
         java_full_hserr: bool,
         java_include_method_modifiers: bool,
         java_line_numbers: str,
+        java_async_profiler_per_thread: bool,
         min_duration: int = 10,
     ):
         assert java_mode == "ap", "Java profiler should not be initialized, wrong java_mode value given"
@@ -1050,6 +1061,7 @@ class JavaProfiler(SpawningProcessProfilerBase):
         self._java_full_hserr = java_full_hserr
         self._include_method_modifiers = java_include_method_modifiers
         self._java_line_numbers = java_line_numbers
+        self._per_thread = java_async_profiler_per_thread
 
     def _init_ap_mode(self, profiling_mode: str, ap_mode: str) -> None:
         assert profiling_mode in ("cpu", "allocation"), "async-profiler support only cpu/allocation profiling modes"
@@ -1297,6 +1309,7 @@ class JavaProfiler(SpawningProcessProfilerBase):
             self._report_meminfo,
             self._include_method_modifiers,
             self._java_line_numbers,
+            self._per_thread,
         ) as ap_proc:
             stackcollapse = self._profile_ap_process(ap_proc, comm, actual_duration)
 
