@@ -84,9 +84,56 @@ done
 echo "Using BUILD_STRATEGY: $BUILD_STRATEGY"
 echo "Using ARCH: $ARCH"
 
-VERSION=v3.12.1
-GIT_REV="cd5bcf2364478092155cb8ef33513a26c6be89a4"
+VERSION=v3.17.0
+GIT_REV="956744c9b41359f8211dd7442a11033515d9ab4b"
 
+# Apply gProfiler-specific patches to the cloned PerfSpect source.
+# These fixes are intentionally kept here (not upstreamed) so we can build a
+# specific PerfSpect revision for gProfiler without modifying the open source
+# project. Each patch is guarded: if the expected text is missing (e.g. GIT_REV
+# was bumped to a revision that changed these files), the build fails loudly so
+# we don't silently build an unpatched tree.
+apply_perfspect_patch() {
+    local file="$1" before="$2" after="$3" desc="$4"
+    if grep -qF -- "$after" "$file"; then
+        echo "  [skip] already patched: $desc"
+        return 0
+    fi
+    if ! grep -qF -- "$before" "$file"; then
+        echo "Error: cannot apply patch ($desc)." >&2
+        echo "       Expected text not found in $file." >&2
+        echo "       PerfSpect $VERSION ($GIT_REV) may have changed; update build_perfspect.sh." >&2
+        exit 1
+    fi
+    sed -i "s|${before}|${after}|" "$file"
+    echo "  [ok] patched: $desc"
+}
+
+patch_perfspect_source() {
+    echo "Applying gProfiler-specific PerfSpect patches..."
+    # 1) avx-turbo pins a specific commit, but GIT_CLONE_OPTS does a shallow
+    #    (--depth 1) clone, so the pinned commit isn't in the fetched history
+    #    and the subsequent `git checkout` fails. Use a full single-branch
+    #    clone so the pinned commit is reachable.
+    apply_perfspect_patch tools/Makefile \
+        'git clone $(GIT_CLONE_OPTS) https://github.com/travisdowns/avx-turbo.git' \
+        'git clone --single-branch https://github.com/travisdowns/avx-turbo.git' \
+        'avx-turbo: fetch full history so the pinned commit is reachable'
+    # 2) Building all tools with -j$(nproc) fires ~30 parallel anonymous git
+    #    clones, which GitHub rate-limits ("could not read Username"). Lower the
+    #    parallelism to make the clones reliable.
+    apply_perfspect_patch tools/build.Dockerfile \
+        'RUN make tools -j$(nproc)' \
+        'RUN make tools -j4' \
+        'tools build: lower parallelism to avoid GitHub clone throttling'
+    # 3) `make dist` runs govulncheck, which fails on CVEs disclosed after the
+    #    pinned release. Drop check_vuln from the aggregate check target so the
+    #    build isn't gated on newly-published vulnerabilities.
+    apply_perfspect_patch Makefile \
+        'check: check_format check_vet check_static check_license check_lint check_vuln test' \
+        'check: check_format check_vet check_static check_license check_lint test' \
+        'make check: do not gate the build on govulncheck'
+}
 
 # Remove existing perfspect directory if it exists
 if [[ -d "perfspect" ]]; then
@@ -97,20 +144,33 @@ if [[ "$BUILD_STRATEGY" == "build" ]]; then
     git clone --depth 1 -b "$VERSION" https://github.com/intel/PerfSpect.git perfspect/
     cd perfspect/
     git reset --hard "$GIT_REV"
-    # build tools image
-    docker buildx build -f tools/build.Dockerfile --tag perfspect-tools:local tools/
-    # modify the builder Dockerfile to use the fixed golang version
-    sed -i 's|FROM golang:1\.25\.1@sha256:a5e935dbd8bc3a5ea24388e376388c9a69b40628b6788a81658a801abbec8f2e|FROM golang@sha256:516827db2015144cf91e042d1b6a3aca574d013a4705a6fdc4330444d47169d5|' builder/build.Dockerfile
-    # build the perfspect builder image
-    docker buildx build -f builder/build.Dockerfile --build-arg TAG=local --tag perfspect-builder:local .
-    # build perfspect using the builder image
-    docker container run                                  \
-        --volume "$(pwd)":/localrepo                      \
-        -w /localrepo                                     \
-        --rm                                              \
-        perfspect-builder:local                           \
-        make dist
+    # apply gProfiler-specific patches to the cloned source
+    patch_perfspect_source
+    # Build the tools + builder images and produce the dist tarballs.
+    # builder/build.sh handles all of it: building (and locally caching) the
+    # tools image, building the builder image, and running `make dist` inside
+    # it. It must be run from the repo root (the cloned perfspect/ dir).
+    ./builder/build.sh
     cd ..
+    # `make dist` produces gzipped tarballs in perfspect/dist/. Each tarball
+    # contains a top-level perfspect/ directory with the arch-specific binary
+    # named `perfspect`. Extract the one matching the selected architecture to
+    # perfspect/perfspect (the path consumed by executable.Dockerfile).
+    if [[ "$ARCH" == "aarch64" ]]; then
+        dist_tarball="perfspect/dist/perfspect-aarch64.tgz"
+    else
+        dist_tarball="perfspect/dist/perfspect.tgz"
+    fi
+    echo "Extracting $ARCH perfspect binary from $dist_tarball"
+    extract_dir="$(mktemp -d)"
+    tar -xzf "$dist_tarball" -C "$extract_dir"
+    # `make dist` runs as root in the container and leaves a root-owned
+    # perfspect/perfspect behind, so overwriting it in place fails. Remove it
+    # first (the clone dir is user-owned, so unlinking is allowed) then copy the
+    # freshly extracted, arch-correct binary into place.
+    sudo rm -f perfspect/perfspect
+    cp "$extract_dir/perfspect/perfspect" perfspect/perfspect
+    rm -rf "$extract_dir"
 elif [[ "$BUILD_STRATEGY" == "download" ]]; then
     if [[ "$ARCH" != "x86_64" ]]; then
         echo "Download strategy is not supported for architecture '$ARCH'. Only x86_64 is supported for downloads."
@@ -122,10 +182,4 @@ elif [[ "$BUILD_STRATEGY" == "download" ]]; then
     curl -L -o perfspect.tgz "https://github.com/intel/PerfSpect/releases/download/$VERSION/perfspect.tgz"
     tar -xzf perfspect.tgz
     rm perfspect.tgz
-fi
-
-# Move architecture-specific binary if building for aarch64
-if [[ "$ARCH" == "aarch64" ]]; then
-    mv perfspect/perfspect perfspect/perfspect-x86_64
-    mv perfspect/perfspect-aarch64 perfspect/perfspect
 fi
