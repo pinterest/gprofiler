@@ -16,19 +16,40 @@
 #
 set -euo pipefail
 
-if [[ ("$#" -gt 0 && "$1" == "--fast") || ("$#" -gt 1 && "$2" == "--fast") ]]; then
-    with_staticx=false
-    shift
-else
-    with_staticx=true
-fi
+with_staticx=true
+with_proxy=""
+perfspect_binary=""
+extra_args=()
 
-if [[ ("$#" -gt 0 && "$1" == "--proxy") || ("$#" -gt 1 && "$2" == "--proxy") ]]; then
-    with_proxy="files.pythonhosted.org pypi.org"
-    shift
-else
-    with_proxy=""
-fi
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --fast)
+            with_staticx=false
+            shift
+            ;;
+        --proxy)
+            with_proxy="files.pythonhosted.org pypi.org"
+            shift
+            ;;
+        --perfspect)
+            if [[ $# -lt 2 ]]; then
+                echo "Error: --perfspect requires a path to the prebuilt PerfSpect binary" >&2
+                exit 1
+            fi
+            perfspect_binary="$2"
+            shift 2
+            ;;
+        --perfspect=*)
+            perfspect_binary="${1#*=}"
+            shift
+            ;;
+        *)
+            # forward any other args to docker buildx
+            extra_args+=("$1")
+            shift
+            ;;
+    esac
+done
 
 # rust:1.86.0-alpine3.21
 PYSPY_RUST_BUILDER_VERSION=@sha256:541a1720c1cedddae9e17b4214075bf57c20bc7b176b4bba6bce3437c44d51ef
@@ -59,8 +80,25 @@ GPROFILER_BUILDER=@sha256:be65f488b7764ad3638f236b7b515b3678369a5124c47b8d32916d
 # node-package-builder-glibc - centos/devtoolset-7-toolchain-centos7:latest
 NODE_PACKAGE_BUILDER_GLIBC=centos/devtoolset-7-toolchain-centos7@sha256:24d4c230cb1fe8e68cefe068458f52f69a1915dd6f6c3ad18aa37c2b8fa3e4e1
 
-# Build PerfSpect tools first
-"$(dirname "$0")/build_perfspect.sh" --strategy=build --arch=x86_64
+# PerfSpect is decoupled from the agent build: its per-architecture binary is
+# passed in via --perfspect. PerfSpect must be built on x86_64 (it cross-compiles
+# both architectures; see scripts/build_perfspect.sh), so CI builds it once on an
+# x86_64 worker and hands the artifact to each architecture's executable build.
+if [[ -n "$perfspect_binary" ]]; then
+    if [[ ! -f "$perfspect_binary" ]]; then
+        echo "Error: PerfSpect binary not found at '$perfspect_binary'" >&2
+        exit 1
+    fi
+    echo "Bundling PerfSpect binary from $perfspect_binary"
+    rm -rf perfspect 2>/dev/null || sudo rm -rf perfspect
+    mkdir -p perfspect
+    cp "$perfspect_binary" perfspect/perfspect
+    chmod +x perfspect/perfspect
+else
+    echo "Warning: no --perfspect <binary> provided; building without the PerfSpect resource."
+    # drop the PerfSpect COPY so the build does not fail on a missing resource
+    sed -i '\#COPY perfspect/perfspect gprofiler/resources/perfspect/perfspect#d' executable.Dockerfile
+fi
 
 mkdir -p build/x86_64
 docker buildx build -f executable.Dockerfile --output type=local,dest=build/x86_64/ \
@@ -79,4 +117,4 @@ docker buildx build -f executable.Dockerfile --output type=local,dest=build/x86_
     --build-arg NODE_PACKAGE_BUILDER_GLIBC=$NODE_PACKAGE_BUILDER_GLIBC \
     --build-arg STATICX=$with_staticx \
     --build-arg PROXY="$with_proxy" \
-    . "$@"
+    . "${extra_args[@]}"

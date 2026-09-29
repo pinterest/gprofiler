@@ -16,12 +16,35 @@
 #
 set -euo pipefail
 
-if [ "$#" -gt 0 ] && [ "$1" == "--fast" ]; then
-    with_staticx=false
-    shift
-else
-    with_staticx=true
-fi
+with_staticx=true
+perfspect_binary=""
+extra_args=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --fast)
+            with_staticx=false
+            shift
+            ;;
+        --perfspect)
+            if [[ $# -lt 2 ]]; then
+                echo "Error: --perfspect requires a path to the prebuilt PerfSpect binary" >&2
+                exit 1
+            fi
+            perfspect_binary="$2"
+            shift 2
+            ;;
+        --perfspect=*)
+            perfspect_binary="${1#*=}"
+            shift
+            ;;
+        *)
+            # forward any other args to docker buildx
+            extra_args+=("$1")
+            shift
+            ;;
+    esac
+done
 
 # ubuntu 20.04
 UBUNTU_VERSION=@sha256:82becede498899ec668628e7cb0ad87b6e1c371cb8a1e597d83a47fac21d6af3
@@ -42,8 +65,25 @@ DOTNET_BUILDER=@sha256:525ce79a6f545131df515ce34f7ee086eb18e4d707eff9676b2678f2f
 # Take image from build-prepare stage
 NODE_PACKAGE_BUILDER_GLIBC=build-prepare
 
-# Build PerfSpect tools first
-"$(dirname "$0")/build_perfspect.sh" --strategy=build --arch=aarch64
+# PerfSpect is decoupled from the agent build: its aarch64 binary is passed in
+# via --perfspect. PerfSpect must be built on x86_64 (it cross-compiles both
+# architectures; see scripts/build_perfspect.sh), so it cannot be built on this
+# aarch64 host. CI builds it on an x86_64 worker and hands the artifact here.
+if [[ -n "$perfspect_binary" ]]; then
+    if [[ ! -f "$perfspect_binary" ]]; then
+        echo "Error: PerfSpect binary not found at '$perfspect_binary'" >&2
+        exit 1
+    fi
+    echo "Bundling PerfSpect binary from $perfspect_binary"
+    rm -rf perfspect 2>/dev/null || sudo rm -rf perfspect
+    mkdir -p perfspect
+    cp "$perfspect_binary" perfspect/perfspect
+    chmod +x perfspect/perfspect
+else
+    echo "Warning: no --perfspect <binary> provided; building without the PerfSpect resource."
+    # drop the PerfSpect COPY so the build does not fail on a missing resource
+    sed -i '\#COPY perfspect/perfspect gprofiler/resources/perfspect/perfspect#d' executable.Dockerfile
+fi
 
 mkdir -p build/aarch64
 docker buildx build --platform=linux/arm64 \
@@ -61,4 +101,4 @@ docker buildx build --platform=linux/arm64 \
     --build-arg NODE_PACKAGE_BUILDER_MUSL=$ALPINE_VERSION \
     --build-arg NODE_PACKAGE_BUILDER_GLIBC=$NODE_PACKAGE_BUILDER_GLIBC \
     --build-arg STATICX=$with_staticx \
-    . -f executable.Dockerfile --output type=local,dest=build/aarch64/ "$@"
+    . -f executable.Dockerfile --output type=local,dest=build/aarch64/ "${extra_args[@]}"
