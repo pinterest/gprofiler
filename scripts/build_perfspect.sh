@@ -124,6 +124,9 @@ extract_perfspect_binary() {
     local extract_dir
     extract_dir="$(mktemp -d)"
     tar -xzf "$tarball" -C "$extract_dir"
+    # overwrite any existing binary of the same name (e.g. the perfspect-aarch64
+    # that `make` compiles at the clone root) instead of failing on it
+    rm -f "$dest"
     cp "$extract_dir/perfspect/perfspect" "$dest"
     chmod +x "$dest"
     rm -rf "$extract_dir"
@@ -146,13 +149,17 @@ if [[ "$BUILD_STRATEGY" == "build" ]]; then
     # it. It must be run from the repo root (the cloned perfspect/ dir).
     ./builder/build.sh
     cd ..
+    # builder/build.sh runs `make dist` inside a container as root with the
+    # clone bind-mounted, so every artifact it writes (perfspect/dist/, and the
+    # in-container-built perfspect and perfspect-aarch64 binaries at the clone
+    # root) ends up owned by root on the host. Reclaim ownership of the whole
+    # tree so we can manage the outputs (and overwrite any root-owned binaries)
+    # as the current user without permission errors.
+    sudo chown -R "$(id -u):$(id -g)" perfspect
     # `make dist` cross-compiles both architectures and produces one gzipped
     # tarball per arch in perfspect/dist/. Extract both binaries so callers can
     # pick the one they need (build_x86_64_executable.sh / build_aarch64_executable.sh
     # consume them via --perfspect <path>).
-    # `make dist` also runs as root in the container and leaves a root-owned
-    # perfspect/perfspect behind; drop it so it can't be mistaken for an output.
-    sudo rm -f perfspect/perfspect
     extract_perfspect_binary perfspect/dist/perfspect.tgz         perfspect/perfspect-x86_64
     extract_perfspect_binary perfspect/dist/perfspect-aarch64.tgz perfspect/perfspect-aarch64
     echo
