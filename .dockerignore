@@ -3,3 +3,8 @@
 **/*.pyc
 gprofiler/resources
 !gprofiler/resources/flamegraph/flamegraph_template.html
+# PerfSpect build tree: only the single staged resource binary
+# (perfspect/perfspect) is needed in the build context. Keep the large clone,
+# dist tarballs and the per-arch binaries produced by build_perfspect.sh out.
+perfspect/**
+!perfspect/perfspect

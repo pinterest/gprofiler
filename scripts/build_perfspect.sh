@@ -18,14 +18,12 @@ set -euo pipefail
 
 # Parse command line arguments for BUILD_STRATEGY
 BUILD_STRATEGY="build"  # Default value
-ARCH="x86_64"  # Default value
 
 show_usage() {
-    echo "Usage: $0 [--strategy=build|download] [--arch=x86_64|aarch64]"
-    echo "  --strategy=build    Clone and build PerfSpect tools (default)"
-    echo "  --strategy=download Download pre-built PerfSpect tools"
-    echo "  --arch=x86_64       Target architecture x86_64 (default)"
-    echo "  --arch=aarch64      Target architecture aarch64"
+    echo "Usage: $0 [--strategy=build|download]"
+    echo "  --strategy=build    Clone and build PerfSpect tools (default)."
+    echo "                      Cross-compiles and emits BOTH x86_64 and aarch64 binaries."
+    echo "  --strategy=download Download the pre-built PerfSpect release (x86_64 only)."
     exit 1
 }
 
@@ -51,26 +49,6 @@ while [[ $# -gt 0 ]]; do
             fi
             shift 2
             ;;
-        --arch=*)
-            ARCH="${1#*=}"
-            if [[ "$ARCH" != "x86_64" && "$ARCH" != "aarch64" ]]; then
-                echo "Error: Invalid architecture '$ARCH'. Must be 'x86_64' or 'aarch64'."
-                show_usage
-            fi
-            shift
-            ;;
-        --arch)
-            if [[ $# -lt 2 ]]; then
-                echo "Error: --arch requires a value"
-                show_usage
-            fi
-            ARCH="$2"
-            if [[ "$ARCH" != "x86_64" && "$ARCH" != "aarch64" ]]; then
-                echo "Error: Invalid architecture '$ARCH'. Must be 'x86_64' or 'aarch64'."
-                show_usage
-            fi
-            shift 2
-            ;;
         -h|--help)
             show_usage
             ;;
@@ -82,7 +60,6 @@ while [[ $# -gt 0 ]]; do
 done
 
 echo "Using BUILD_STRATEGY: $BUILD_STRATEGY"
-echo "Using ARCH: $ARCH"
 
 VERSION=v3.17.0
 GIT_REV="956744c9b41359f8211dd7442a11033515d9ab4b"
@@ -135,6 +112,23 @@ patch_perfspect_source() {
         'make check: do not gate the build on govulncheck'
 }
 
+# Extract the `perfspect` binary out of a dist tarball into a destination path.
+# Each tarball contains a top-level perfspect/ directory holding the binary.
+extract_perfspect_binary() {
+    local tarball="$1" dest="$2"
+    if [[ ! -f "$tarball" ]]; then
+        echo "Error: expected tarball not found: $tarball" >&2
+        exit 1
+    fi
+    echo "Extracting $(basename "$dest") from $tarball"
+    local extract_dir
+    extract_dir="$(mktemp -d)"
+    tar -xzf "$tarball" -C "$extract_dir"
+    cp "$extract_dir/perfspect/perfspect" "$dest"
+    chmod +x "$dest"
+    rm -rf "$extract_dir"
+}
+
 # Remove existing perfspect directory if it exists
 if [[ -d "perfspect" ]]; then
     sudo rm -rf perfspect/
@@ -152,34 +146,32 @@ if [[ "$BUILD_STRATEGY" == "build" ]]; then
     # it. It must be run from the repo root (the cloned perfspect/ dir).
     ./builder/build.sh
     cd ..
-    # `make dist` produces gzipped tarballs in perfspect/dist/. Each tarball
-    # contains a top-level perfspect/ directory with the arch-specific binary
-    # named `perfspect`. Extract the one matching the selected architecture to
-    # perfspect/perfspect (the path consumed by executable.Dockerfile).
-    if [[ "$ARCH" == "aarch64" ]]; then
-        dist_tarball="perfspect/dist/perfspect-aarch64.tgz"
-    else
-        dist_tarball="perfspect/dist/perfspect.tgz"
-    fi
-    echo "Extracting $ARCH perfspect binary from $dist_tarball"
-    extract_dir="$(mktemp -d)"
-    tar -xzf "$dist_tarball" -C "$extract_dir"
-    # `make dist` runs as root in the container and leaves a root-owned
-    # perfspect/perfspect behind, so overwriting it in place fails. Remove it
-    # first (the clone dir is user-owned, so unlinking is allowed) then copy the
-    # freshly extracted, arch-correct binary into place.
+    # `make dist` cross-compiles both architectures and produces one gzipped
+    # tarball per arch in perfspect/dist/. Extract both binaries so callers can
+    # pick the one they need (build_x86_64_executable.sh / build_aarch64_executable.sh
+    # consume them via --perfspect <path>).
+    # `make dist` also runs as root in the container and leaves a root-owned
+    # perfspect/perfspect behind; drop it so it can't be mistaken for an output.
     sudo rm -f perfspect/perfspect
-    cp "$extract_dir/perfspect/perfspect" perfspect/perfspect
-    rm -rf "$extract_dir"
+    extract_perfspect_binary perfspect/dist/perfspect.tgz         perfspect/perfspect-x86_64
+    extract_perfspect_binary perfspect/dist/perfspect-aarch64.tgz perfspect/perfspect-aarch64
+    echo
+    echo "PerfSpect binaries ready:"
+    echo "  x86_64 : $(pwd)/perfspect/perfspect-x86_64"
+    echo "  aarch64: $(pwd)/perfspect/perfspect-aarch64"
+    echo
+    echo "Pass one to an executable build, e.g.:"
+    echo "  scripts/build_x86_64_executable.sh  --perfspect perfspect/perfspect-x86_64"
+    echo "  scripts/build_aarch64_executable.sh --perfspect perfspect/perfspect-aarch64"
 elif [[ "$BUILD_STRATEGY" == "download" ]]; then
-    if [[ "$ARCH" != "x86_64" ]]; then
-        echo "Download strategy is not supported for architecture '$ARCH'. Only x86_64 is supported for downloads."
-        echo "Removing perfspect binary from gprofiler resources to avoid accidental usage."
-        sed -i '/COPY perfspect\/perfspect gprofiler\/resources\/perfspect\/perfspect/d' executable.Dockerfile
-        exit 0
-    fi
-
+    # Intel only publishes an x86_64 release tarball; there is no aarch64
+    # download, so this path yields the x86_64 binary only.
+    mkdir -p perfspect
     curl -L -o perfspect.tgz "https://github.com/intel/PerfSpect/releases/download/$VERSION/perfspect.tgz"
-    tar -xzf perfspect.tgz
-    rm perfspect.tgz
+    extract_perfspect_binary perfspect.tgz perfspect/perfspect-x86_64
+    rm -f perfspect.tgz
+    echo
+    echo "PerfSpect binary ready:"
+    echo "  x86_64 : $(pwd)/perfspect/perfspect-x86_64"
+    echo "  aarch64: not available via --strategy=download (use --strategy=build)"
 fi

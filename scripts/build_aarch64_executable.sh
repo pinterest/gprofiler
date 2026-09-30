@@ -69,20 +69,37 @@ NODE_PACKAGE_BUILDER_GLIBC=build-prepare
 # via --perfspect. PerfSpect must be built on x86_64 (it cross-compiles both
 # architectures; see scripts/build_perfspect.sh), so it cannot be built on this
 # aarch64 host. CI builds it on an x86_64 worker and hands the artifact here.
+# We never mutate the tracked executable.Dockerfile; the effective Dockerfile is
+# recomputed per run so behavior does not depend on prior runs or on whether the
+# perfspect/ subfolder already exists.
+build_dockerfile="executable.Dockerfile"
+
 if [[ -n "$perfspect_binary" ]]; then
     if [[ ! -f "$perfspect_binary" ]]; then
         echo "Error: PerfSpect binary not found at '$perfspect_binary'" >&2
         exit 1
     fi
     echo "Bundling PerfSpect binary from $perfspect_binary"
-    rm -rf perfspect 2>/dev/null || sudo rm -rf perfspect
+    # Stage only the single resource file at perfspect/perfspect (the path the
+    # Dockerfile COPYs). We intentionally do NOT wipe perfspect/, so a PerfSpect
+    # build tree or the per-arch binaries produced by build_perfspect.sh in the
+    # same directory are preserved. .dockerignore keeps everything under
+    # perfspect/ except perfspect/perfspect out of the build context.
     mkdir -p perfspect
-    cp "$perfspect_binary" perfspect/perfspect
+    if [[ "$(readlink -f "$perfspect_binary")" != "$(readlink -f perfspect/perfspect 2>/dev/null || true)" ]]; then
+        # a stale perfspect/perfspect may be root-owned (left by make dist)
+        rm -f perfspect/perfspect 2>/dev/null || sudo rm -f perfspect/perfspect
+        cp "$perfspect_binary" perfspect/perfspect
+    fi
     chmod +x perfspect/perfspect
 else
     echo "Warning: no --perfspect <binary> provided; building without the PerfSpect resource."
-    # drop the PerfSpect COPY so the build does not fail on a missing resource
-    sed -i '\#COPY perfspect/perfspect gprofiler/resources/perfspect/perfspect#d' executable.Dockerfile
+    # Build from a throwaway Dockerfile with the PerfSpect COPY stripped, so the
+    # tracked executable.Dockerfile is left untouched and the build does not
+    # require the perfspect/ subfolder to exist.
+    build_dockerfile="$(mktemp)"
+    trap 'rm -f "$build_dockerfile"' EXIT
+    sed '\#COPY perfspect/perfspect gprofiler/resources/perfspect/perfspect#d' executable.Dockerfile > "$build_dockerfile"
 fi
 
 mkdir -p build/aarch64
@@ -101,4 +118,4 @@ docker buildx build --platform=linux/arm64 \
     --build-arg NODE_PACKAGE_BUILDER_MUSL=$ALPINE_VERSION \
     --build-arg NODE_PACKAGE_BUILDER_GLIBC=$NODE_PACKAGE_BUILDER_GLIBC \
     --build-arg STATICX=$with_staticx \
-    . -f executable.Dockerfile --output type=local,dest=build/aarch64/ "${extra_args[@]}"
+    . -f "$build_dockerfile" --output type=local,dest=build/aarch64/ "${extra_args[@]}"
