@@ -149,3 +149,6 @@ gprofiler/resources/*
 # IDEs
 .idea
 .vscode
+
+# PerfSpect build clone (created by scripts/build_perfspect.sh)
+/perfspect/
