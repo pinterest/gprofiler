@@ -16,12 +16,35 @@
 #
 set -euo pipefail
 
-if [ "$#" -gt 0 ] && [ "$1" == "--fast" ]; then
-    with_staticx=false
-    shift
-else
-    with_staticx=true
-fi
+with_staticx=true
+perfspect_binary=""
+extra_args=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --fast)
+            with_staticx=false
+            shift
+            ;;
+        --perfspect)
+            if [[ $# -lt 2 ]]; then
+                echo "Error: --perfspect requires a path to the prebuilt PerfSpect binary" >&2
+                exit 1
+            fi
+            perfspect_binary="$2"
+            shift 2
+            ;;
+        --perfspect=*)
+            perfspect_binary="${1#*=}"
+            shift
+            ;;
+        *)
+            # forward any other args to docker buildx
+            extra_args+=("$1")
+            shift
+            ;;
+    esac
+done
 
 # ubuntu 20.04
 UBUNTU_VERSION=@sha256:82becede498899ec668628e7cb0ad87b6e1c371cb8a1e597d83a47fac21d6af3
@@ -42,8 +65,42 @@ DOTNET_BUILDER=@sha256:525ce79a6f545131df515ce34f7ee086eb18e4d707eff9676b2678f2f
 # Take image from build-prepare stage
 NODE_PACKAGE_BUILDER_GLIBC=build-prepare
 
-# Build PerfSpect tools first
-"$(dirname "$0")/build_perfspect.sh" --strategy=download --arch=aarch64
+# PerfSpect is decoupled from the agent build: its aarch64 binary is passed in
+# via --perfspect. PerfSpect must be built on x86_64 (it cross-compiles both
+# architectures; see scripts/build_perfspect.sh), so it cannot be built on this
+# aarch64 host. CI builds it on an x86_64 worker and hands the artifact here.
+# We never mutate the tracked executable.Dockerfile; the effective Dockerfile is
+# recomputed per run so behavior does not depend on prior runs or on whether the
+# perfspect/ subfolder already exists.
+build_dockerfile="executable.Dockerfile"
+
+if [[ -n "$perfspect_binary" ]]; then
+    if [[ ! -f "$perfspect_binary" ]]; then
+        echo "Error: PerfSpect binary not found at '$perfspect_binary'" >&2
+        exit 1
+    fi
+    echo "Bundling PerfSpect binary from $perfspect_binary"
+    # Stage only the single resource file at perfspect/perfspect (the path the
+    # Dockerfile COPYs). We intentionally do NOT wipe perfspect/, so a PerfSpect
+    # build tree or the per-arch binaries produced by build_perfspect.sh in the
+    # same directory are preserved. .dockerignore keeps everything under
+    # perfspect/ except perfspect/perfspect out of the build context.
+    mkdir -p perfspect
+    if [[ "$(readlink -f "$perfspect_binary")" != "$(readlink -f perfspect/perfspect 2>/dev/null || true)" ]]; then
+        # a stale perfspect/perfspect may be root-owned (left by make dist)
+        rm -f perfspect/perfspect 2>/dev/null || sudo rm -f perfspect/perfspect
+        cp "$perfspect_binary" perfspect/perfspect
+    fi
+    chmod +x perfspect/perfspect
+else
+    echo "Warning: no --perfspect <binary> provided; building without the PerfSpect resource."
+    # Build from a throwaway Dockerfile with the PerfSpect COPY stripped, so the
+    # tracked executable.Dockerfile is left untouched and the build does not
+    # require the perfspect/ subfolder to exist.
+    build_dockerfile="$(mktemp)"
+    trap 'rm -f "$build_dockerfile"' EXIT
+    sed '\#COPY perfspect/perfspect gprofiler/resources/perfspect/perfspect#d' executable.Dockerfile > "$build_dockerfile"
+fi
 
 mkdir -p build/aarch64
 docker buildx build --platform=linux/arm64 \
@@ -61,4 +118,4 @@ docker buildx build --platform=linux/arm64 \
     --build-arg NODE_PACKAGE_BUILDER_MUSL=$ALPINE_VERSION \
     --build-arg NODE_PACKAGE_BUILDER_GLIBC=$NODE_PACKAGE_BUILDER_GLIBC \
     --build-arg STATICX=$with_staticx \
-    . -f executable.Dockerfile --output type=local,dest=build/aarch64/ "$@"
+    . -f "$build_dockerfile" --output type=local,dest=build/aarch64/ "${extra_args[@]}"
