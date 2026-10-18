@@ -298,3 +298,33 @@ class ProfilerAPIClient(BaseAPIClient):
             api_version="v2" if profile_api_version is None else profile_api_version,
             params={"version": __version__},
         )
+
+    def submit_nsys_rep(self, start_time: datetime.datetime, rep_path: str) -> Dict:
+        """Upload a raw .nsys-rep capture as an octet-stream body.
+
+        Bypasses the JSON+gzip encoding of _request_url: reps are binary and
+        already compressed, so they are streamed from disk as-is. start_time
+        must match the profile's start_time so the server can pair the rep
+        with its adhoc flamegraph entry (keyed by start_time + hostname).
+        """
+        url = "{}/nsys_rep".format(self.get_base_url("v2"))
+        params = self._get_query_params() + [
+            ("version", __version__),
+            ("start_time", get_iso8601_format_time(start_time)),
+        ]
+        with open(rep_path, "rb") as rep_file:
+            resp = self._session.post(
+                url,
+                data=rep_file,
+                headers={"Content-Type": "application/octet-stream"},
+                params=params,
+                timeout=max(self._upload_timeout, 600),
+            )
+        if 400 <= resp.status_code < 500:
+            try:
+                response_data = resp.json()
+                raise APIError(response_data.get("message", "(no message in response)"), response_data)
+            except ValueError:
+                raise APIError(resp.text)
+        resp.raise_for_status()
+        return cast(dict, resp.json())
