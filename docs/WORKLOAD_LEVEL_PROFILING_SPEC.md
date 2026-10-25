@@ -10,6 +10,12 @@ The key idea is that the agent keeps host-command execution semantics, but
 publishes richer workload inventory through heartbeat metadata so the backend can
 resolve workload selections into concrete host and process targets.
 
+For the plain-language story of why sending the full inventory on every beat did
+not scale, and how change-detected inventory (`inventory_digest` /
+`need_inventory`) fixes it, read
+[`WORKLOAD_LEVEL_PROFILING_AT_SCALE.md`](WORKLOAD_LEVEL_PROFILING_AT_SCALE.md)
+first. This spec is the contract; that document is the map.
+
 ## Scope
 
 This spec covers:
@@ -339,12 +345,11 @@ Future workload-related changes in this repo should follow this sequence:
 
 Potential follow-ups that should begin as spec changes:
 
-- **Change-detected inventory.** Send an inventory hash on every beat and the
-  full `containers[]` only when the backend reports a mismatch. Because the
-  inventory is unchanged on the overwhelming majority of beats, this removes
-  most of the payload and most of the backend diffing work, at the cost of
-  making the agent aware of backend state. This is the highest-leverage
-  remaining change to the ingest path.
+- **Change-detected inventory** — implemented in
+  [#87](https://github.com/pinterest/gprofiler/pull/87): the agent sends
+  `inventory_digest` on every beat and the full `containers[]` only when the
+  digest changed or the backend replies `need_inventory: true`. See
+  [`WORKLOAD_LEVEL_PROFILING_AT_SCALE.md`](WORKLOAD_LEVEL_PROFILING_AT_SCALE.md).
 - **Decoupled inventory cadence.** The 30s beat exists for command latency;
   inventory freshness does not need the same cadence. Reporting inventory every
   N beats would cut ingest volume proportionally with a much smaller change.
