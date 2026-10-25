@@ -26,6 +26,7 @@ import requests
 from gprofiler.dynamic_profiling_management.ad_hoc import AdhocProfilerSlot
 from gprofiler.dynamic_profiling_management.command_control import CommandManager, ProfilingCommand
 from gprofiler.dynamic_profiling_management.continuous import ContinuousProfilerSlot
+from gprofiler.metadata.heartbeat_inventory import inventory_digest
 from gprofiler.metadata.heartbeat_metadata import HeartbeatMetadataCollector
 from gprofiler.metadata.system_metadata import get_hostname
 from gprofiler.metrics_publisher import RESPONSE_TYPE_FAILURE, RESPONSE_TYPE_SUCCESS, MetricsPublisher
@@ -71,6 +72,11 @@ class HeartbeatClient:
         self.received_command_ids: set = set()
         self.executed_command_ids: set = set()
         self.max_command_history = 1000
+        # Digest of the inventory the server has confirmed it holds for this host
+        # (``need_inventory: false``). While our current digest equals it, heartbeats carry
+        # only the digest; anything else (never confirmed, server asked again, request
+        # failed, older server that does not answer) sends the full inventory.
+        self._acknowledged_inventory_digest: Optional[str] = None
         self._refresh_thread: Optional[threading.Thread] = None
         self._refresh_stop_event = threading.Event()
 
@@ -157,22 +163,44 @@ class HeartbeatClient:
 
     # --- Heartbeat & command lifecycle ---
 
+    def build_heartbeat_payload(self, inventory_metadata: Dict[str, Any], perf_supported_events: Any) -> Dict[str, Any]:
+        """Assemble one heartbeat. The inventory (``containers``) is included only when its
+        digest differs from the one the server last confirmed; the digest itself always is."""
+        metadata = dict(inventory_metadata)
+        containers = metadata.pop("containers", None)
+        digest = inventory_digest(containers)
+        heartbeat_data = {
+            "ip_address": self.ip_address,
+            "hostname": self.hostname,
+            "service_name": self.service_name,
+            "last_command_id": self.last_command_id,
+            "status": "active",
+            "timestamp": datetime.datetime.now().isoformat(),
+            "received_command_ids": list(self.received_command_ids),
+            "executed_command_ids": list(self.executed_command_ids),
+            "perf_supported_events": perf_supported_events,
+            "inventory_digest": digest,
+            **metadata,
+        }
+        if containers is not None and digest != self._acknowledged_inventory_digest:
+            heartbeat_data["containers"] = containers
+        return heartbeat_data
+
+    def note_heartbeat_response(self, heartbeat_data: Dict[str, Any], result: Optional[Dict[str, Any]]) -> None:
+        """Update what the server is known to hold. Only an explicit ``need_inventory: false``
+        lets us stop sending the inventory; a missing field (older server), ``true``, or a
+        failed request all mean "send the full inventory next time"."""
+        if result is not None and result.get("need_inventory") is False:
+            self._acknowledged_inventory_digest = heartbeat_data.get("inventory_digest")
+        else:
+            self._acknowledged_inventory_digest = None
+
     def send_heartbeat(self) -> Optional[Dict[str, Any]]:
+        heartbeat_data: Dict[str, Any] = {}
         try:
             perf_supported_events = self.pmu_manager.get_supported_events()
             inventory_metadata = self.heartbeat_metadata_collector.collect()
-            heartbeat_data = {
-                "ip_address": self.ip_address,
-                "hostname": self.hostname,
-                "service_name": self.service_name,
-                "last_command_id": self.last_command_id,
-                "status": "active",
-                "timestamp": datetime.datetime.now().isoformat(),
-                "received_command_ids": list(self.received_command_ids),
-                "executed_command_ids": list(self.executed_command_ids),
-                "perf_supported_events": perf_supported_events,
-                **inventory_metadata,
-            }
+            heartbeat_data = self.build_heartbeat_payload(inventory_metadata, perf_supported_events)
             url = f"{self.api_server}/api/metrics/heartbeat"
             response = self.session.post(url, json=heartbeat_data, timeout=30)
 
@@ -181,6 +209,7 @@ class HeartbeatClient:
                     response_type=RESPONSE_TYPE_SUCCESS, method_name="send_heartbeat"
                 )
                 result = response.json()
+                self.note_heartbeat_response(heartbeat_data, result)
                 if result.get("success") and result.get("profiling_command"):
                     logger.info(f"Received profiling command from server: {result.get('command_id')}")
                     return result
@@ -188,6 +217,7 @@ class HeartbeatClient:
                 return None
             else:
                 logger.warning(f"Heartbeat failed with status {response.status_code}: {response.text}")
+                self.note_heartbeat_response(heartbeat_data, None)
                 MetricsPublisher.get_instance().send_sli_metric(
                     response_type=RESPONSE_TYPE_FAILURE,
                     method_name="send_heartbeat",
@@ -196,6 +226,7 @@ class HeartbeatClient:
                 return None
         except Exception as e:
             logger.error(f"Failed to send heartbeat: {e}")
+            self.note_heartbeat_response(heartbeat_data, None)
             MetricsPublisher.get_instance().send_sli_metric(
                 response_type=RESPONSE_TYPE_FAILURE,
                 method_name="send_heartbeat",
