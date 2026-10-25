@@ -162,6 +162,9 @@ Handles HTTP/TLS communication with the backend:
 - **Certificate refresh**: Background thread for periodic TLS session refresh.
 - **Idempotency**: Tracks `received_command_ids` and `executed_command_ids` with configurable history limit.
 - **PMU events**: Reports supported hardware performance events via `get_pmu_manager()`.
+- **Change-detected inventory**: Sends `inventory_digest` on every beat and the full
+  `containers` list only when it changed or the server replies `need_inventory: true`.
+  See [`WORKLOAD_LEVEL_PROFILING_AT_SCALE.md`](WORKLOAD_LEVEL_PROFILING_AT_SCALE.md).
 
 ---
 
