@@ -48,6 +48,17 @@ DEFAULT_WORKLOAD_KIND_LABELS: Tuple[str, ...] = ()
 # Sentinel label values that carry no real workload name.
 _PLACEHOLDER_LABEL_VALUES = frozenset({"unknown", "none", ""})
 
+# Processes younger than this (seconds) are left out of the inventory; 0 disables the
+# filter. A process that has not yet lived through one heartbeat interval is, far more
+# often than not, a short-lived helper: a cron tick, the ``sleep`` of a shell loop, a
+# health probe, a sidecar's fork. Nothing can profile it (it is gone before a command
+# arrives), but every one of them carries a fresh pid on every beat, so reporting them
+# changes the host's inventory digest on every heartbeat and makes the server rewrite
+# inventory rows for a host whose workloads did not change at all (measured on a
+# development fleet: about half of all beats differed, almost entirely from such pids).
+# The cost of the filter is that a new long-lived process appears one beat late.
+DEFAULT_MIN_PROCESS_AGE_SECONDS = 30
+
 # Kubernetes derives generated pod-name suffixes (the ReplicaSet
 # pod-template-hash and the trailing random token) from a vowel-free "safe"
 # alphabet to avoid forming words. Matching that exact alphabet keeps us from
@@ -137,8 +148,10 @@ class HeartbeatMetadataCollector:
         refresh_interval_seconds: int = 30,
         workload_name_labels: Optional[Sequence[str]] = None,
         workload_kind_labels: Optional[Sequence[str]] = None,
+        min_process_age_seconds: float = DEFAULT_MIN_PROCESS_AGE_SECONDS,
     ) -> None:
         self._refresh_interval_seconds = refresh_interval_seconds
+        self._min_process_age_seconds = max(0.0, float(min_process_age_seconds))
         # Configured (e.g. vendor-specific) label keys are probed before the built-in
         # defaults, so a deployment can override without losing standard k8s coverage.
         self._workload_name_labels: Tuple[str, ...] = tuple(workload_name_labels or ()) + DEFAULT_WORKLOAD_NAME_LABELS
@@ -184,7 +197,16 @@ class HeartbeatMetadataCollector:
             return []
 
         processes_by_container: Dict[str, List[Dict[str, Any]]] = {}
-        for process in process_iter(["pid", "name"]):
+        # Skip processes younger than the threshold before the (comparatively costly) cgroup
+        # lookup; see DEFAULT_MIN_PROCESS_AGE_SECONDS. A process whose start time cannot be
+        # read is kept -- the filter only ever removes what it can prove is young.
+        min_age = self._min_process_age_seconds
+        youngest_allowed_start = time.time() - min_age if min_age > 0 else None
+        for process in process_iter(["pid", "name", "create_time"]):
+            if youngest_allowed_start is not None:
+                started_at = process.info.get("create_time")
+                if started_at is not None and started_at > youngest_allowed_start:
+                    continue
             try:
                 container_id = get_process_container_id(Process(process.pid))
             except NoSuchProcess:

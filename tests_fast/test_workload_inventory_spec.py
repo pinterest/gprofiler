@@ -24,6 +24,8 @@ Covers WORKLOAD_LEVEL_PROFILING_SPEC.md (gProfiler side):
 * AT-A3 — discovery failure is non-fatal (logged, empty containers)
 * AT-A4 — best-effort workload-name inference (labels > pod-name normalization)
 * AT-A5 — agent-pod env fallback (POD_NAMESPACE / POD_NAME)
+* AT-A6 — short-lived processes are not inventory (a helper that respawns between
+  beats must not change the host's inventory digest)
 
 ``gprofiler.metadata.heartbeat_metadata`` normally imports the full
 ``granulate_utils`` container stack (grpc/docker) plus glogger. Those are agent
@@ -263,6 +265,7 @@ def collector():
     inst._containers_client = None
     inst._workload_name_labels = hb.DEFAULT_WORKLOAD_NAME_LABELS
     inst._workload_kind_labels = hb.DEFAULT_WORKLOAD_KIND_LABELS
+    inst._min_process_age_seconds = float(hb.DEFAULT_MIN_PROCESS_AGE_SECONDS)
     return inst
 
 
@@ -276,9 +279,11 @@ class _FakeContainer:
 
 
 class _FakeProc:
-    def __init__(self, pid, name):
+    # create_time=None mimics a process whose start time could not be read; an explicit
+    # value is an epoch timestamp like psutil's. Default: started long ago (never filtered).
+    def __init__(self, pid, name, create_time=0.0):
         self.pid = pid
-        self.info = {"pid": pid, "name": name}
+        self.info = {"pid": pid, "name": name, "create_time": create_time}
 
 
 class TestNoRuntimeSpec:
@@ -406,3 +411,110 @@ class TestInventoryAttachedSpec:
         assert entry["workload_kind"] == "container"
         assert entry["namespace"] is None
         assert entry["processes"] == []
+
+
+# ---------------------------------------------------------------------------
+# AT-A6 — short-lived processes are not inventory
+# ---------------------------------------------------------------------------
+
+
+def _one_container_client(container_id="c1"):
+    container = _FakeContainer(
+        id=container_id,
+        name="worker",
+        runtime="containerd",
+        labels={"io.kubernetes.pod.namespace": "jobs", "io.kubernetes.pod.name": "worker-0"},
+    )
+
+    class _Client:
+        def list_containers(self):
+            return [container]
+
+    return _Client()
+
+
+class TestShortLivedProcessesSpec:
+    @pytest.fixture(autouse=True)
+    def _all_processes_in_c1(self, monkeypatch):
+        monkeypatch.setattr(hb, "Process", lambda pid: pid, raising=True)
+        monkeypatch.setattr(hb, "get_process_container_id", lambda proc: "c1", raising=True)
+        monkeypatch.setattr(hb.time, "time", lambda: 1_000_000.0)
+
+    def test_processes_younger_than_the_threshold_are_left_out(self, collector, monkeypatch):
+        collector._containers_client = _one_container_client()
+        collector._min_process_age_seconds = 30.0
+        monkeypatch.setattr(
+            hb,
+            "process_iter",
+            lambda fields: [
+                _FakeProc(100, "java", create_time=1_000_000.0 - 3600),  # an hour old: kept
+                _FakeProc(101, "sleep", create_time=1_000_000.0 - 5),  # 5 s old: a helper, dropped
+                _FakeProc(102, "python3", create_time=1_000_000.0 - 30),  # exactly the threshold: kept
+                _FakeProc(103, "nginx", create_time=None),  # unknown start time: kept
+            ],
+        )
+        pids = [p["pid"] for p in collector._collect_containers()[0]["processes"]]
+        assert pids == [100, 102, 103]
+
+    def test_zero_threshold_reports_every_process(self, collector, monkeypatch):
+        collector._containers_client = _one_container_client()
+        collector._min_process_age_seconds = 0.0
+        monkeypatch.setattr(
+            hb, "process_iter", lambda fields: [_FakeProc(100, "java"), _FakeProc(101, "sleep", 1_000_000.0 - 1)]
+        )
+        pids = [p["pid"] for p in collector._collect_containers()[0]["processes"]]
+        assert pids == [100, 101]
+
+    def test_create_time_is_requested_from_psutil(self, collector, monkeypatch):
+        # The filter reads process.info["create_time"]; make sure process_iter is asked for it
+        # (psutil only fills the attrs it is given).
+        collector._containers_client = _one_container_client()
+        seen = {}
+
+        def _iter(fields):
+            seen["fields"] = list(fields)
+            return []
+
+        monkeypatch.setattr(hb, "process_iter", _iter)
+        collector._collect_containers()
+        assert "create_time" in seen["fields"] and "pid" in seen["fields"] and "name" in seen["fields"]
+
+    def test_respawning_helper_does_not_change_the_inventory_digest(self, collector, monkeypatch):
+        # AT-A6, the property the server-side change detection relies on: the same workload
+        # (one long-lived java) with a different short-lived helper pid on each beat must
+        # hash to the same digest, otherwise every beat is a "changed" inventory.
+        pytest.importorskip("gprofiler.metadata.heartbeat_inventory")
+        from gprofiler.metadata.heartbeat_inventory import inventory_digest
+
+        collector._containers_client = _one_container_client()
+        collector._min_process_age_seconds = 30.0
+        digests = []
+        for beat, helper_pid in enumerate((4001, 4098, 4177)):
+            now = 1_000_000.0 + 30 * beat
+            monkeypatch.setattr(hb.time, "time", lambda now=now: now)
+            monkeypatch.setattr(
+                hb,
+                "process_iter",
+                lambda fields, now=now, helper_pid=helper_pid: [
+                    _FakeProc(100, "java", create_time=now - 86400),
+                    _FakeProc(helper_pid, "sleep", create_time=now - 2),
+                ],
+            )
+            digests.append(inventory_digest(collector._collect_containers()))
+        assert len(set(digests)) == 1
+
+        # and the same beats with the filter off do differ -- that is exactly the churn
+        collector._min_process_age_seconds = 0.0
+        unfiltered = []
+        for beat, helper_pid in enumerate((4001, 4098, 4177)):
+            now = 1_000_000.0 + 30 * beat
+            monkeypatch.setattr(
+                hb,
+                "process_iter",
+                lambda fields, now=now, helper_pid=helper_pid: [
+                    _FakeProc(100, "java", create_time=now - 86400),
+                    _FakeProc(helper_pid, "sleep", create_time=now - 2),
+                ],
+            )
+            unfiltered.append(inventory_digest(collector._collect_containers()))
+        assert len(set(unfiltered)) == 3
