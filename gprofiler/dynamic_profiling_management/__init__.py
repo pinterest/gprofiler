@@ -3,7 +3,7 @@ import logging
 import os
 import threading
 from pathlib import Path
-from typing import Dict, Any, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import bitmath
 import configargparse
@@ -108,17 +108,19 @@ def create_profiler_args(
 
     # NVIDIA nsys GPU capture (host-detect; not bundled — see docs/NSYS_GPU_PROFILING.md)
     if combined_config.get("enable_nsys", False):
-        from gprofiler.nsys_profiler import find_nsys
+        from gprofiler.profilers.nsys import find_nsys
 
         new_args.enable_nsys = True
         nsys_path = combined_config.get("nsys_path") or None
         found = find_nsys(nsys_path)
         if found is not None:
             new_args.nsys_path = str(found)
-            new_args.nsys_workload = combined_config.get("nsys_workload")
-            new_args.nsys_timeline = bool(combined_config.get("nsys_timeline", False))
-            new_args.nsys_timeline_stacks = bool(combined_config.get("nsys_timeline_stacks", False))
-            new_args.nsys_upload_rep = bool(combined_config.get("nsys_upload_rep", False))
+            new_args.nsys_workload = combined_config.get("nsys_workload") or getattr(base_args, "nsys_workload", None)
+            new_args.nsys_timeline = bool(combined_config.get("nsys_timeline", base_args.nsys_timeline))
+            new_args.nsys_timeline_stacks = bool(
+                combined_config.get("nsys_timeline_stacks", base_args.nsys_timeline_stacks)
+            )
+            new_args.nsys_upload_rep = bool(combined_config.get("nsys_upload_rep", base_args.nsys_upload_rep))
             logger.info(f"enable_nsys: using nsys at {found}")
         else:
             logger.error(
@@ -133,19 +135,6 @@ def create_profiler_args(
     profiler_configs = combined_config.get("profiler_configs", {})
     if profiler_configs:
         _apply_profiler_configs(new_args, profiler_configs)
-
-    # Tag after profiler_configs so Adhoc UI can show a GPU/nsys chip without
-    # being overwritten by perf event defaults.
-    if getattr(new_args, "enable_nsys", False):
-        existing = getattr(new_args, "perf_events", None) or "cycles"
-        events = [e.strip() for e in str(existing).split(",") if e.strip()]
-        if "nsys-cuda" not in events:
-            events.append("nsys-cuda")
-        if getattr(new_args, "nsys_timeline", False) and "nsys-timeline" not in events:
-            events.append("nsys-timeline")
-        if getattr(new_args, "nsys_timeline_stacks", False) and "nsys-stacks" not in events:
-            events.append("nsys-stacks")
-        new_args.perf_events = ",".join(events)
 
     return new_args
 
