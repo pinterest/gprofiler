@@ -59,6 +59,7 @@ from gprofiler.gprofiler_types import (
     UserArgs,
     comma_separated_list,
     integers_list,
+    nonnegative_integer,
     positive_integer,
 )
 from gprofiler.hw_metrics import HWMetricsMonitor, HWMetricsMonitorBase, NoopHWMetricsMonitor
@@ -1273,6 +1274,17 @@ def parse_cmd_args() -> configargparse.Namespace:
         " e.g. 'mycompany.com/workload-kind'.",
     )
 
+    parser.add_argument(
+        "--heartbeat-min-process-age",
+        type=nonnegative_integer,
+        dest="heartbeat_min_process_age",
+        default=30,
+        help="Leave processes younger than this many seconds out of the heartbeat workload inventory."
+        " Short-lived helpers (cron ticks, shell-loop sleeps, probes) get a new pid on every beat, so"
+        " reporting them changes the inventory on every heartbeat for no profiling benefit; new"
+        " long-lived processes appear one beat late instead. 0 reports every process (default: %(default)s)",
+    )
+
     if is_linux() and not is_aarch64():
         hw_metrics_options = parser.add_argument_group("hardware metrics")
         hw_metrics_options.add_argument(
@@ -1690,6 +1702,7 @@ def main() -> None:
                 tls_cert_refresh_interval=args.tls_cert_refresh_interval,
                 workload_name_labels=args.heartbeat_workload_name_labels,
                 workload_kind_labels=args.heartbeat_workload_kind_labels,
+                min_process_age_seconds=args.heartbeat_min_process_age,
             )
 
             # Create dynamic profiler manager

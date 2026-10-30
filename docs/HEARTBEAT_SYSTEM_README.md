@@ -431,6 +431,9 @@ curl -X POST http://localhost:8000/api/metrics/profile_request \
 ```
 --enable-heartbeat-server         Enable heartbeat communication
 --heartbeat-interval SECONDS      Heartbeat frequency (default: 30)
+--heartbeat-min-process-age SECONDS
+                                  Leave processes younger than this out of the workload
+                                  inventory; 0 reports all (default: 30, see below)
 --api-server URL                  Backend server URL
 --upload-results, -u              Upload results to backend
 --token TOKEN                     Authentication token
