@@ -14,12 +14,12 @@
 # limitations under the License.
 #
 
-import os
 import logging
-from pathlib import Path
-from typing import List, Optional, Tuple, Dict
+import os
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 

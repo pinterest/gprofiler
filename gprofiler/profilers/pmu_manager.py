@@ -33,10 +33,7 @@ import logging
 import threading
 from typing import List, Optional
 
-from gprofiler.profilers.perf_events import (
-    detect_supported_pmu_events,
-    DEFAULT_PMU_EVENT,
-)
+from gprofiler.profilers.perf_events import DEFAULT_PMU_EVENT, detect_supported_pmu_events
 from gprofiler.utils import resource_path
 
 logger = logging.getLogger(__name__)

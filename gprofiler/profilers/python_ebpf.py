@@ -116,9 +116,10 @@ class PythonEbpfProfiler(ProfilerBase):
         This ensures consistent counting between PyPerf skip logic and py-spy process selection.
         """
         try:
-            from gprofiler.utils import pgrep_maps, pgrep_exe
             from granulate_utils.python import DETECTED_PYTHON_PROCESSES_REGEX
+
             from gprofiler.platform import is_windows
+            from gprofiler.utils import pgrep_exe, pgrep_maps
             
             if is_windows():
                 # Windows: Use executable name matching

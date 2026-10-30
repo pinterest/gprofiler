@@ -27,7 +27,7 @@ from gprofiler.exceptions import CalledProcessError, PerfNoSupportedEvent
 from gprofiler.gprofiler_types import ProcessToStackSampleCounters
 from gprofiler.log import get_logger_adapter
 from gprofiler.utils import run_process
-from gprofiler.utils.perf_process import PerfProcess, perf_path, _is_pid_related_error
+from gprofiler.utils.perf_process import PerfProcess, _is_pid_related_error, perf_path
 
 logger = get_logger_adapter(__name__)
 

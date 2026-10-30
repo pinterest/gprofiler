@@ -23,7 +23,7 @@ from typing import Any, Dict, List
 
 from granulate_utils.linux.elf import get_elf_id
 from granulate_utils.linux.process import get_mapped_dso_elf_id, is_process_basename_matching
-from psutil import Process, NoSuchProcess, ZombieProcess
+from psutil import NoSuchProcess, Process, ZombieProcess
 
 from gprofiler.exceptions import CalledProcessError, ProcessStoppedException, StopEventSetException
 from gprofiler.gprofiler_types import ProfileData

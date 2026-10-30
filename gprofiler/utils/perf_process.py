@@ -22,10 +22,9 @@ from gprofiler.utils import (
 )
 from gprofiler.utils.cgroup_utils import (
     get_top_cgroup_names_for_perf,
+    is_cgroup_available,
     validate_perf_cgroup_support,
-    is_cgroup_available
 )
-
 
 logger = get_logger_adapter(__name__)
 

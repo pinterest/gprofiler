@@ -16,7 +16,7 @@
 
 import datetime
 import logging
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
 from gprofiler.dynamic_profiling_management import ProfilerSlotBase
 

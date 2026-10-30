@@ -6,12 +6,13 @@ This script demonstrates how to run the gProfiler agent in heartbeat mode
 to receive dynamic profiling commands from the Performance Studio backend.
 """
 
-import subprocess
-import sys
 import os
 import signal
+import subprocess
+import sys
 import time
 from pathlib import Path
+
 
 def run_gprofiler_heartbeat_mode():
     """Run gProfiler in heartbeat mode"""

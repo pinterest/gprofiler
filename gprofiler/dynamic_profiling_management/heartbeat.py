@@ -18,7 +18,7 @@ import datetime
 import logging
 import socket
 import threading
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
 import configargparse
 import requests
@@ -28,11 +28,7 @@ from gprofiler.dynamic_profiling_management.command_control import CommandManage
 from gprofiler.dynamic_profiling_management.continuous import ContinuousProfilerSlot
 from gprofiler.metadata.heartbeat_metadata import HeartbeatMetadataCollector
 from gprofiler.metadata.system_metadata import get_hostname
-from gprofiler.metrics_publisher import (
-    MetricsPublisher,
-    RESPONSE_TYPE_SUCCESS,
-    RESPONSE_TYPE_FAILURE,
-)
+from gprofiler.metrics_publisher import RESPONSE_TYPE_FAILURE, RESPONSE_TYPE_SUCCESS, MetricsPublisher
 from gprofiler.profilers.pmu_manager import get_pmu_manager
 
 logger = logging.getLogger(__name__)
