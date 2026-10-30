@@ -36,10 +36,14 @@ sudo ./gprofiler \
 ### Heartbeat / Dynamic Profiling console
 
 Studio checkbox **GPU (nsys)** sets `additional_args.enable_nsys=true`.
+The **nsys workload command** field sets `additional_args.nsys_workload` (trimmed;
+omitted when blank so a heartbeat does not wipe the agent's `--nsys-workload`).
 The backend merges that into top-level `combined_config`. Optional:
 
 - `nsys_path`: absolute path to `nsys`
-- `nsys_workload`: command for nsys to wrap (strongly recommended)
+- `nsys_workload`: command for nsys to launch and trace. nsys does not attach
+  to an already-running CUDA process. The capture is bounded by the profile
+  duration (`--duration`); nsys SIGTERMs the workload when that window ends.
 
 When `enable_nsys` succeeds, the uploaded `flamegraph_html` is the **GPU**
 flamegraph (preferred over CPU). `run_arguments.perf_events` also gains

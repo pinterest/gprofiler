@@ -321,6 +321,26 @@ def test_run_nsys_capture_backtraces_flags(tmp_path: Path, monkeypatch):
     assert "--cudabacktrace=kernel" in cmd
 
 
+def test_run_nsys_capture_workload_is_duration_bounded(tmp_path: Path, monkeypatch):
+    nsys = tmp_path / "nsys"
+    nsys.write_text("#!/bin/sh\n")
+    nsys.chmod(0o755)
+    seen_cmds = []
+
+    def fake_run(cmd, **kwargs):
+        seen_cmds.append(cmd)
+        Path(str(cmd[cmd.index("-o") + 1]) + ".nsys-rep").write_bytes(b"fake")
+        return mock.Mock(returncode=0, stdout=b"ok")
+
+    monkeypatch.setattr("gprofiler.profilers.nsys.subprocess.run", fake_run)
+
+    run_nsys_capture(nsys, tmp_path / "cap", duration_sec=30, workload_cmd=["python3", "workload.py", "50"])
+    cmd = seen_cmds[0]
+    assert cmd[cmd.index("--duration") + 1] == "30"
+    assert cmd[cmd.index("--duration") + 2 :] == ["python3", "workload.py", "50"]
+    assert "sleep" not in cmd
+
+
 def test_nsys_trace_to_timeline_events_with_stacks(tmp_path: Path, monkeypatch):
     nsys = tmp_path / "nsys"
     nsys.write_text("#!/bin/sh\n")

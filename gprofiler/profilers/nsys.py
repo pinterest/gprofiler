@@ -148,12 +148,14 @@ def run_nsys_capture(
         cmd.extend(["-s", "none"])
 
     workload = list(workload_cmd) if workload_cmd else None
+    # Always bound the session. With a workload, nsys stops (and SIGTERMs that
+    # process) at --duration, or sooner if the process exits. Without one, sleep
+    # for the window — that capture has no CUDA activity.
+    cmd.extend(["--duration", str(duration_sec)])
     if workload:
         cmd.extend(workload)
     else:
-        # Duration-bounded no-op session: sleep so nsys still produces a report.
-        # Prefer a real CUDA workload via nsys_workload for useful kern sums.
-        cmd.extend(["--duration", str(duration_sec), "sleep", str(duration_sec)])
+        cmd.extend(["sleep", str(duration_sec)])
 
     logger.info("Running nsys capture: %s", " ".join(cmd))
     timeout = duration_sec + 120
