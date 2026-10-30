@@ -36,14 +36,21 @@ sudo ./gprofiler \
 ### Heartbeat / Dynamic Profiling console
 
 Studio checkbox **GPU (nsys)** sets `additional_args.enable_nsys=true`.
+The **nsys workload command** field sets `additional_args.nsys_workload` (trimmed;
+omitted when blank so a heartbeat does not wipe the agent's `--nsys-workload`).
 The backend merges that into top-level `combined_config`. Optional:
 
 - `nsys_path`: absolute path to `nsys`
-- `nsys_workload`: command for nsys to wrap (strongly recommended)
+- `nsys_workload`: command for nsys to launch and trace. nsys does not attach
+  to an already-running CUDA process. The capture is bounded by the profile
+  duration (`--duration`); nsys SIGTERMs the workload when that window ends.
 
 When `enable_nsys` succeeds, the uploaded `flamegraph_html` is the **GPU**
 flamegraph (preferred over CPU). `run_arguments.perf_events` also gains
-`nsys-cuda` so the Adhoc UI can show a **GPU / nsys** chip.
+`nsys-cuda` so the Adhoc UI can show a **GPU / nsys** chip. The tags are added
+only to uploads that actually carry the nsys HTML: if the capture is empty
+(e.g. no `nsys_workload`, so nothing launched CUDA) the agent uploads the CPU
+flamegraph without any `nsys-*` tag.
 
 ## CPU/GPU timeline mode (`--nsys-timeline` / `nsys_timeline`)
 
@@ -94,7 +101,8 @@ thousands of events typically add only a few hundred distinct stacks. Clicking
 an event opens a panel under the timeline with the launch's stack, innermost
 frame first; clicking a **GPU kernel** shows the stack of the CPU call that
 launched it (resolved through CorrID). Frames are native C++ symbols
-(libtorch/aten/libcudart), not Python lines. `perf_events` gains `nsys-stacks`.
+(libtorch/aten/libcudart), not Python lines. `perf_events` gains `nsys-stacks`
+when at least one backtrace was recorded.
 If the SQLite export has no callchains, the timeline still renders — clicks
 just highlight CorrIDs as before.
 

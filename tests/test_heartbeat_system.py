@@ -12,12 +12,13 @@ Supports both mock mode (default) and live mode with real backend.
 """
 
 import json
-import requests
-import time
-from datetime import datetime
-from typing import Dict, Any, Optional
-import unittest.mock
 import sys
+import time
+import unittest.mock
+from datetime import datetime
+from typing import Any, Dict, Optional
+
+import requests
 
 # Configuration
 BACKEND_URL = "http://localhost:8000"  # Adjust based on your setup

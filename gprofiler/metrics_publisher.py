@@ -5,12 +5,12 @@ Sends error metrics to Pinterest's MetricAgent (Goku) in the standard format:
 `put metric.name epoch value tag=value tag=value`
 """
 
-import socket
-import time
 import logging
 import platform
+import socket
 import threading
-from typing import Dict, Any, Optional
+import time
+from typing import Any, Dict, Optional
 
 # Import with fallbacks for better compatibility
 try:

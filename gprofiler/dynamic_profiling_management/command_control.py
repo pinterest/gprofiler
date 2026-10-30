@@ -19,7 +19,7 @@ import logging
 import threading
 from collections import deque
 from dataclasses import dataclass
-from typing import Dict, Any, Optional, Deque
+from typing import Any, Deque, Dict, Optional
 
 logger = logging.getLogger(__name__)
 

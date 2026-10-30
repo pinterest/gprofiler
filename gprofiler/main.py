@@ -52,23 +52,12 @@ from gprofiler.client import (
 from gprofiler.consts import CPU_PROFILING_MODE
 from gprofiler.containers_client import ContainerNamesClient
 from gprofiler.diagnostics import log_diagnostics, set_diagnostics
+from gprofiler.dynamic_profiling_management.heartbeat import DynamicGProfilerManager, HeartbeatClient
 from gprofiler.exceptions import APIError, NoProfilersEnabledError
 from gprofiler.gprofiler_types import ProcessToProfileData, UserArgs, integers_list, positive_integer
-from gprofiler.dynamic_profiling_management.heartbeat import DynamicGProfilerManager, HeartbeatClient
 from gprofiler.hw_metrics import HWMetricsMonitor, HWMetricsMonitorBase, NoopHWMetricsMonitor
 from gprofiler.log import RemoteLogsHandler, initial_root_logger_setup
 from gprofiler.memory_manager import MemoryManager
-from gprofiler.metrics_publisher import (
-    MetricsPublisher, METRIC_BASE_NAME,
-    ERROR_TYPE_PROCESS_PROFILER_FAILURE, ERROR_TYPE_PERF_FAILURE, ERROR_TYPE_PROFILING_RUN_FAILURE,
-    ERROR_TYPE_UPLOAD_ERROR,
-    COMPONENT_SYSTEM_PROFILER, COMPONENT_API_CLIENT, COMPONENT_GPROFILER_MAIN,
-    SEVERITY_ERROR, SEVERITY_WARNING, SEVERITY_CRITICAL,
-    ERROR_MSG_PROCESS_PROFILER_FAILURE, ERROR_MSG_PERF_FAILURE, ERROR_MSG_PROFILING_RUN_FAILURE,
-    ERROR_MSG_UPLOAD_ERROR,
-    ERROR_CATEGORY_UPLOAD_TIMEOUT, ERROR_CATEGORY_UPLOAD_API_ERROR, ERROR_CATEGORY_UPLOAD_REQUEST_EXCEPTION,
-    get_current_method_name,
-)
 from gprofiler.merge import concatenate_from_external_file, concatenate_profiles, merge_profiles
 from gprofiler.metadata import ProfileMetadata
 from gprofiler.metadata.application_identifiers import ApplicationIdentifiers
@@ -76,6 +65,28 @@ from gprofiler.metadata.enrichment import EnrichmentOptions
 from gprofiler.metadata.external_metadata import ExternalMetadataStaleError, read_external_metadata
 from gprofiler.metadata.metadata_collector import get_current_metadata, get_static_metadata
 from gprofiler.metadata.system_metadata import get_hostname, get_run_mode, get_static_system_info
+from gprofiler.metrics_publisher import (
+    COMPONENT_API_CLIENT,
+    COMPONENT_GPROFILER_MAIN,
+    COMPONENT_SYSTEM_PROFILER,
+    ERROR_CATEGORY_UPLOAD_API_ERROR,
+    ERROR_CATEGORY_UPLOAD_REQUEST_EXCEPTION,
+    ERROR_CATEGORY_UPLOAD_TIMEOUT,
+    ERROR_MSG_PERF_FAILURE,
+    ERROR_MSG_PROCESS_PROFILER_FAILURE,
+    ERROR_MSG_PROFILING_RUN_FAILURE,
+    ERROR_MSG_UPLOAD_ERROR,
+    ERROR_TYPE_PERF_FAILURE,
+    ERROR_TYPE_PROCESS_PROFILER_FAILURE,
+    ERROR_TYPE_PROFILING_RUN_FAILURE,
+    ERROR_TYPE_UPLOAD_ERROR,
+    METRIC_BASE_NAME,
+    SEVERITY_CRITICAL,
+    SEVERITY_ERROR,
+    SEVERITY_WARNING,
+    MetricsPublisher,
+    get_current_method_name,
+)
 from gprofiler.platform import is_aarch64, is_linux, is_windows
 from gprofiler.profiler_state import ProfilerState
 from gprofiler.profilers.factory import get_profilers
@@ -177,6 +188,7 @@ class GProfiler:
         self._nsys_upload_rep = bool(user_args.get("nsys_upload_rep", False))
         self._nsys_thread: Optional[threading.Thread] = None
         self._nsys_html: Optional[str] = None
+        self._nsys_tags: List[str] = []
         self._nsys_rep_path: Optional[Path] = None
         if self._collect_metadata:
             self._static_metadata = get_static_metadata(self._spawn_time, user_args, self._external_metadata_path)
@@ -392,6 +404,7 @@ class GProfiler:
         # Kick off NVIDIA nsys GPU capture in parallel with CPU profilers (adhoc).
         if self._enable_nsys:
             self._nsys_html = None
+            self._nsys_tags = []
             self._nsys_thread = threading.Thread(
                 target=self._run_nsys_capture_background,
                 name="nsys-capture",
@@ -403,7 +416,7 @@ class GProfiler:
     def _run_nsys_capture_background(self) -> None:
         """Collect nsys GPU flamegraph HTML while CPU profilers run."""
         try:
-            from gprofiler.nsys_profiler import collect_nsys_adhoc_html
+            from gprofiler.profilers.nsys import collect_nsys_adhoc_html
 
             def _gen(collapsed: str) -> Optional[str]:
                 # Approximate window; labels only.
@@ -414,6 +427,7 @@ class GProfiler:
             def _keep_rep(rep: Path) -> None:
                 self._nsys_rep_path = rep
 
+            tags: List[str] = []
             html = collect_nsys_adhoc_html(
                 duration_sec=self._duration,
                 nsys_path=self._nsys_path,
@@ -423,11 +437,14 @@ class GProfiler:
                 timeline=self._nsys_timeline,
                 timeline_stacks=self._nsys_timeline_stacks,
                 on_rep=_keep_rep if self._nsys_upload_rep else None,
+                tags_out=tags,
             )
+            self._nsys_tags = tags if html else []
             self._nsys_html = html
         except Exception:
             logger.exception("Background nsys GPU capture failed")
             self._nsys_html = None
+            self._nsys_tags = []
 
     def _upload_nsys_rep(self, start_time: datetime.datetime) -> None:
         rep_path = self._nsys_rep_path
@@ -439,6 +456,20 @@ class GProfiler:
             logger.info("Successfully uploaded nsys rep to the server")
         except Exception:
             logger.exception("Failed to upload nsys rep to the server")
+
+    @staticmethod
+    def _tag_nsys_perf_events(metadata: ProfileMetadata, tags: List[str]) -> ProfileMetadata:
+        """Return metadata whose run_arguments.perf_events carries the nsys tags.
+
+        Copies instead of mutating: metadata aliases the static metadata and the
+        user args, which are reused by later snapshots that may not have GPU HTML.
+        """
+        run_args = metadata.get("run_arguments")
+        if not tags or not isinstance(run_args, dict):
+            return metadata
+        events = [e.strip() for e in str(run_args.get("perf_events") or "cycles").split(",") if e.strip()]
+        events += [t for t in tags if t not in events]
+        return {**metadata, "run_arguments": {**run_args, "perf_events": ",".join(events)}}
 
     def stop(self) -> None:
         logger.info("Stopping ...")
@@ -590,6 +621,7 @@ class GProfiler:
                 kind = "CPU/GPU timeline" if self._nsys_timeline else "GPU flamegraph"
                 logger.info(f"Using nsys {kind} HTML for upload (preferred over CPU)")
                 flamegraph_html = self._nsys_html
+                metadata = self._tag_nsys_perf_events(metadata, self._nsys_tags)
             else:
                 logger.warning("enable_nsys was set but no GPU HTML was produced; keeping CPU flamegraph if any")
 

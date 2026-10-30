@@ -148,12 +148,14 @@ def run_nsys_capture(
         cmd.extend(["-s", "none"])
 
     workload = list(workload_cmd) if workload_cmd else None
+    # Always bound the session. With a workload, nsys stops (and SIGTERMs that
+    # process) at --duration, or sooner if the process exits. Without one, sleep
+    # for the window — that capture has no CUDA activity.
+    cmd.extend(["--duration", str(duration_sec)])
     if workload:
         cmd.extend(workload)
     else:
-        # Duration-bounded no-op session: sleep so nsys still produces a report.
-        # Prefer a real CUDA workload via nsys_workload for useful kern sums.
-        cmd.extend(["--duration", str(duration_sec), "sleep", str(duration_sec)])
+        cmd.extend(["sleep", str(duration_sec)])
 
     logger.info("Running nsys capture: %s", " ".join(cmd))
     timeout = duration_sec + 120
@@ -259,6 +261,9 @@ def _export_stats_csv(nsys: Path, nsys_rep: Path, work_dir: Path, report: str, o
         f"--report={report}",
         "--format=csv",
         "--force-export=true",
+        # Without this nsys stats SKIPs when the CSV already exists, so a stale
+        # (even empty) CSV from an earlier capture would be read forever.
+        "--force-overwrite=true",
         "-o",
         str(out_prefix),
         str(nsys_rep),
@@ -1129,8 +1134,9 @@ def generate_nsys_flamegraph_html(
 
     # Prefer burn+template when the full agent runtime is available.
     try:
-        from gprofiler.utils import resource_path, run_process, get_iso8601_format_time
         from datetime import datetime as _dt
+
+        from gprofiler.utils import get_iso8601_format_time, resource_path, run_process
 
         start = _dt.fromisoformat(start_iso.replace("Z", "+00:00")) if start_iso else _dt.utcnow()
         end = _dt.fromisoformat(end_iso.replace("Z", "+00:00")) if end_iso else _dt.utcnow()
@@ -1170,6 +1176,7 @@ def collect_nsys_adhoc_html(
     timeline: bool = False,
     timeline_stacks: bool = False,
     on_rep: Optional[Callable[[Path], None]] = None,
+    tags_out: Optional[List[str]] = None,
 ) -> Optional[str]:
     """End-to-end: find nsys → capture → collapsed → HTML. Returns HTML or None.
 
@@ -1180,6 +1187,9 @@ def collect_nsys_adhoc_html(
     (--cudabacktrace; heavier) and shows them on click in the timeline.
     on_rep is called with the .nsys-rep path right after a successful capture,
     so callers can keep/upload the raw report alongside the rendered HTML.
+    tags_out, if given, is extended with the perf_events tags describing the
+    returned HTML ("nsys-cuda", plus "nsys-timeline" / "nsys-stacks" when that
+    view was actually rendered); it is left untouched when None is returned.
     """
     nsys = find_nsys(nsys_path)
     if nsys is None:
@@ -1224,6 +1234,10 @@ def collect_nsys_adhoc_html(
             html = generate_nsys_timeline_html(events)
             if html:
                 logger.info("Generated nsys CPU/GPU timeline HTML (%d bytes)", len(html))
+                if tags_out is not None:
+                    tags_out.extend(["nsys-cuda", "nsys-timeline"])
+                    if events.get("stacks"):
+                        tags_out.append("nsys-stacks")
                 return html
         logger.warning("nsys timeline requested but no trace events; falling back to GPU flamegraph")
 
@@ -1250,6 +1264,8 @@ def collect_nsys_adhoc_html(
     html = _gen(collapsed)
     if html:
         logger.info("Generated nsys GPU flamegraph HTML (%d bytes)", len(html))
+        if tags_out is not None:
+            tags_out.append("nsys-cuda")
     else:
         logger.error("Failed to generate nsys flamegraph HTML from collapsed stacks")
     return html

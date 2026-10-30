@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Unit tests for gprofiler.nsys_profiler (no GPU / nsys required)."""
+"""Unit tests for gprofiler.profilers.nsys (no GPU / nsys required)."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from unittest import mock
 
 import pytest
 
-from gprofiler.nsys_profiler import (
+from gprofiler.profilers.nsys import (
     _csv_to_collapsed,
     _parse_trace_csv,
     _workload_env,
@@ -35,7 +35,6 @@ from gprofiler.nsys_profiler import (
     nsys_trace_to_timeline_events,
     run_nsys_capture,
 )
-
 
 KERN_CSV = """Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
 100.0,28918591,5,5783718.2,5780070.0,5777126,5797542,8313.1,"burn(float *, int, int)"
@@ -162,7 +161,7 @@ def test_nsys_stats_to_collapsed_uses_kern(tmp_path: Path, monkeypatch):
         csv_path.write_text(KERN_CSV)
         return mock.Mock(returncode=0, stdout=b"ok")
 
-    monkeypatch.setattr("gprofiler.nsys_profiler.subprocess.run", fake_run)
+    monkeypatch.setattr("gprofiler.profilers.nsys.subprocess.run", fake_run)
     collapsed = nsys_stats_to_collapsed(nsys, rep, tmp_path / "work")
     assert collapsed is not None
     assert "cuda_kernel;burn" in collapsed
@@ -235,7 +234,7 @@ def test_nsys_trace_to_timeline_events(tmp_path: Path, monkeypatch):
         Path(str(out_prefix) + f"_{report}.csv").write_text(csv_text)
         return mock.Mock(returncode=0, stdout=b"ok")
 
-    monkeypatch.setattr("gprofiler.nsys_profiler.subprocess.run", fake_run)
+    monkeypatch.setattr("gprofiler.profilers.nsys.subprocess.run", fake_run)
     events = nsys_trace_to_timeline_events(nsys, rep, tmp_path / "work")
     assert events is not None
     assert len(events["gpu"]) == 2
@@ -309,7 +308,7 @@ def test_run_nsys_capture_backtraces_flags(tmp_path: Path, monkeypatch):
         Path(str(cmd[cmd.index("-o") + 1]) + ".nsys-rep").write_bytes(b"fake")
         return mock.Mock(returncode=0, stdout=b"ok")
 
-    monkeypatch.setattr("gprofiler.nsys_profiler.subprocess.run", fake_run)
+    monkeypatch.setattr("gprofiler.profilers.nsys.subprocess.run", fake_run)
 
     run_nsys_capture(nsys, tmp_path / "a" / "cap", duration_sec=5)
     assert "-s" in seen_cmds[0] and seen_cmds[0][seen_cmds[0].index("-s") + 1] == "none"
@@ -320,6 +319,26 @@ def test_run_nsys_capture_backtraces_flags(tmp_path: Path, monkeypatch):
     assert cmd[cmd.index("-s") + 1] == "process-tree"
     assert cmd[cmd.index("-b") + 1] == "dwarf"
     assert "--cudabacktrace=kernel" in cmd
+
+
+def test_run_nsys_capture_workload_is_duration_bounded(tmp_path: Path, monkeypatch):
+    nsys = tmp_path / "nsys"
+    nsys.write_text("#!/bin/sh\n")
+    nsys.chmod(0o755)
+    seen_cmds = []
+
+    def fake_run(cmd, **kwargs):
+        seen_cmds.append(cmd)
+        Path(str(cmd[cmd.index("-o") + 1]) + ".nsys-rep").write_bytes(b"fake")
+        return mock.Mock(returncode=0, stdout=b"ok")
+
+    monkeypatch.setattr("gprofiler.profilers.nsys.subprocess.run", fake_run)
+
+    run_nsys_capture(nsys, tmp_path / "cap", duration_sec=30, workload_cmd=["python3", "workload.py", "50"])
+    cmd = seen_cmds[0]
+    assert cmd[cmd.index("--duration") + 1] == "30"
+    assert cmd[cmd.index("--duration") + 2 :] == ["python3", "workload.py", "50"]
+    assert "sleep" not in cmd
 
 
 def test_nsys_trace_to_timeline_events_with_stacks(tmp_path: Path, monkeypatch):
@@ -341,7 +360,7 @@ def test_nsys_trace_to_timeline_events_with_stacks(tmp_path: Path, monkeypatch):
             Path(str(out_prefix) + f"_{report}.csv").write_text(csv_text)
         return mock.Mock(returncode=0, stdout=b"ok")
 
-    monkeypatch.setattr("gprofiler.nsys_profiler.subprocess.run", fake_run)
+    monkeypatch.setattr("gprofiler.profilers.nsys.subprocess.run", fake_run)
     events = nsys_trace_to_timeline_events(nsys, rep, work, with_stacks=True)
     assert events is not None
     assert len(events["stacks"]) == 2
@@ -416,7 +435,7 @@ def test_nsys_trace_to_timeline_events_none_when_empty(tmp_path: Path, monkeypat
     def fake_run(cmd, **kwargs):
         return mock.Mock(returncode=1, stdout=b"no data")
 
-    monkeypatch.setattr("gprofiler.nsys_profiler.subprocess.run", fake_run)
+    monkeypatch.setattr("gprofiler.profilers.nsys.subprocess.run", fake_run)
     assert nsys_trace_to_timeline_events(nsys, rep, tmp_path / "work") is None
 
 
@@ -435,8 +454,8 @@ def test_collect_adhoc_html_on_rep_callback(tmp_path: Path, monkeypatch):
         (out_prefix.parent / (out_prefix.name + "_cuda_gpu_kern_sum.csv")).write_text(KERN_CSV)
         return mock.Mock(returncode=0, stdout=b"ok")
 
-    monkeypatch.setattr("gprofiler.nsys_profiler.subprocess.run", fake_run)
-    monkeypatch.setattr("gprofiler.nsys_profiler.find_nsys", lambda explicit_path=None: nsys)
+    monkeypatch.setattr("gprofiler.profilers.nsys.subprocess.run", fake_run)
+    monkeypatch.setattr("gprofiler.profilers.nsys.find_nsys", lambda explicit_path=None: nsys)
 
     seen_reps = []
     html = collect_nsys_adhoc_html(
@@ -460,3 +479,86 @@ def test_collect_adhoc_html_on_rep_callback(tmp_path: Path, monkeypatch):
         on_rep=boom,
     )
     assert html == "<html>ok</html>"
+
+
+def _fake_nsys_run(csv_by_report):
+    """subprocess.run stub: `profile` writes a rep; `stats` writes the CSV for its report (if any)."""
+
+    def fake_run(cmd, **kwargs):
+        if cmd[1] == "profile":
+            Path(str(cmd[cmd.index("-o") + 1]) + ".nsys-rep").write_bytes(b"fake")
+            return mock.Mock(returncode=0, stdout=b"ok")
+        if cmd[1] == "stats":
+            report = next(a for a in cmd if a.startswith("--report=")).split("=", 1)[1]
+            out_prefix = Path(cmd[cmd.index("-o") + 1])
+            out_prefix.parent.mkdir(parents=True, exist_ok=True)
+            (out_prefix.parent / f"{out_prefix.name}_{report}.csv").write_text(csv_by_report.get(report, ""))
+        return mock.Mock(returncode=0, stdout=b"ok")
+
+    return fake_run
+
+
+def test_collect_adhoc_html_tags_flamegraph(tmp_path: Path, monkeypatch):
+    nsys = tmp_path / "nsys"
+    monkeypatch.setattr("gprofiler.profilers.nsys.find_nsys", lambda explicit_path=None: nsys)
+    monkeypatch.setattr(
+        "gprofiler.profilers.nsys.subprocess.run", _fake_nsys_run({"cuda_gpu_kern_sum": KERN_CSV})
+    )
+    tags: list = []
+    html = collect_nsys_adhoc_html(
+        duration_sec=1,
+        work_dir=str(tmp_path / "work"),
+        generate_html_fn=lambda collapsed: "<html>ok</html>",
+        tags_out=tags,
+    )
+    assert html == "<html>ok</html>"
+    assert tags == ["nsys-cuda"]
+
+
+def test_collect_adhoc_html_no_tags_when_capture_empty(tmp_path: Path, monkeypatch):
+    nsys = tmp_path / "nsys"
+    monkeypatch.setattr("gprofiler.profilers.nsys.find_nsys", lambda explicit_path=None: nsys)
+    monkeypatch.setattr("gprofiler.profilers.nsys.subprocess.run", _fake_nsys_run({}))
+    tags: list = []
+    html = collect_nsys_adhoc_html(
+        duration_sec=1,
+        work_dir=str(tmp_path / "work"),
+        generate_html_fn=lambda collapsed: "<html>ok</html>",
+        timeline=True,
+        tags_out=tags,
+    )
+    assert html is None
+    assert tags == []
+
+
+def test_collect_adhoc_html_tags_timeline(tmp_path: Path, monkeypatch):
+    nsys = tmp_path / "nsys"
+    monkeypatch.setattr("gprofiler.profilers.nsys.find_nsys", lambda explicit_path=None: nsys)
+    monkeypatch.setattr(
+        "gprofiler.profilers.nsys.subprocess.run",
+        _fake_nsys_run({"cuda_gpu_trace": GPU_TRACE_CSV, "cuda_api_trace": API_TRACE_CSV}),
+    )
+    tags: list = []
+    html = collect_nsys_adhoc_html(
+        duration_sec=1,
+        work_dir=str(tmp_path / "work"),
+        timeline=True,
+        tags_out=tags,
+    )
+    assert html is not None
+    # no SQLite callchains in this fake capture, so no nsys-stacks tag
+    assert tags == ["nsys-cuda", "nsys-timeline"]
+
+
+def test_export_stats_csv_forces_overwrite(tmp_path: Path, monkeypatch):
+    from gprofiler.profilers.nsys import _export_stats_csv
+
+    seen = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(cmd)
+        return mock.Mock(returncode=0, stdout=b"ok")
+
+    monkeypatch.setattr("gprofiler.profilers.nsys.subprocess.run", fake_run)
+    _export_stats_csv(tmp_path / "nsys", tmp_path / "cap.nsys-rep", tmp_path, "cuda_gpu_kern_sum", tmp_path / "kern")
+    assert "--force-overwrite=true" in seen[0]

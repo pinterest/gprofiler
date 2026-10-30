@@ -62,10 +62,10 @@ from gprofiler.utils.collapsed_format import parse_one_collapsed_file
 if is_linux():
     from gprofiler.profilers.python_ebpf import PythonEbpfProfiler, PythonEbpfError
 
+from granulate_utils.python import _BLACKLISTED_PYTHON_PROCS, DETECTED_PYTHON_PROCESSES_REGEX
+
 from gprofiler.utils import pgrep_exe, pgrep_maps, random_prefix, removed_path, resource_path, run_process
 from gprofiler.utils.process import process_comm, read_proc_file, search_proc_maps
-
-from granulate_utils.python import DETECTED_PYTHON_PROCESSES_REGEX, _BLACKLISTED_PYTHON_PROCS
 
 logger = get_logger_adapter(__name__)
 
