@@ -33,6 +33,7 @@ from gprofiler.metrics_publisher import (
     RESPONSE_TYPE_SUCCESS,
     RESPONSE_TYPE_FAILURE,
 )
+from gprofiler.nsys_profiler import find_nsys
 from gprofiler.profilers.pmu_manager import get_pmu_manager
 
 logger = logging.getLogger(__name__)
@@ -160,6 +161,8 @@ class HeartbeatClient:
         try:
             perf_supported_events = self.pmu_manager.get_supported_events()
             inventory_metadata = self.heartbeat_metadata_collector.collect()
+            found_nsys = find_nsys()
+            nsys_path = str(found_nsys) if found_nsys else None
             heartbeat_data = {
                 "ip_address": self.ip_address,
                 "hostname": self.hostname,
@@ -170,6 +173,8 @@ class HeartbeatClient:
                 "received_command_ids": list(self.received_command_ids),
                 "executed_command_ids": list(self.executed_command_ids),
                 "perf_supported_events": perf_supported_events,
+                "nsys_available": nsys_path is not None,
+                "nsys_path": nsys_path,
                 **inventory_metadata,
             }
             url = f"{self.api_server}/api/metrics/heartbeat"
