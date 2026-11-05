@@ -88,10 +88,12 @@ flowchart LR
 ## Inventory Collection Model
 
 `HeartbeatMetadataCollector` builds the inventory snapshot and caches it for
-`refresh_interval_seconds` (30s), matching the heartbeat interval. The cache
-bounds discovery cost: `/proc` is walked at most once per interval even if the
-beat fires more often, and each beat carries a snapshot at most one interval
-old.
+`refresh_interval_seconds` (`--heartbeat-inventory-refresh-interval`, default
+30s, matching the heartbeat interval). The cache bounds discovery cost: `/proc`
+is walked at most once per interval even if the beat fires more often, and each
+beat carries a snapshot at most one interval old. It also bounds how often a
+host's inventory can change, and with it how often the host costs the backend
+an inventory sync; large fleets of busy nodes raise it for that reason.
 
 Collection is two best-effort passes, both of which degrade to an empty
 inventory rather than failing the beat:
@@ -102,6 +104,8 @@ inventory rather than failing the beat:
 
 Only processes that resolve to a container ID are reported. Non-containerized
 processes are intentionally omitted and remain covered by host-scope profiling.
+The agent's own helper processes (the profilers it spawns, each living for one
+profiling session) are omitted too; the agent's own process is still reported.
 
 ### Full-snapshot semantics
 

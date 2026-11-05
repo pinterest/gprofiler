@@ -27,7 +27,11 @@ from gprofiler.dynamic_profiling_management.ad_hoc import AdhocProfilerSlot
 from gprofiler.dynamic_profiling_management.command_control import CommandManager, ProfilingCommand
 from gprofiler.dynamic_profiling_management.continuous import ContinuousProfilerSlot
 from gprofiler.metadata.heartbeat_inventory import inventory_digest
-from gprofiler.metadata.heartbeat_metadata import DEFAULT_MIN_PROCESS_AGE_SECONDS, HeartbeatMetadataCollector
+from gprofiler.metadata.heartbeat_metadata import (
+    DEFAULT_INVENTORY_REFRESH_SECONDS,
+    DEFAULT_MIN_PROCESS_AGE_SECONDS,
+    HeartbeatMetadataCollector,
+)
 from gprofiler.metadata.system_metadata import get_hostname
 from gprofiler.metrics_publisher import RESPONSE_TYPE_FAILURE, RESPONSE_TYPE_SUCCESS, MetricsPublisher
 from gprofiler.profilers.pmu_manager import get_pmu_manager
@@ -57,6 +61,7 @@ class HeartbeatClient:
         workload_name_labels: Optional[List[str]] = None,
         workload_kind_labels: Optional[List[str]] = None,
         min_process_age_seconds: float = DEFAULT_MIN_PROCESS_AGE_SECONDS,
+        inventory_refresh_interval_seconds: int = DEFAULT_INVENTORY_REFRESH_SECONDS,
     ):
         self.api_server = api_server.rstrip("/")
         self.service_name = service_name
@@ -84,6 +89,7 @@ class HeartbeatClient:
         self._init_session()
         self.pmu_manager = get_pmu_manager()
         self.heartbeat_metadata_collector = HeartbeatMetadataCollector(
+            refresh_interval_seconds=inventory_refresh_interval_seconds,
             workload_name_labels=workload_name_labels,
             workload_kind_labels=workload_kind_labels,
             min_process_age_seconds=min_process_age_seconds,

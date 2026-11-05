@@ -434,6 +434,10 @@ curl -X POST http://localhost:8000/api/metrics/profile_request \
 --heartbeat-min-process-age SECONDS
                                   Leave processes younger than this out of the workload
                                   inventory; 0 reports all (default: 30, see below)
+--heartbeat-inventory-refresh-interval SECONDS
+                                  Rebuild the workload inventory at most this often; a
+                                  longer interval bounds the server's inventory sync load
+                                  on large, busy fleets (default: 30)
 --api-server URL                  Backend server URL
 --upload-results, -u              Upload results to backend
 --token TOKEN                     Authentication token

@@ -26,6 +26,7 @@ Covers WORKLOAD_LEVEL_PROFILING_SPEC.md (gProfiler side):
 * AT-A5 — agent-pod env fallback (POD_NAMESPACE / POD_NAME)
 * AT-A6 — short-lived processes are not inventory (a helper that respawns between
   beats must not change the host's inventory digest)
+* The agent's own helpers are not inventory (profilers it spawns for one session each)
 
 ``gprofiler.metadata.heartbeat_metadata`` normally imports the full
 ``granulate_utils`` container stack (grpc/docker) plus glogger. Those are agent
@@ -35,7 +36,11 @@ and dependency-free while still exercising the real inventory-building code.
 """
 
 import importlib.util
+import os
+import signal
+import subprocess
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -518,3 +523,50 @@ class TestShortLivedProcessesSpec:
             )
             unfiltered.append(inventory_digest(collector._collect_containers()))
         assert len(set(unfiltered)) == 3
+
+
+# ---------------------------------------------------------------------------
+# The agent's own helpers are not inventory
+# ---------------------------------------------------------------------------
+
+
+def _first_child_pid(pid, timeout=5.0):
+    import psutil
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        children = psutil.Process(pid).children()
+        if children:
+            return children[0].pid
+        time.sleep(0.01)
+    raise AssertionError(f"process {pid} started no child within {timeout} s")
+
+
+class TestAgentOwnHelpersSpec:
+    def test_processes_the_agent_spawned_are_left_out(self, collector, monkeypatch):
+        # Profilers (py-spy, perf, async-profiler) run as the agent's children for one session
+        # each, so their pids change every session and must not reach the inventory. The test
+        # process plays the agent: its real child and grandchild are dropped, while the agent
+        # itself and a process it did not spawn (our parent) are kept.
+        helper = subprocess.Popen(["sh", "-c", "sleep 60 & wait"], start_new_session=True)
+        try:
+            helper_child = _first_child_pid(helper.pid)
+            agent, unrelated = os.getpid(), os.getppid()
+            collector._containers_client = _one_container_client()
+            collector._min_process_age_seconds = 0.0
+            monkeypatch.setattr(hb, "get_process_container_id", lambda proc: "c1", raising=True)
+            monkeypatch.setattr(
+                hb,
+                "process_iter",
+                lambda fields: [
+                    _FakeProc(agent, "gprofiler"),
+                    _FakeProc(unrelated, "sh"),
+                    _FakeProc(helper.pid, "py-spy"),
+                    _FakeProc(helper_child, "perf"),
+                ],
+            )
+            pids = [p["pid"] for p in collector._collect_containers()[0]["processes"]]
+            assert pids == sorted([agent, unrelated])
+        finally:
+            os.killpg(helper.pid, signal.SIGKILL)
+            helper.wait()

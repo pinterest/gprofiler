@@ -1285,6 +1285,17 @@ def parse_cmd_args() -> configargparse.Namespace:
         " long-lived processes appear one beat late instead. 0 reports every process (default: %(default)s)",
     )
 
+    parser.add_argument(
+        "--heartbeat-inventory-refresh-interval",
+        type=positive_integer,
+        dest="heartbeat_inventory_refresh_interval",
+        default=30,
+        help="Rebuild the heartbeat workload inventory at most every this many seconds; the heartbeats in"
+        " between report the previous snapshot. Every rebuild that finds a change makes the server re-sync"
+        " this host's inventory, so on a large fleet of busy nodes a longer interval bounds the server's"
+        " write load; new or exited workloads show up to one interval late (default: %(default)s)",
+    )
+
     if is_linux() and not is_aarch64():
         hw_metrics_options = parser.add_argument_group("hardware metrics")
         hw_metrics_options.add_argument(
@@ -1703,6 +1714,7 @@ def main() -> None:
                 workload_name_labels=args.heartbeat_workload_name_labels,
                 workload_kind_labels=args.heartbeat_workload_kind_labels,
                 min_process_age_seconds=args.heartbeat_min_process_age,
+                inventory_refresh_interval_seconds=args.heartbeat_inventory_refresh_interval,
             )
 
             # Create dynamic profiler manager

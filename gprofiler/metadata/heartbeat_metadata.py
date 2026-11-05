@@ -17,7 +17,7 @@
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from granulate_utils.containers.client import ContainersClient
 from granulate_utils.exceptions import NoContainerRuntimesError
@@ -58,6 +58,13 @@ _PLACEHOLDER_LABEL_VALUES = frozenset({"unknown", "none", ""})
 # development fleet: about half of all beats differed, almost entirely from such pids).
 # The cost of the filter is that a new long-lived process appears one beat late.
 DEFAULT_MIN_PROCESS_AGE_SECONDS = 30
+
+# Seconds between inventory rebuilds; the beats in between report the cached snapshot.
+# Every rebuild that finds a change makes the server re-sync the host's inventory rows, so
+# this bounds how often one host can cost the server a sync -- on a large fleet of busy
+# nodes (pods and periodic jobs coming and going) the server's sync capacity, not discovery
+# cost, is what limits the interval. New or exited workloads show up to one interval late.
+DEFAULT_INVENTORY_REFRESH_SECONDS = 30
 
 # Kubernetes derives generated pod-name suffixes (the ReplicaSet
 # pod-template-hash and the trailing random token) from a vowel-free "safe"
@@ -142,10 +149,17 @@ def _best_effort_workload_kind(
     return "k8s"
 
 
+def _descendant_pids(pid: int) -> Set[int]:
+    try:
+        return {child.pid for child in Process(pid).children(recursive=True)}
+    except Exception:
+        return set()
+
+
 class HeartbeatMetadataCollector:
     def __init__(
         self,
-        refresh_interval_seconds: int = 30,
+        refresh_interval_seconds: int = DEFAULT_INVENTORY_REFRESH_SECONDS,
         workload_name_labels: Optional[Sequence[str]] = None,
         workload_kind_labels: Optional[Sequence[str]] = None,
         min_process_age_seconds: float = DEFAULT_MIN_PROCESS_AGE_SECONDS,
@@ -202,7 +216,13 @@ class HeartbeatMetadataCollector:
         # read is kept -- the filter only ever removes what it can prove is young.
         min_age = self._min_process_age_seconds
         youngest_allowed_start = time.time() - min_age if min_age > 0 else None
+        # The agent's own helpers (py-spy, perf, async-profiler, ...) are not workloads, and each
+        # lives for one profiling session -- long enough to pass the age filter -- so reporting
+        # them would change the inventory every session on any node with profiled processes.
+        own_helpers = _descendant_pids(os.getpid())
         for process in process_iter(["pid", "name", "create_time"]):
+            if process.pid in own_helpers:
+                continue
             if youngest_allowed_start is not None:
                 started_at = process.info.get("create_time")
                 if started_at is not None and started_at > youngest_allowed_start:
