@@ -35,11 +35,10 @@ apk add --no-cache musl-dev make git curl  # git & curl used by next scripts
 
 mkdir builds && cd builds
 
-ZLIB_VERSION="1.3.2"
-ZLIB_FILE="zlib-$ZLIB_VERSION.tar.gz"
-# zlib.net's top level only has the latest release (older ones 404 once a new one ships);
-# fossils/ keeps every release, as .tar.gz only.
-curl -fL "https://zlib.net/fossils/$ZLIB_FILE" > $ZLIB_FILE
+ZLIB_VERSION="1.4"
+ZLIB_FILE="zlib-$ZLIB_VERSION.tar.xz"
+# zlib.net only hosts the latest release (older ones 404 once a new one ships); GitHub release assets stay.
+curl -fL "https://github.com/madler/zlib/releases/download/v$ZLIB_VERSION/$ZLIB_FILE" > $ZLIB_FILE
 tar -xf "$ZLIB_FILE"
 cd "zlib-$ZLIB_VERSION"
 # note the use of --prefix here. it matches the directory https://github.com/benfred/remoteprocess/blob/master/build.rs expects to find libs for musl.
