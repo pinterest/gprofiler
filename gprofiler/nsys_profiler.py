@@ -29,12 +29,20 @@ import os
 import shlex
 import shutil
 import subprocess  # nosec B404
+import threading
+import time
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
 NSYS_DATA_DIRECTORY = "/tmp/gprofiler_nsys"
+# Interactive session started by `nsys launch`. Start/stop open and close
+# collection without exiting cuda_burn. One name per agent process.
+NSYS_LAUNCH_SESSION = "gprofiler-cuda-burn"
+# cuda_burn's own seconds argument ends the process. Launch mode needs the
+# process to outlive one capture so a later start/stop can run.
+NSYS_LAUNCH_CUDA_BURN_SECONDS = 3600
 DEFAULT_NSYS_CANDIDATES = (
     "/usr/local/bin/nsys",
     "/opt/nvidia/nsight-systems/2025.6.1/bin/nsys",
@@ -193,6 +201,316 @@ def run_nsys_capture(
         logger.error("nsys profile completed but .nsys-rep not found at %s", rep)
         return None
     return rep
+
+
+def launch_workload_argv(
+    workload_cmd: Sequence[str],
+    session_seconds: int = NSYS_LAUNCH_CUDA_BURN_SECONDS,
+) -> List[str]:
+    """Command passed to `nsys launch`.
+
+    cuda_burn treats its last argument as a lifetime. A short lifetime exits
+    before a second start/stop, so launch mode stretches it to session_seconds.
+    """
+    cmd = [str(part) for part in workload_cmd]
+    if not cmd or Path(cmd[0]).name != "cuda_burn":
+        return cmd
+    if len(cmd) == 1:
+        return cmd + [str(session_seconds)]
+    try:
+        seconds = int(cmd[-1])
+    except ValueError:
+        return cmd + [str(session_seconds)]
+    if seconds < session_seconds:
+        logger.info(
+            "nsys launch: cuda_burn lifetime %ss is shorter than a session; using %ss",
+            seconds,
+            session_seconds,
+        )
+        return cmd[:-1] + [str(session_seconds)]
+    return cmd
+
+
+def _find_nsys_rep(output_prefix: Path) -> Optional[Path]:
+    rep = Path(str(output_prefix) + ".nsys-rep")
+    if rep.is_file():
+        return rep
+    matches = sorted(output_prefix.parent.glob(output_prefix.name + "*.nsys-rep"))
+    return matches[0] if matches else None
+
+
+class NsysLaunchSession:
+    """One `nsys launch` process and the collection currently open on it.
+
+    The heartbeat agent process outlives a single adhoc command, so this
+    session does too. `nsys stop` ends collection and leaves cuda_burn running.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.process: Optional[subprocess.Popen] = None
+        self.collecting = False
+        self.output_prefix: Optional[Path] = None
+
+    def reset(self) -> None:
+        with self._lock:
+            self.process = None
+            self.collecting = False
+            self.output_prefix = None
+
+    def _alive(self) -> bool:
+        return self.process is not None and self.process.poll() is None
+
+    def ensure_launched(self, nsys: Path, workload_cmd: Optional[Sequence[str]]) -> bool:
+        with self._lock:
+            if self._alive():
+                return True
+            if self.process is not None:
+                logger.warning(
+                    "nsys launch session exited (rc=%s); relaunching cuda_burn",
+                    self.process.poll(),
+                )
+                self.process = None
+                self.collecting = False
+            if not workload_cmd:
+                logger.error(
+                    "nsys launch mode requires nsys_workload (path to cuda_burn). "
+                    "The UI does not take a free-form command."
+                )
+                return False
+            argv = [
+                str(nsys),
+                "launch",
+                f"--session-new={NSYS_LAUNCH_SESSION}",
+                "--trace=cuda,nvtx",
+                *launch_workload_argv(workload_cmd),
+            ]
+            logger.info("Running nsys launch: %s", " ".join(argv))
+            try:
+                self.process = subprocess.Popen(  # nosec B603
+                    argv,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                    env=_workload_env(),
+                )
+            except OSError as exc:
+                logger.error("Failed to execute nsys launch: %s", exc)
+                self.process = None
+                return False
+            self.collecting = False
+            self.output_prefix = None
+            for _ in range(25):
+                if self.process.poll() is not None:
+                    logger.error(
+                        "nsys launch exited before the session was ready (rc=%s)",
+                        self.process.poll(),
+                    )
+                    self.process = None
+                    return False
+                try:
+                    status = subprocess.run(  # nosec B603
+                        [str(nsys), "status", f"--session={NSYS_LAUNCH_SESSION}"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        timeout=10,
+                        check=False,
+                    )
+                except (subprocess.TimeoutExpired, OSError) as exc:
+                    logger.error("nsys status failed: %s", exc)
+                    return False
+                if status.returncode == 0:
+                    return True
+                time.sleep(0.2)
+            logger.error("nsys launch session %s did not become ready", NSYS_LAUNCH_SESSION)
+            return False
+
+    def start_collection(self, nsys: Path, output_prefix: Path) -> bool:
+        with self._lock:
+            if not self._alive():
+                logger.error("nsys start requested but the launch session is not running")
+                return False
+            if self.collecting:
+                logger.warning("nsys collection is already open; not starting another")
+                return False
+            output_prefix.parent.mkdir(parents=True, exist_ok=True)
+            cmd = [
+                str(nsys),
+                "start",
+                f"--session={NSYS_LAUNCH_SESSION}",
+                "-o",
+                str(output_prefix),
+                "--force-overwrite=true",
+                "-s",
+                "none",
+            ]
+            logger.info("Running nsys start: %s", " ".join(cmd))
+            try:
+                proc = subprocess.run(  # nosec B603
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    timeout=60,
+                    check=False,
+                )
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                logger.error("nsys start failed: %s", exc)
+                return False
+            if proc.returncode != 0:
+                logger.error(
+                    "nsys start exited with code %s: %s",
+                    proc.returncode,
+                    (proc.stdout or b"")[-1000:].decode("utf-8", "replace"),
+                )
+                return False
+            self.collecting = True
+            self.output_prefix = output_prefix
+            return True
+
+    def stop_collection(self, nsys: Path) -> Optional[Path]:
+        """End collection. The launched cuda_burn process is left running."""
+        with self._lock:
+            if not self.collecting:
+                logger.info("nsys stop with no open collection")
+                return None
+            prefix = self.output_prefix
+            cmd = [str(nsys), "stop", f"--session={NSYS_LAUNCH_SESSION}"]
+            logger.info("Running nsys stop: %s", " ".join(cmd))
+            try:
+                proc = subprocess.run(  # nosec B603
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    timeout=120,
+                    check=False,
+                )
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                logger.error("nsys stop failed: %s", exc)
+                self.collecting = False
+                return None
+            self.collecting = False
+            if proc.returncode != 0:
+                logger.error(
+                    "nsys stop exited with code %s: %s",
+                    proc.returncode,
+                    (proc.stdout or b"")[-1000:].decode("utf-8", "replace"),
+                )
+                return None
+            if prefix is None:
+                return None
+            rep = _find_nsys_rep(prefix)
+            if rep is None:
+                logger.error("nsys stop completed but .nsys-rep not found at %s", prefix)
+            return rep
+
+
+_nsys_launch_session = NsysLaunchSession()
+
+
+def reset_nsys_launch_session() -> None:
+    """Drop session state. Tests use this; the agent process keeps one session."""
+    _nsys_launch_session.reset()
+
+
+def collect_nsys_launch_html(
+    *,
+    nsys: Path,
+    duration_sec: int,
+    workload_cmd: Optional[Sequence[str]],
+    work_dir: Path,
+    stop_event=None,
+    timeline: bool = False,
+    timeline_stacks: bool = False,
+    on_rep: Optional[Callable[[Path], None]] = None,
+    generate_html_fn: Optional[Callable[[str], Optional[str]]] = None,
+) -> Optional[str]:
+    """Open a collection on the launch session, wait, stop, and build HTML.
+
+    Each capture gets its own directory so `nsys stats` cannot skip a leftover
+    CSV from an earlier run.
+    """
+    session = _nsys_launch_session
+    if not session.ensure_launched(nsys, workload_cmd):
+        return None
+
+    from datetime import datetime
+
+    capture_dir = work_dir / datetime.now().strftime("launch_%Y%m%dT%H%M%S_%f")
+    output_prefix = capture_dir / "gprofiler_nsys_capture"
+    if not session.start_collection(nsys, output_prefix):
+        return None
+
+    duration_sec = max(1, int(duration_sec))
+    deadline = time.monotonic() + duration_sec
+    while time.monotonic() < deadline:
+        if stop_event is not None and getattr(stop_event, "is_set", lambda: False)():
+            logger.info("Stop requested; ending the open nsys collection")
+            break
+        if session.process is not None and session.process.poll() is not None:
+            logger.warning("cuda_burn exited during collection (rc=%s)", session.process.poll())
+            break
+        time.sleep(0.2)
+
+    rep = session.stop_collection(nsys)
+    if rep is None:
+        return None
+    if on_rep is not None:
+        try:
+            on_rep(rep)
+        except Exception:
+            logger.exception("on_rep callback failed; continuing with HTML generation")
+    return _html_from_rep(
+        nsys,
+        rep,
+        capture_dir,
+        timeline=timeline,
+        timeline_stacks=timeline_stacks,
+        generate_html_fn=generate_html_fn,
+    )
+
+
+def _html_from_rep(
+    nsys: Path,
+    rep: Path,
+    work_dir: Path,
+    *,
+    timeline: bool,
+    timeline_stacks: bool,
+    generate_html_fn: Optional[Callable[[str], Optional[str]]],
+) -> Optional[str]:
+    if timeline:
+        events = nsys_trace_to_timeline_events(nsys, rep, work_dir, with_stacks=timeline_stacks)
+        if events:
+            html = generate_nsys_timeline_html(events)
+            if html:
+                logger.info("Generated nsys CPU/GPU timeline HTML (%d bytes)", len(html))
+                return html
+        logger.warning("nsys timeline requested but no trace events; falling back to GPU flamegraph")
+
+    collapsed = nsys_stats_to_collapsed(nsys, rep, work_dir)
+    if not collapsed:
+        return None
+
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+
+    def _gen(collapsed_data: str) -> Optional[str]:
+        if generate_html_fn is not None:
+            return generate_html_fn(collapsed_data)
+        return generate_nsys_flamegraph_html(
+            collapsed_data,
+            now.isoformat(),
+            now.isoformat(),
+            generate_html_fn=None,
+        )
+
+    html = _gen(collapsed)
+    if html:
+        logger.info("Generated nsys GPU flamegraph HTML (%d bytes)", len(html))
+    else:
+        logger.error("Failed to generate nsys flamegraph HTML from collapsed stacks")
+    return html
 
 
 def _csv_to_collapsed(csv_text: str, frame_prefix: str) -> Optional[str]:
@@ -1170,6 +1488,7 @@ def collect_nsys_adhoc_html(
     timeline: bool = False,
     timeline_stacks: bool = False,
     on_rep: Optional[Callable[[Path], None]] = None,
+    capture_mode: str = "profile",
 ) -> Optional[str]:
     """End-to-end: find nsys → capture → collapsed → HTML. Returns HTML or None.
 
@@ -1192,8 +1511,22 @@ def collect_nsys_adhoc_html(
     logger.info("Using nsys at %s", nsys)
     base = Path(work_dir or NSYS_DATA_DIRECTORY)
     base.mkdir(parents=True, exist_ok=True)
-    prefix = base / "gprofiler_nsys_capture"
     workload_cmd = _parse_workload(workload)
+    if capture_mode == "launch":
+        return collect_nsys_launch_html(
+            nsys=nsys,
+            duration_sec=duration_sec,
+            workload_cmd=workload_cmd,
+            work_dir=base,
+            stop_event=stop_event,
+            timeline=timeline,
+            timeline_stacks=timeline_stacks,
+            on_rep=on_rep,
+            generate_html_fn=generate_html_fn,
+        )
+    if capture_mode != "profile":
+        logger.warning("Unknown nsys capture mode %r; using profile", capture_mode)
+    prefix = base / "gprofiler_nsys_capture"
 
     if workload_cmd is None:
         logger.warning(

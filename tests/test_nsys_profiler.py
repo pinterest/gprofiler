@@ -30,9 +30,11 @@ from gprofiler.nsys_profiler import (
     collect_nsys_adhoc_html,
     find_nsys,
     generate_nsys_timeline_html,
+    launch_workload_argv,
     load_callchains_from_sqlite,
     nsys_stats_to_collapsed,
     nsys_trace_to_timeline_events,
+    reset_nsys_launch_session,
     run_nsys_capture,
 )
 
@@ -460,3 +462,114 @@ def test_collect_adhoc_html_on_rep_callback(tmp_path: Path, monkeypatch):
         on_rep=boom,
     )
     assert html == "<html>ok</html>"
+
+
+class _AliveProcess:
+    def __init__(self):
+        self._rc = None
+
+    def poll(self):
+        return self._rc
+
+
+def test_launch_workload_stretches_short_cuda_burn():
+    assert launch_workload_argv(["/opt/cuda_burn", "30"]) == ["/opt/cuda_burn", "3600"]
+    assert launch_workload_argv(["/opt/cuda_burn"]) == ["/opt/cuda_burn", "3600"]
+    assert launch_workload_argv(["/opt/other", "30"]) == ["/opt/other", "30"]
+
+
+def test_launch_mode_start_stop_uses_a_fresh_output_and_leaves_the_process(tmp_path: Path, monkeypatch):
+    reset_nsys_launch_session()
+    nsys = tmp_path / "nsys"
+    nsys.write_text("#!/bin/sh\n")
+    nsys.chmod(0o755)
+    seen = []
+    proc = _AliveProcess()
+
+    def fake_popen(cmd, **kwargs):
+        seen.append(cmd)
+        assert kwargs.get("start_new_session") is True
+        return proc
+
+    def fake_run(cmd, **kwargs):
+        seen.append(list(cmd))
+        if "start" in cmd:
+            Path(str(cmd[cmd.index("-o") + 1]) + ".nsys-rep").write_bytes(b"fake")
+        elif "stats" in cmd:
+            out_prefix = Path(cmd[cmd.index("-o") + 1])
+            out_prefix.parent.mkdir(parents=True, exist_ok=True)
+            (out_prefix.parent / (out_prefix.name + "_cuda_gpu_kern_sum.csv")).write_text(KERN_CSV)
+        return mock.Mock(returncode=0, stdout=b"ok")
+
+    monkeypatch.setattr("gprofiler.nsys_profiler.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("gprofiler.nsys_profiler.subprocess.run", fake_run)
+    monkeypatch.setattr("gprofiler.nsys_profiler.find_nsys", lambda explicit_path=None: nsys)
+
+    import threading
+
+    stop = threading.Event()
+    stop.set()
+    html = collect_nsys_adhoc_html(
+        duration_sec=30,
+        workload="/tmp/cuda_burn 30",
+        work_dir=str(tmp_path / "work"),
+        stop_event=stop,
+        generate_html_fn=lambda collapsed: "<html>gpu</html>",
+        capture_mode="launch",
+    )
+    assert html == "<html>gpu</html>"
+    launch = seen[0]
+    assert launch[1] == "launch"
+    assert "--session-new=gprofiler-cuda-burn" in launch
+    assert "--trace=cuda,nvtx" in launch
+    assert launch[-1] == "3600"
+    start = next(cmd for cmd in seen if isinstance(cmd, list) and "start" in cmd)
+    assert "--session=gprofiler-cuda-burn" in start
+    assert "-s" in start and start[start.index("-s") + 1] == "none"
+    stop_cmd = next(cmd for cmd in seen if isinstance(cmd, list) and cmd[1] == "stop")
+    assert stop_cmd == [str(nsys), "stop", "--session=gprofiler-cuda-burn"]
+    assert proc.poll() is None
+
+    prefixes = [cmd[cmd.index("-o") + 1] for cmd in seen if isinstance(cmd, list) and "start" in cmd]
+    html2 = collect_nsys_adhoc_html(
+        duration_sec=30,
+        workload="/tmp/cuda_burn 30",
+        work_dir=str(tmp_path / "work"),
+        stop_event=stop,
+        generate_html_fn=lambda collapsed: "<html>gpu</html>",
+        capture_mode="launch",
+    )
+    assert html2 == "<html>gpu</html>"
+    prefixes2 = [cmd[cmd.index("-o") + 1] for cmd in seen if isinstance(cmd, list) and "start" in cmd]
+    assert prefixes2[-1] != prefixes[0]
+    assert proc.poll() is None
+    reset_nsys_launch_session()
+
+
+def test_second_start_while_collecting_is_refused(tmp_path: Path, monkeypatch):
+    reset_nsys_launch_session()
+    from gprofiler.nsys_profiler import _nsys_launch_session
+
+    nsys = tmp_path / "nsys"
+    nsys.write_text("#!/bin/sh\n")
+    nsys.chmod(0o755)
+    proc = _AliveProcess()
+    monkeypatch.setattr("gprofiler.nsys_profiler.subprocess.Popen", lambda *a, **k: proc)
+    def fake_run(cmd, **kwargs):
+        if "start" in cmd:
+            out = Path(str(cmd[cmd.index("-o") + 1]) + ".nsys-rep")
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"fake")
+        return mock.Mock(returncode=0, stdout=b"ok")
+
+    monkeypatch.setattr("gprofiler.nsys_profiler.subprocess.run", fake_run)
+    assert _nsys_launch_session.ensure_launched(nsys, ["/tmp/cuda_burn", "30"])
+    assert _nsys_launch_session.start_collection(nsys, tmp_path / "one" / "cap")
+    assert _nsys_launch_session.start_collection(nsys, tmp_path / "two" / "cap") is False
+    stopped = _nsys_launch_session.stop_collection(nsys)
+    assert stopped is not None and stopped.name.endswith(".nsys-rep")
+    assert proc.poll() is None
+    assert _nsys_launch_session.stop_collection(nsys) is None
+    proc._rc = 1
+    assert _nsys_launch_session.ensure_launched(nsys, None) is False
+    reset_nsys_launch_session()
