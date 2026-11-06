@@ -193,6 +193,7 @@ class GProfiler:
         self._nsys_timeline = bool(user_args.get("nsys_timeline", False))
         self._nsys_timeline_stacks = bool(user_args.get("nsys_timeline_stacks", False))
         self._nsys_upload_rep = bool(user_args.get("nsys_upload_rep", False))
+        self._nsys_capture_mode = user_args.get("nsys_capture_mode") or "profile"
         self._nsys_thread: Optional[threading.Thread] = None
         self._nsys_html: Optional[str] = None
         self._nsys_rep_path: Optional[Path] = None
@@ -441,6 +442,7 @@ class GProfiler:
                 timeline=self._nsys_timeline,
                 timeline_stacks=self._nsys_timeline_stacks,
                 on_rep=_keep_rep if self._nsys_upload_rep else None,
+                capture_mode=self._nsys_capture_mode,
             )
             self._nsys_html = html
         except Exception:
@@ -1449,6 +1451,16 @@ def parse_cmd_args() -> configargparse.Namespace:
         help="With --enable-nsys and --upload-results, also upload the raw .nsys-rep "
         "capture to the Performance Studio so it can be downloaded and opened in "
         "NVIDIA Nsight Systems. Reports can be large (tens to hundreds of MB).",
+    )
+    nsys_options.add_argument(
+        "--nsys-capture-mode",
+        choices=("profile", "launch"),
+        default="profile",
+        dest="nsys_capture_mode",
+        help="profile runs `nsys profile` until the workload exits. "
+        "launch starts the workload with `nsys launch` and uses `nsys start` / "
+        "`nsys stop` so the process keeps running. For cuda_burn, launch stretches "
+        "a short lifetime so later start/stop pairs still have a process.",
     )
 
     args = parser.parse_args()
