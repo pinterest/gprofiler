@@ -30,7 +30,7 @@ import shlex
 import shutil
 import subprocess  # nosec B404
 from pathlib import Path
-from typing import Callable, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -147,13 +147,16 @@ def run_nsys_capture(
         # CUDA-focused, skip heavy CPU sampling / slow symbol waits where possible.
         cmd.extend(["-s", "none"])
 
+    # Bound every session to the requested window; a long-running workload
+    # would otherwise outlive the agent's timeout and yield no report.
+    cmd.extend(["--duration", str(duration_sec)])
     workload = list(workload_cmd) if workload_cmd else None
     if workload:
         cmd.extend(workload)
     else:
-        # Duration-bounded no-op session: sleep so nsys still produces a report.
+        # No-op session: sleep so nsys still produces a report.
         # Prefer a real CUDA workload via nsys_workload for useful kern sums.
-        cmd.extend(["--duration", str(duration_sec), "sleep", str(duration_sec)])
+        cmd.extend(["sleep", str(duration_sec)])
 
     logger.info("Running nsys capture: %s", " ".join(cmd))
     timeout = duration_sec + 120
@@ -170,8 +173,10 @@ def run_nsys_capture(
         if proc.stdout:
             logger.info("nsys profile output (tail): %s", proc.stdout.decode("utf-8", "replace")[-2000:])
         if proc.returncode != 0:
-            logger.error("nsys profile exited with code %s", proc.returncode)
-            return None
+            # nsys exits with the workload's status: 143 when --duration ends it
+            # with SIGTERM, or whatever a failing workload returned. The report
+            # is still valid in both cases, so only a missing report is fatal.
+            logger.warning("nsys profile exited with code %s; using the report if one was written", proc.returncode)
     except subprocess.TimeoutExpired:
         logger.error("nsys profile timed out after %ss", timeout)
         return None
@@ -253,6 +258,10 @@ def _csv_to_collapsed(csv_text: str, frame_prefix: str) -> Optional[str]:
 
 def _export_stats_csv(nsys: Path, nsys_rep: Path, work_dir: Path, report: str, out_prefix: Path) -> Optional[str]:
     """Run `nsys stats --report=<report> --format=csv` and return the CSV text, or None."""
+    # nsys writes no CSV for a report with no rows (e.g. a capture without CUDA
+    # activity), so a previous capture's CSV would otherwise be picked up below.
+    for stale in work_dir.glob(out_prefix.name + "*.csv"):
+        stale.unlink(missing_ok=True)
     cmd = [
         str(nsys),
         "stats",
@@ -1157,6 +1166,21 @@ def generate_nsys_flamegraph_html(
     except Exception as exc:
         logger.info("burn/template HTML unavailable (%s); using simple GPU HTML fallback", exc)
         return _simple_gpu_flamegraph_html(collapsed)
+
+
+def without_nsys_perf_event_tags(metadata: Dict[str, Any]) -> Dict[str, Any]:
+    """Return metadata whose run_arguments.perf_events drops the nsys-* tags.
+
+    Studio labels an Adhoc row GPU from those tags, so an upload that fell back
+    to the CPU flamegraph must not carry them. The input is shared static
+    metadata, so it is copied rather than mutated.
+    """
+    run_args = metadata.get("run_arguments")
+    if not isinstance(run_args, dict) or not run_args.get("perf_events"):
+        return metadata
+    events = [e.strip() for e in str(run_args["perf_events"]).split(",")]
+    kept = [e for e in events if e and not e.startswith("nsys-")]
+    return {**metadata, "run_arguments": {**run_args, "perf_events": ",".join(kept)}}
 
 
 def collect_nsys_adhoc_html(

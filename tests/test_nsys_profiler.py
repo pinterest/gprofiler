@@ -25,6 +25,7 @@ import pytest
 
 from gprofiler.nsys_profiler import (
     _csv_to_collapsed,
+    _export_stats_csv,
     _parse_trace_csv,
     _workload_env,
     collect_nsys_adhoc_html,
@@ -34,6 +35,7 @@ from gprofiler.nsys_profiler import (
     nsys_stats_to_collapsed,
     nsys_trace_to_timeline_events,
     run_nsys_capture,
+    without_nsys_perf_event_tags,
 )
 
 
@@ -320,6 +322,76 @@ def test_run_nsys_capture_backtraces_flags(tmp_path: Path, monkeypatch):
     assert cmd[cmd.index("-s") + 1] == "process-tree"
     assert cmd[cmd.index("-b") + 1] == "dwarf"
     assert "--cudabacktrace=kernel" in cmd
+
+
+def test_run_nsys_capture_bounds_workload_by_duration(tmp_path: Path, monkeypatch):
+    nsys = tmp_path / "nsys"
+    seen_cmds = []
+
+    def fake_run(cmd, **kwargs):
+        seen_cmds.append(cmd)
+        Path(str(cmd[cmd.index("-o") + 1]) + ".nsys-rep").write_bytes(b"fake")
+        return mock.Mock(returncode=0, stdout=b"ok")
+
+    monkeypatch.setattr("gprofiler.nsys_profiler.subprocess.run", fake_run)
+
+    run_nsys_capture(nsys, tmp_path / "cap", duration_sec=7, workload_cmd=["/gpu/cuda_burn", "600"])
+    cmd = seen_cmds[0]
+    assert cmd[cmd.index("--duration") + 1] == "7"
+    assert cmd.index("--duration") < cmd.index("/gpu/cuda_burn")
+    assert cmd[-2:] == ["/gpu/cuda_burn", "600"]
+
+
+@pytest.mark.parametrize("returncode", [143, 3])
+def test_run_nsys_capture_keeps_report_on_workload_exit_code(tmp_path: Path, monkeypatch, returncode: int):
+    nsys = tmp_path / "nsys"
+
+    def fake_run(cmd, **kwargs):
+        Path(str(cmd[cmd.index("-o") + 1]) + ".nsys-rep").write_bytes(b"fake")
+        return mock.Mock(returncode=returncode, stdout=b"ok")
+
+    monkeypatch.setattr("gprofiler.nsys_profiler.subprocess.run", fake_run)
+
+    rep = run_nsys_capture(nsys, tmp_path / "cap", duration_sec=5)
+    assert rep == tmp_path / "cap.nsys-rep"
+
+
+def test_export_stats_csv_ignores_previous_capture_csv(tmp_path: Path, monkeypatch):
+    rep = tmp_path / "gprofiler_nsys_capture.nsys-rep"
+    rep.write_bytes(b"fake")
+    (tmp_path / "gpu_trace_cuda_gpu_trace.csv").write_text("Start (ns),Name\n1,stale_kernel\n")
+    monkeypatch.setattr(
+        "gprofiler.nsys_profiler.subprocess.run",
+        lambda cmd, **kwargs: mock.Mock(returncode=0, stdout=b"no data"),
+    )
+
+    assert _export_stats_csv(tmp_path / "nsys", rep, tmp_path, "cuda_gpu_trace", tmp_path / "gpu_trace") is None
+
+
+def test_without_nsys_perf_event_tags_copies_and_strips():
+    run_args = {"perf_events": "cycles,nsys-cuda,nsys-timeline,nsys-stacks", "enable_nsys": True}
+    metadata = {"hostname": "gpu-host", "run_arguments": run_args}
+
+    stripped = without_nsys_perf_event_tags(metadata)
+
+    assert stripped["run_arguments"]["perf_events"] == "cycles"
+    assert stripped["run_arguments"]["enable_nsys"] is True
+    assert metadata["run_arguments"]["perf_events"] == "cycles,nsys-cuda,nsys-timeline,nsys-stacks"
+
+
+@pytest.mark.parametrize("metadata", [{"hostname": "h"}, {"run_arguments": {"perf_events": None}}])
+def test_without_nsys_perf_event_tags_noop_without_events(metadata):
+    assert without_nsys_perf_event_tags(metadata) is metadata
+
+
+def test_run_nsys_capture_nonzero_without_report_fails(tmp_path: Path, monkeypatch):
+    nsys = tmp_path / "nsys"
+    monkeypatch.setattr(
+        "gprofiler.nsys_profiler.subprocess.run",
+        lambda cmd, **kwargs: mock.Mock(returncode=1, stdout=b"failed"),
+    )
+
+    assert run_nsys_capture(nsys, tmp_path / "cap", duration_sec=5) is None
 
 
 def test_nsys_trace_to_timeline_events_with_stacks(tmp_path: Path, monkeypatch):

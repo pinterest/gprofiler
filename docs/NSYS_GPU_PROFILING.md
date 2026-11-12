@@ -41,6 +41,12 @@ The backend merges that into top-level `combined_config`. Optional:
 - `nsys_path`: absolute path to `nsys`
 - `nsys_workload`: command for nsys to wrap (strongly recommended)
 
+Every capture is bounded by the request duration (`nsys profile --duration`):
+a workload still running when the window closes is stopped with SIGTERM and
+the report covers the window. nsys exits with the workload's status (143 in
+that case), so the agent keeps any report nsys wrote and only fails when none
+was written.
+
 When `enable_nsys` succeeds, the uploaded `flamegraph_html` is the **GPU**
 flamegraph (preferred over CPU). `run_arguments.perf_events` also gains
 `nsys-cuda` so the Adhoc UI can show a **GPU / nsys** chip.
@@ -141,7 +147,7 @@ in gprofiler-performance-studio).
 │  │   ① heartbeat receives adhoc profile_request                                  │  │
 │  │      { enable_nsys, nsys_workload: "python3 /gpu/torch_workload.py 30" }      │  │
 │  │   ② spawns (with _workload_env() cleaned environment):                        │  │
-│  │        nsys profile -t cuda,nvtx -s none <workload>                           │  │
+│  │        nsys profile -t cuda,nvtx -s none --duration <N> <workload>            │  │
 │  │        └─ torch dispatches cuBLAS/cutlass + ATen kernels on the GPU           │  │
 │  │   ③ nsys stats cuda_gpu_kern_sum → CSV → collapsed stacks                     │  │
 │  │   ④ collapsed → flamegraph HTML; perf_events += "nsys-cuda"                   │  │

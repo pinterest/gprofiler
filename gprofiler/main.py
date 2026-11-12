@@ -605,7 +605,10 @@ class GProfiler:
                 logger.info(f"Using nsys {kind} HTML for upload (preferred over CPU)")
                 flamegraph_html = self._nsys_html
             else:
+                from gprofiler.nsys_profiler import without_nsys_perf_event_tags
+
                 logger.warning("enable_nsys was set but no GPU HTML was produced; keeping CPU flamegraph if any")
+                metadata = without_nsys_perf_event_tags(metadata)
 
         if NoopProfiler.is_noop_profiler(self.system_profiler):
             assert system_result == {}, system_result  # should be empty!
