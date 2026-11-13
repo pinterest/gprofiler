@@ -119,7 +119,15 @@ def create_profiler_args(
             new_args.nsys_timeline = bool(combined_config.get("nsys_timeline", False))
             new_args.nsys_timeline_stacks = bool(combined_config.get("nsys_timeline_stacks", False))
             new_args.nsys_upload_rep = bool(combined_config.get("nsys_upload_rep", False))
-            logger.info(f"enable_nsys: using nsys at {found}")
+            capture_mode = combined_config.get("nsys_capture_mode") or "launch"
+            if capture_mode != "launch":
+                logger.warning("nsys_capture_mode %r is not supported; using launch", capture_mode)
+                capture_mode = "launch"
+            new_args.nsys_capture_mode = capture_mode
+            logger.info(
+                f"enable_nsys: using nsys at {found}; attaching to session gprofiler-cuda-burn "
+                f"(capture_mode={capture_mode})"
+            )
         else:
             logger.error(
                 "enable_nsys set but nsys not found on host "

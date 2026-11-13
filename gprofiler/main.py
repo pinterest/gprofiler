@@ -53,7 +53,7 @@ from gprofiler.consts import CPU_PROFILING_MODE
 from gprofiler.containers_client import ContainerNamesClient
 from gprofiler.diagnostics import log_diagnostics, set_diagnostics
 from gprofiler.dynamic_profiling_management.heartbeat import DynamicGProfilerManager, HeartbeatClient
-from gprofiler.exceptions import APIError, NoProfilersEnabledError
+from gprofiler.exceptions import APIError, NoProfilersEnabledError, StopEventSetException
 from gprofiler.gprofiler_types import (
     ProcessToProfileData,
     UserArgs,
@@ -193,6 +193,7 @@ class GProfiler:
         self._nsys_timeline = bool(user_args.get("nsys_timeline", False))
         self._nsys_timeline_stacks = bool(user_args.get("nsys_timeline_stacks", False))
         self._nsys_upload_rep = bool(user_args.get("nsys_upload_rep", False))
+        self._nsys_capture_mode = user_args.get("nsys_capture_mode") or "launch"
         self._nsys_thread: Optional[threading.Thread] = None
         self._nsys_html: Optional[str] = None
         self._nsys_rep_path: Optional[Path] = None
@@ -423,11 +424,12 @@ class GProfiler:
         try:
             from gprofiler.nsys_profiler import collect_nsys_adhoc_html
 
+            # Label the GPU flamegraph with the time actually collected. Stop
+            # Profiling can end the session before the configured duration.
+            window_start = datetime.datetime.utcnow()
+
             def _gen(collapsed: str) -> Optional[str]:
-                # Approximate window; labels only.
-                end = datetime.datetime.utcnow()
-                start = end - datetime.timedelta(seconds=self._duration)
-                return self._generate_flamegraph_html(collapsed, start, end)
+                return self._generate_flamegraph_html(collapsed, window_start, datetime.datetime.utcnow())
 
             def _keep_rep(rep: Path) -> None:
                 self._nsys_rep_path = rep
@@ -441,6 +443,7 @@ class GProfiler:
                 timeline=self._nsys_timeline,
                 timeline_stacks=self._nsys_timeline_stacks,
                 on_rep=_keep_rep if self._nsys_upload_rep else None,
+                capture_mode=self._nsys_capture_mode,
             )
             self._nsys_html = html
         except Exception:
@@ -518,6 +521,9 @@ class GProfiler:
 
         try:
             system_result = system_future.result()
+        except StopEventSetException:
+            logger.info("Profiling stopped during the snapshot; finishing the open nsys collection")
+            system_result = {}
         except Exception:
             logger.critical(
                 "Running perf failed; consider running gProfiler with '--perf-mode disabled' to avoid using perf",
@@ -1449,6 +1455,15 @@ def parse_cmd_args() -> configargparse.Namespace:
         help="With --enable-nsys and --upload-results, also upload the raw .nsys-rep "
         "capture to the Performance Studio so it can be downloaded and opened in "
         "NVIDIA Nsight Systems. Reports can be large (tens to hundreds of MB).",
+    )
+    nsys_options.add_argument(
+        "--nsys-capture-mode",
+        choices=("launch",),
+        default="launch",
+        dest="nsys_capture_mode",
+        help="Attach to the client-created nsys session gprofiler-cuda-burn. "
+        "Start Profiling runs `nsys start` for the requested duration. "
+        "Stop Profiling runs `nsys stop` early. The agent does not launch the workload.",
     )
 
     args = parser.parse_args()
