@@ -100,12 +100,14 @@ def host_nsys_argv(argv: Sequence[str]) -> List[str]:
 def _nsys_env() -> dict:
     """Environment for nsys commands that act on the client's session.
 
-    nsys looks sessions up under $TMPDIR/nvidia/nsight_systems. The client runs
-    `nsys launch` with the default /tmp, while the agent's TMPDIR points at its
-    own scratch dir (e.g. /tmp/gprofiler_tmp), so it must not leak into nsys.
+    nsys looks sessions up under its temp directory (boost temp_directory_path:
+    TMPDIR, TMP, TEMP, TEMPDIR, else /tmp). The client runs `nsys launch` with the
+    default /tmp, while the agent's environment may point these at its own scratch
+    dir (e.g. /tmp/gprofiler_tmp) or hold unrelated values, so none may leak into nsys.
     """
     env = _workload_env()
-    env.pop("TMPDIR", None)
+    for var in ("TMPDIR", "TMP", "TEMP", "TEMPDIR"):
+        env.pop(var, None)
     return env
 
 

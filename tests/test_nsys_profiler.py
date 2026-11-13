@@ -714,14 +714,17 @@ def test_host_nsys_argv_enters_host_mount_namespace_as_session_owner(monkeypatch
     ]
 
 
-def test_exec_nsys_drops_agent_tmpdir(monkeypatch):
-    # nsys finds sessions under $TMPDIR/nvidia; the agent's scratch TMPDIR would hide the client's session.
+def test_exec_nsys_drops_agent_temp_dir_vars(monkeypatch):
+    # nsys finds sessions under its temp dir; the agent's values would hide the client's session.
     from gprofiler.nsys_profiler import _exec_nsys
 
     monkeypatch.setenv("TMPDIR", "/tmp/gprofiler_tmp")
+    monkeypatch.setenv("TEMP", '{"ip": "10.1.33.0", "port": 9192}')
+    monkeypatch.setenv("TMP", "/tmp/gprofiler_tmp")
+    monkeypatch.setenv("TEMPDIR", "/tmp/gprofiler_tmp")
     monkeypatch.setattr("gprofiler.nsys_profiler._in_separate_mount_namespace", lambda: False)
     with mock.patch("gprofiler.nsys_profiler.subprocess.run") as run:
         _exec_nsys(["/usr/bin/nsys", "sessions", "list"], timeout=5)
     env = run.call_args.kwargs["env"]
-    assert "TMPDIR" not in env
+    assert not {"TMPDIR", "TMP", "TEMP", "TEMPDIR"} & env.keys()
     assert env["PATH"] == os.environ["PATH"]
