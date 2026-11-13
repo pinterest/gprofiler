@@ -28,10 +28,11 @@ from gprofiler.nsys_profiler import (
     _export_stats_csv,
     _parse_trace_csv,
     _workload_env,
+    callchains_to_collapsed,
     collect_nsys_adhoc_html,
     find_nsys,
     generate_nsys_timeline_html,
-    launch_workload_argv,
+    host_nsys_argv,
     load_callchains_from_sqlite,
     nsys_stats_to_collapsed,
     nsys_trace_to_timeline_events,
@@ -273,6 +274,22 @@ def _make_callchain_sqlite(path: Path, with_tables: bool = True) -> None:
     conn.close()
 
 
+def test_callchains_to_collapsed_nests_host_frames_over_the_kernel():
+    gpu = [{"name": "gemm_fma", "dur": 5_000_000, "corr": 101}]
+    stacks = [[
+        "cudaLaunchKernel (/usr/lib/libcudart.so)",
+        "launch_gemm_kernel (/opt/cuda_deep)",
+        "gemm_mainloop (/opt/cuda_deep)",
+        "transformer_block (/opt/cuda_deep)",
+        "train_step (/opt/cuda_deep)",
+    ]]
+    text = callchains_to_collapsed(gpu, {101: 0}, stacks)
+    assert text == (
+        "gpu;nsys;cuda_kernel;train_step;transformer_block;gemm_mainloop;"
+        "launch_gemm_kernel;gemm_fma 5000"
+    )
+
+
 def test_load_callchains_from_sqlite(tmp_path: Path):
     db = tmp_path / "cap.sqlite"
     _make_callchain_sqlite(db)
@@ -494,88 +511,75 @@ def test_nsys_trace_to_timeline_events_none_when_empty(tmp_path: Path, monkeypat
     assert nsys_trace_to_timeline_events(nsys, rep, tmp_path / "work") is None
 
 
-def test_collect_adhoc_html_on_rep_callback(tmp_path: Path, monkeypatch):
+def _install_session_nsys(tmp_path: Path, monkeypatch, seen: list):
     nsys = tmp_path / "nsys"
     nsys.write_text("#!/bin/sh\n")
     nsys.chmod(0o755)
 
     def fake_run(cmd, **kwargs):
-        if cmd[1] == "profile":
+        seen.append(list(cmd))
+        if cmd[1] == "status":
+            return mock.Mock(returncode=0, stdout=b"collecting data\n")
+        if cmd[1] == "start":
             Path(str(cmd[cmd.index("-o") + 1]) + ".nsys-rep").write_bytes(b"fake")
-            return mock.Mock(returncode=0, stdout=b"ok")
-        # nsys stats: write the kern CSV where _export_stats_csv looks for it
-        out_prefix = Path(cmd[cmd.index("-o") + 1])
-        out_prefix.parent.mkdir(parents=True, exist_ok=True)
-        (out_prefix.parent / (out_prefix.name + "_cuda_gpu_kern_sum.csv")).write_text(KERN_CSV)
+        elif cmd[1] == "stats":
+            out_prefix = Path(cmd[cmd.index("-o") + 1])
+            out_prefix.parent.mkdir(parents=True, exist_ok=True)
+            (out_prefix.parent / (out_prefix.name + "_cuda_gpu_kern_sum.csv")).write_text(KERN_CSV)
+        elif cmd[1] == "sessions":
+            return mock.Mock(
+                returncode=0,
+                stdout=b"ID TIME STATE LAUNCH NAME\n1 07:51 Collection 1 gprofiler-cuda-burn\n",
+            )
         return mock.Mock(returncode=0, stdout=b"ok")
 
     monkeypatch.setattr("gprofiler.nsys_profiler.subprocess.run", fake_run)
     monkeypatch.setattr("gprofiler.nsys_profiler.find_nsys", lambda explicit_path=None: nsys)
+    return nsys
 
+
+def test_collect_adhoc_html_on_rep_callback(tmp_path: Path, monkeypatch):
+    reset_nsys_launch_session()
+    seen = []
+    _install_session_nsys(tmp_path, monkeypatch, seen)
+
+    import threading
+
+    stop = threading.Event()
+    stop.set()
     seen_reps = []
     html = collect_nsys_adhoc_html(
-        duration_sec=1,
+        duration_sec=30,
+        workload="/tmp/cuda_burn 30",
         work_dir=str(tmp_path / "work"),
+        stop_event=stop,
         generate_html_fn=lambda collapsed: "<html>ok</html>",
         on_rep=seen_reps.append,
     )
     assert html == "<html>ok</html>"
     assert len(seen_reps) == 1
     assert seen_reps[0].name.endswith(".nsys-rep") and seen_reps[0].is_file()
+    assert not any(cmd[1] == "launch" for cmd in seen)
 
     # a failing callback must not break HTML generation
     def boom(rep: Path) -> None:
         raise RuntimeError("boom")
 
     html = collect_nsys_adhoc_html(
-        duration_sec=1,
+        duration_sec=30,
         work_dir=str(tmp_path / "work2"),
+        stop_event=stop,
         generate_html_fn=lambda collapsed: "<html>ok</html>",
         on_rep=boom,
     )
     assert html == "<html>ok</html>"
-
-
-class _AliveProcess:
-    def __init__(self):
-        self._rc = None
-
-    def poll(self):
-        return self._rc
-
-
-def test_launch_workload_stretches_short_cuda_burn():
-    assert launch_workload_argv(["/opt/cuda_burn", "30"]) == ["/opt/cuda_burn", "3600"]
-    assert launch_workload_argv(["/opt/cuda_burn"]) == ["/opt/cuda_burn", "3600"]
-    assert launch_workload_argv(["/opt/other", "30"]) == ["/opt/other", "30"]
-
-
-def test_launch_mode_start_stop_uses_a_fresh_output_and_leaves_the_process(tmp_path: Path, monkeypatch):
     reset_nsys_launch_session()
-    nsys = tmp_path / "nsys"
-    nsys.write_text("#!/bin/sh\n")
-    nsys.chmod(0o755)
+
+
+def test_start_attaches_to_the_client_session_and_stop_uses_the_same_name(tmp_path: Path, monkeypatch):
+    reset_nsys_launch_session()
     seen = []
-    proc = _AliveProcess()
-
-    def fake_popen(cmd, **kwargs):
-        seen.append(cmd)
-        assert kwargs.get("start_new_session") is True
-        return proc
-
-    def fake_run(cmd, **kwargs):
-        seen.append(list(cmd))
-        if "start" in cmd:
-            Path(str(cmd[cmd.index("-o") + 1]) + ".nsys-rep").write_bytes(b"fake")
-        elif "stats" in cmd:
-            out_prefix = Path(cmd[cmd.index("-o") + 1])
-            out_prefix.parent.mkdir(parents=True, exist_ok=True)
-            (out_prefix.parent / (out_prefix.name + "_cuda_gpu_kern_sum.csv")).write_text(KERN_CSV)
-        return mock.Mock(returncode=0, stdout=b"ok")
-
-    monkeypatch.setattr("gprofiler.nsys_profiler.subprocess.Popen", fake_popen)
-    monkeypatch.setattr("gprofiler.nsys_profiler.subprocess.run", fake_run)
-    monkeypatch.setattr("gprofiler.nsys_profiler.find_nsys", lambda explicit_path=None: nsys)
+    nsys = _install_session_nsys(tmp_path, monkeypatch, seen)
 
     import threading
 
@@ -583,38 +587,84 @@ def test_launch_mode_start_stop_uses_a_fresh_output_and_leaves_the_process(tmp_p
     stop.set()
     html = collect_nsys_adhoc_html(
         duration_sec=30,
-        workload="/tmp/cuda_burn 30",
+        workload="/tmp/cuda_deep 3600",
         work_dir=str(tmp_path / "work"),
         stop_event=stop,
         generate_html_fn=lambda collapsed: "<html>gpu</html>",
         capture_mode="launch",
     )
     assert html == "<html>gpu</html>"
-    launch = seen[0]
-    assert launch[1] == "launch"
-    assert "--session-new=gprofiler-cuda-burn" in launch
-    assert "--trace=cuda,nvtx" in launch
-    assert launch[-1] == "3600"
-    start = next(cmd for cmd in seen if isinstance(cmd, list) and "start" in cmd)
+    assert not any(cmd[1] == "launch" for cmd in seen)
+    start = next(cmd for cmd in seen if cmd[1] == "start")
     assert "--session=gprofiler-cuda-burn" in start
     assert "-s" in start and start[start.index("-s") + 1] == "none"
-    stop_cmd = next(cmd for cmd in seen if isinstance(cmd, list) and cmd[1] == "stop")
+    status = next(cmd for cmd in seen if cmd[1] == "status")
+    assert status == [str(nsys), "status", "--session=gprofiler-cuda-burn"]
+    stop_cmd = next(cmd for cmd in seen if cmd[1] == "stop")
     assert stop_cmd == [str(nsys), "stop", "--session=gprofiler-cuda-burn"]
-    assert proc.poll() is None
 
-    prefixes = [cmd[cmd.index("-o") + 1] for cmd in seen if isinstance(cmd, list) and "start" in cmd]
+    prefixes = [cmd[cmd.index("-o") + 1] for cmd in seen if cmd[1] == "start"]
     html2 = collect_nsys_adhoc_html(
         duration_sec=30,
-        workload="/tmp/cuda_burn 30",
         work_dir=str(tmp_path / "work"),
         stop_event=stop,
         generate_html_fn=lambda collapsed: "<html>gpu</html>",
         capture_mode="launch",
     )
     assert html2 == "<html>gpu</html>"
-    prefixes2 = [cmd[cmd.index("-o") + 1] for cmd in seen if isinstance(cmd, list) and "start" in cmd]
+    prefixes2 = [cmd[cmd.index("-o") + 1] for cmd in seen if cmd[1] == "start"]
     assert prefixes2[-1] != prefixes[0]
-    assert proc.poll() is None
+    reset_nsys_launch_session()
+
+
+def test_collection_waits_out_the_configured_duration(tmp_path: Path, monkeypatch):
+    reset_nsys_launch_session()
+    seen = []
+    _install_session_nsys(tmp_path, monkeypatch, seen)
+    clock = {"t": 0.0}
+    monkeypatch.setattr("gprofiler.nsys_profiler.time.monotonic", lambda: clock["t"])
+
+    def fake_sleep(seconds):
+        clock["t"] += seconds
+
+    monkeypatch.setattr("gprofiler.nsys_profiler.time.sleep", fake_sleep)
+
+    html = collect_nsys_adhoc_html(
+        duration_sec=30,
+        work_dir=str(tmp_path / "work"),
+        generate_html_fn=lambda collapsed: "<html>gpu</html>",
+    )
+    assert html == "<html>gpu</html>"
+    assert clock["t"] >= 30
+    assert not any(cmd[1] == "launch" for cmd in seen)
+    reset_nsys_launch_session()
+
+
+def test_missing_session_lists_sessions_and_does_not_launch(tmp_path: Path, monkeypatch):
+    reset_nsys_launch_session()
+    seen = []
+    nsys = tmp_path / "nsys"
+    nsys.write_text("#!/bin/sh\n")
+    nsys.chmod(0o755)
+
+    def fake_run(cmd, **kwargs):
+        seen.append(list(cmd))
+        if cmd[1] == "sessions":
+            return mock.Mock(returncode=0, stdout=b"ID TIME STATE LAUNCH NAME\n")
+        return mock.Mock(returncode=1, stdout=b"no session named gprofiler-cuda-burn")
+
+    monkeypatch.setattr("gprofiler.nsys_profiler.subprocess.run", fake_run)
+    monkeypatch.setattr("gprofiler.nsys_profiler.find_nsys", lambda explicit_path=None: nsys)
+
+    html = collect_nsys_adhoc_html(
+        duration_sec=30,
+        work_dir=str(tmp_path / "work"),
+        generate_html_fn=lambda collapsed: "<html>gpu</html>",
+    )
+    assert html is None
+    assert not any(cmd[1] == "launch" for cmd in seen)
+    assert any(cmd[1:] == ["sessions", "list"] for cmd in seen)
+    assert not any(cmd[1] == "stop" for cmd in seen)
     reset_nsys_launch_session()
 
 
@@ -622,26 +672,45 @@ def test_second_start_while_collecting_is_refused(tmp_path: Path, monkeypatch):
     reset_nsys_launch_session()
     from gprofiler.nsys_profiler import _nsys_launch_session
 
-    nsys = tmp_path / "nsys"
-    nsys.write_text("#!/bin/sh\n")
-    nsys.chmod(0o755)
-    proc = _AliveProcess()
-    monkeypatch.setattr("gprofiler.nsys_profiler.subprocess.Popen", lambda *a, **k: proc)
-    def fake_run(cmd, **kwargs):
-        if "start" in cmd:
-            out = Path(str(cmd[cmd.index("-o") + 1]) + ".nsys-rep")
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_bytes(b"fake")
-        return mock.Mock(returncode=0, stdout=b"ok")
-
-    monkeypatch.setattr("gprofiler.nsys_profiler.subprocess.run", fake_run)
-    assert _nsys_launch_session.ensure_launched(nsys, ["/tmp/cuda_burn", "30"])
+    seen = []
+    nsys = _install_session_nsys(tmp_path, monkeypatch, seen)
     assert _nsys_launch_session.start_collection(nsys, tmp_path / "one" / "cap")
     assert _nsys_launch_session.start_collection(nsys, tmp_path / "two" / "cap") is False
     stopped = _nsys_launch_session.stop_collection(nsys)
     assert stopped is not None and stopped.name.endswith(".nsys-rep")
-    assert proc.poll() is None
     assert _nsys_launch_session.stop_collection(nsys) is None
-    proc._rc = 1
-    assert _nsys_launch_session.ensure_launched(nsys, None) is False
     reset_nsys_launch_session()
+
+
+def test_idle_status_text_is_not_collecting():
+    from gprofiler.nsys_profiler import _status_is_collecting
+
+    assert _status_is_collecting("collecting data")
+    assert not _status_is_collecting("start executed. use the 'launch' command to start the collection")
+
+
+def test_host_nsys_argv_unchanged_when_mount_namespace_matches(monkeypatch):
+    monkeypatch.setattr("gprofiler.nsys_profiler._in_separate_mount_namespace", lambda: False)
+    assert host_nsys_argv(["/usr/bin/nsys", "sessions", "list"]) == ["/usr/bin/nsys", "sessions", "list"]
+
+
+def test_host_nsys_argv_enters_host_mount_namespace_as_session_owner(monkeypatch):
+    monkeypatch.setattr("gprofiler.nsys_profiler._in_separate_mount_namespace", lambda: True)
+    monkeypatch.setattr("gprofiler.nsys_profiler._host_session_owner", lambda: (24394, 100))
+    monkeypatch.setattr("gprofiler.nsys_profiler.shutil.which", lambda name: f"/usr/bin/{name}")
+    argv = host_nsys_argv(["/opt/nvidia/nsys", "start", "--session=gprofiler-cuda-burn"])
+    assert argv == [
+        "nsenter",
+        "--mount=/proc/1/ns/mnt",
+        "--",
+        "setpriv",
+        "--reuid=24394",
+        "--regid=100",
+        "--clear-groups",
+        "--",
+        "/opt/nvidia/nsys",
+        "start",
+        "--session=gprofiler-cuda-burn",
+    ]
+
+
