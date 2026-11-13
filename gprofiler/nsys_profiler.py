@@ -97,12 +97,25 @@ def host_nsys_argv(argv: Sequence[str]) -> List[str]:
     return prefix + args
 
 
+def _nsys_env() -> dict:
+    """Environment for nsys commands that act on the client's session.
+
+    nsys looks sessions up under $TMPDIR/nvidia/nsight_systems. The client runs
+    `nsys launch` with the default /tmp, while the agent's TMPDIR points at its
+    own scratch dir (e.g. /tmp/gprofiler_tmp), so it must not leak into nsys.
+    """
+    env = _workload_env()
+    env.pop("TMPDIR", None)
+    return env
+
+
 def _exec_nsys(cmd: Sequence[str], timeout: int) -> Optional[subprocess.CompletedProcess]:
     argv = host_nsys_argv(cmd)
     logger.info("Running %s", " ".join(argv))
     try:
         return subprocess.run(  # nosec B603
             argv,
+            env=_nsys_env(),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             timeout=timeout,
