@@ -36,7 +36,11 @@ from gprofiler.nsys_profiler import (
     load_callchains_from_sqlite,
     nsys_stats_to_collapsed,
     nsys_trace_to_timeline_events,
+    list_nsys_sessions,
+    parse_nsys_sessions_list,
     reset_nsys_launch_session,
+    reset_nsys_sessions_cache,
+    resolve_nsys_session_name,
     run_nsys_capture,
     without_nsys_perf_event_tags,
 )
@@ -728,3 +732,81 @@ def test_exec_nsys_drops_agent_temp_dir_vars(monkeypatch):
     env = run.call_args.kwargs["env"]
     assert not {"TMPDIR", "TMP", "TEMP", "TEMPDIR"} & env.keys()
     assert env["PATH"] == os.environ["PATH"]
+
+
+def test_parse_nsys_sessions_list_table_and_name_blocks():
+    table = "ID TIME STATE LAUNCH NAME\n1 07:51 Collection 1 gprofiler-cuda-burn\n2 08:01 Idle 1 other session\n"
+    assert parse_nsys_sessions_list(table) == [
+        {"name": "gprofiler-cuda-burn", "state": "Collection"},
+        {"name": "other session", "state": "Idle"},
+    ]
+    blocks = "Session ID: 1\nName: cuda-burn\nState: Collecting data\nName: second\nState: Idle\n"
+    assert parse_nsys_sessions_list(blocks) == [
+        {"name": "cuda-burn", "state": "Collecting"},
+        {"name": "second", "state": "Idle"},
+    ]
+    assert parse_nsys_sessions_list("") == []
+    # nsys 2025.1.3 on the host: fixed-width header, single-token STATE.
+    real = (
+        "              ID         TIME                       STATE LAUNCH NAME\n"
+        "       101971767        00:00                    Launched      1 gprofiler-dropdown-probe\n"
+    )
+    assert parse_nsys_sessions_list(real) == [{"name": "gprofiler-dropdown-probe", "state": "Launched"}]
+    assert parse_nsys_sessions_list(real.splitlines()[0]) == []
+
+
+def test_resolve_nsys_session_name_rejects_unsafe_values():
+    assert resolve_nsys_session_name(None) == "gprofiler-cuda-burn"
+    assert resolve_nsys_session_name("  cuda-burn  ") == "cuda-burn"
+    assert resolve_nsys_session_name("--session") == "gprofiler-cuda-burn"
+    assert resolve_nsys_session_name("bad\nname") == "gprofiler-cuda-burn"
+
+
+def test_list_nsys_sessions_parses_and_caches(monkeypatch):
+    reset_nsys_sessions_cache()
+    calls = []
+
+    def fake_exec(cmd, timeout):
+        calls.append(list(cmd))
+        text = "ID TIME STATE LAUNCH NAME\n1 07:51 Collection 1 gprofiler-cuda-burn\n"
+        return mock.Mock(returncode=0, stdout=text.encode())
+
+    monkeypatch.setattr("gprofiler.nsys_profiler.find_nsys", lambda explicit_path=None: Path("/usr/bin/nsys"))
+    monkeypatch.setattr("gprofiler.nsys_profiler._exec_nsys", fake_exec)
+    expected = [{"name": "gprofiler-cuda-burn", "state": "Collection"}]
+    assert list_nsys_sessions() == expected
+    assert list_nsys_sessions() == expected
+    assert calls == [["/usr/bin/nsys", "sessions", "list"]]
+    reset_nsys_sessions_cache()
+
+
+def test_list_nsys_sessions_omits_report_when_nsys_is_missing(monkeypatch):
+    reset_nsys_sessions_cache()
+    monkeypatch.setattr("gprofiler.nsys_profiler.find_nsys", lambda explicit_path=None: None)
+    assert list_nsys_sessions() is None
+    reset_nsys_sessions_cache()
+
+
+def test_start_uses_the_requested_session_name(tmp_path: Path, monkeypatch):
+    reset_nsys_launch_session()
+    seen = []
+    _install_session_nsys(tmp_path, monkeypatch, seen)
+
+    import threading
+
+    stop = threading.Event()
+    stop.set()
+    html = collect_nsys_adhoc_html(
+        duration_sec=30,
+        work_dir=str(tmp_path / "work"),
+        stop_event=stop,
+        generate_html_fn=lambda collapsed: "<html>gpu</html>",
+        session_name="other-session",
+    )
+    assert html == "<html>gpu</html>"
+    start = next(cmd for cmd in seen if "start" in cmd)
+    assert "--session=other-session" in start
+    stop_cmds = [cmd for cmd in seen if "stop" in cmd]
+    assert stop_cmds
+    assert all("--session=other-session" in cmd for cmd in stop_cmds)
+    reset_nsys_launch_session()

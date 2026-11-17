@@ -194,6 +194,7 @@ class GProfiler:
         self._nsys_timeline_stacks = bool(user_args.get("nsys_timeline_stacks", False))
         self._nsys_upload_rep = bool(user_args.get("nsys_upload_rep", False))
         self._nsys_capture_mode = user_args.get("nsys_capture_mode") or "launch"
+        self._nsys_session = user_args.get("nsys_session") or None
         self._nsys_thread: Optional[threading.Thread] = None
         self._nsys_html: Optional[str] = None
         self._nsys_rep_path: Optional[Path] = None
@@ -444,6 +445,7 @@ class GProfiler:
                 timeline_stacks=self._nsys_timeline_stacks,
                 on_rep=_keep_rep if self._nsys_upload_rep else None,
                 capture_mode=self._nsys_capture_mode,
+                session_name=self._nsys_session,
             )
             self._nsys_html = html
         except Exception:
@@ -1461,9 +1463,17 @@ def parse_cmd_args() -> configargparse.Namespace:
         choices=("launch",),
         default="launch",
         dest="nsys_capture_mode",
-        help="Attach to the client-created nsys session gprofiler-cuda-burn. "
+        help="Attach to a client-created nsys session. "
         "Start Profiling runs `nsys start` for the requested duration. "
         "Stop Profiling runs `nsys stop` early. The agent does not launch the workload.",
+    )
+    nsys_options.add_argument(
+        "--nsys-session",
+        type=str,
+        dest="nsys_session",
+        default=None,
+        help="nsys session to attach to (from `nsys sessions list`). "
+        "Default: gprofiler-cuda-burn. The client must already have created it with `nsys launch`.",
     )
 
     args = parser.parse_args()

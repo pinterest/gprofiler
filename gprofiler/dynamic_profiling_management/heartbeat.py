@@ -171,7 +171,12 @@ class HeartbeatClient:
 
     # --- Heartbeat & command lifecycle ---
 
-    def build_heartbeat_payload(self, inventory_metadata: Dict[str, Any], perf_supported_events: Any) -> Dict[str, Any]:
+    def build_heartbeat_payload(
+        self,
+        inventory_metadata: Dict[str, Any],
+        perf_supported_events: Any,
+        nsys_sessions: Any = None,
+    ) -> Dict[str, Any]:
         """Assemble one heartbeat. The inventory (``containers``) is included only when its
         digest differs from the one the server last confirmed; the digest itself always is."""
         metadata = dict(inventory_metadata)
@@ -190,6 +195,10 @@ class HeartbeatClient:
             "inventory_digest": digest,
             **metadata,
         }
+        # None means "not reported this beat" (nsys absent or `sessions list` failed).
+        # A list, including [], is a fresh report and replaces what the server stored.
+        if nsys_sessions is not None:
+            heartbeat_data["nsys_sessions"] = nsys_sessions
         if containers is not None and digest != self._acknowledged_inventory_digest:
             heartbeat_data["containers"] = containers
         return heartbeat_data
@@ -208,7 +217,16 @@ class HeartbeatClient:
         try:
             perf_supported_events = self.pmu_manager.get_supported_events()
             inventory_metadata = self.heartbeat_metadata_collector.collect()
-            heartbeat_data = self.build_heartbeat_payload(inventory_metadata, perf_supported_events)
+            nsys_sessions = None
+            try:
+                from gprofiler.nsys_profiler import list_nsys_sessions
+
+                nsys_sessions = list_nsys_sessions()
+            except Exception:
+                logger.debug("nsys sessions list failed", exc_info=True)
+            heartbeat_data = self.build_heartbeat_payload(
+                inventory_metadata, perf_supported_events, nsys_sessions=nsys_sessions
+            )
             url = f"{self.api_server}/api/metrics/heartbeat"
             response = self.session.post(url, json=heartbeat_data, timeout=30)
 

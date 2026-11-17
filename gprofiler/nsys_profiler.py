@@ -37,9 +37,14 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 logger = logging.getLogger(__name__)
 
 NSYS_DATA_DIRECTORY = "/tmp/gprofiler_nsys"
-# The client creates this session with `nsys launch`. The agent only attaches.
-# A later UI can pick a session from `nsys sessions list`; this name is fixed for now.
+# Fallback when the Performance Studio request does not name a session.
+# The client creates sessions with `nsys launch`; the agent only attaches.
 NSYS_LAUNCH_SESSION = "gprofiler-cuda-burn"
+# How long a successful `nsys sessions list` may be reused across heartbeats.
+_NSYS_SESSIONS_CACHE_SEC = 30.0
+_sessions_cache_miss = object()
+_sessions_cache: tuple = (0.0, _sessions_cache_miss)
+_sessions_cache_lock = threading.Lock()
 DEFAULT_NSYS_CANDIDATES = (
     "/usr/local/bin/nsys",
     "/opt/nvidia/nsight-systems/2025.6.1/bin/nsys",
@@ -297,6 +302,98 @@ def _nsys_text(proc: subprocess.CompletedProcess) -> str:
     return (proc.stdout or b"").decode("utf-8", "replace").strip()
 
 
+def resolve_nsys_session_name(requested: Optional[str]) -> str:
+    """Session name for `nsys start` / `nsys stop`. Empty falls back to the default."""
+    name = (requested or "").strip()
+    if not name:
+        return NSYS_LAUNCH_SESSION
+    if name.startswith("-") or any(char in name for char in "\n\r\x00"):
+        logger.error("Refusing nsys session name %r; using %s", name, NSYS_LAUNCH_SESSION)
+        return NSYS_LAUNCH_SESSION
+    return name
+
+
+def parse_nsys_sessions_list(text: str) -> List[Dict[str, str]]:
+    """Parse `nsys sessions list` into ``[{name, state}, ...]``.
+
+    The table form is ``ID TIME STATE LAUNCH NAME`` with the session name in the
+    last column (it may contain spaces). A ``Name:`` / ``State:`` dump is also
+    accepted. Lines that do not name a session are ignored.
+    """
+    sessions: List[Dict[str, str]] = []
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    if not lines:
+        return sessions
+
+    header = lines[0].split()
+    header_upper = [col.upper() for col in header]
+    if "NAME" in header_upper:
+        name_idx = header_upper.index("NAME")
+        state_idx = header_upper.index("STATE") if "STATE" in header_upper else None
+        for line in lines[1:]:
+            parts = line.split()
+            if len(parts) <= name_idx:
+                continue
+            name = " ".join(parts[name_idx:]).strip()
+            state = parts[state_idx] if state_idx is not None and len(parts) > state_idx else ""
+            if name:
+                sessions.append({"name": name, "state": state})
+        return sessions
+
+    current: Dict[str, str] = {}
+    for line in lines:
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip().lower()
+        value = value.strip()
+        if key == "name" and value:
+            if current.get("name"):
+                sessions.append({"name": current["name"], "state": current.get("state", "")})
+            current = {"name": value, "state": ""}
+        elif key == "state" and current.get("name"):
+            current["state"] = value.split()[0] if value else ""
+    if current.get("name"):
+        sessions.append({"name": current["name"], "state": current.get("state", "")})
+    return sessions
+
+
+def reset_nsys_sessions_cache() -> None:
+    """Drop the cached `nsys sessions list`. Tests use this."""
+    global _sessions_cache
+    with _sessions_cache_lock:
+        _sessions_cache = (0.0, _sessions_cache_miss)
+
+
+def list_nsys_sessions() -> Optional[List[Dict[str, str]]]:
+    """Sessions from `nsys sessions list`.
+
+    ``None`` when nsys is not installed or the list command failed — callers
+    omit the field so a previous report is kept. A list (possibly empty) means
+    nsys ran. Results are cached briefly so heartbeats do not spawn nsys every time.
+    """
+    global _sessions_cache
+    now = time.monotonic()
+    with _sessions_cache_lock:
+        cached_at, cached = _sessions_cache
+        if cached is not _sessions_cache_miss and now - cached_at < _NSYS_SESSIONS_CACHE_SEC:
+            return cached  # type: ignore[return-value]
+
+    nsys = find_nsys()
+    if nsys is None:
+        result: Optional[List[Dict[str, str]]] = None
+    else:
+        listed = _exec_nsys([str(nsys), "sessions", "list"], timeout=10)
+        if listed is None or listed.returncode != 0:
+            result = None
+        else:
+            result = parse_nsys_sessions_list(_nsys_text(listed))
+
+    with _sessions_cache_lock:
+        _sessions_cache = (time.monotonic(), result)
+    return result
+
+
 def _status_is_collecting(text: str) -> bool:
     # "collecting data" is the live state. The idle line
     # "use the 'launch' command to start the collection" must not match.
@@ -304,11 +401,12 @@ def _status_is_collecting(text: str) -> bool:
 
 
 class NsysLaunchSession:
-    """Collection open on the client-created session `gprofiler-cuda-burn`.
+    """Collection open on a client-created nsys session.
 
-    The client runs `nsys launch`. Start Profiling runs `nsys start` and holds
-    the collection open for the requested duration. Stop Profiling, or the
-    duration elapsing, runs `nsys stop`. The agent does not launch the workload.
+    The client runs `nsys launch`. Start Profiling runs `nsys start` on the
+    session named by the request and holds the collection open for the requested
+    duration. Stop Profiling, or the duration elapsing, runs `nsys stop`. The
+    agent does not launch the workload.
     """
 
     def __init__(self) -> None:
@@ -316,12 +414,14 @@ class NsysLaunchSession:
         self.collecting = False
         self.output_prefix: Optional[Path] = None
         self.backtraces = False
+        self.session_name = NSYS_LAUNCH_SESSION
 
     def reset(self) -> None:
         with self._lock:
             self.collecting = False
             self.output_prefix = None
             self.backtraces = False
+            self.session_name = NSYS_LAUNCH_SESSION
 
     def _log_sessions(self, nsys: Path) -> None:
         listed = _exec_nsys([str(nsys), "sessions", "list"], timeout=30)
@@ -329,13 +429,21 @@ class NsysLaunchSession:
             return
         logger.error("nsys sessions list (exit %s):\n%s", listed.returncode, _nsys_text(listed) or "<empty>")
 
-    def start_collection(self, nsys: Path, output_prefix: Path, backtraces: bool = False) -> bool:
-        """`nsys start --session=gprofiler-cuda-burn`, then require status to say collecting."""
+    def start_collection(
+        self,
+        nsys: Path,
+        output_prefix: Path,
+        backtraces: bool = False,
+        session_name: Optional[str] = None,
+    ) -> bool:
+        """`nsys start --session=<name>`, then require status to say collecting."""
+        name = resolve_nsys_session_name(session_name)
         with self._lock:
             if self.collecting:
                 logger.warning("nsys collection is already open; not starting another")
                 return False
             self.backtraces = backtraces
+            self.session_name = name
             output_prefix.parent.mkdir(parents=True, exist_ok=True)
             try:
                 os.chmod(output_prefix.parent, 0o1777)  # launch user writes the report via nsenter
@@ -344,7 +452,7 @@ class NsysLaunchSession:
             cmd = [
                 str(nsys),
                 "start",
-                f"--session={NSYS_LAUNCH_SESSION}",
+                f"--session={name}",
                 "-o",
                 str(output_prefix),
                 "--force-overwrite=true",
@@ -359,7 +467,7 @@ class NsysLaunchSession:
             if proc is None or proc.returncode != 0:
                 logger.error(
                     "nsys start --session=%s failed (rc=%s): %s",
-                    NSYS_LAUNCH_SESSION,
+                    name,
                     None if proc is None else proc.returncode,
                     "" if proc is None else _nsys_text(proc)[-1000:],
                 )
@@ -367,13 +475,13 @@ class NsysLaunchSession:
                 return False
             status_text = ""
             for _ in range(25):
-                status = _exec_nsys([str(nsys), "status", f"--session={NSYS_LAUNCH_SESSION}"], timeout=10)
+                status = _exec_nsys([str(nsys), "status", f"--session={name}"], timeout=10)
                 if status is not None and status.returncode == 0:
                     status_text = _nsys_text(status)
                     if _status_is_collecting(status_text):
                         logger.info(
                             "nsys status --session=%s: %s",
-                            NSYS_LAUNCH_SESSION,
+                            name,
                             status_text,
                         )
                         self.collecting = True
@@ -382,22 +490,23 @@ class NsysLaunchSession:
                 time.sleep(0.2)
             logger.error(
                 "nsys start returned but status --session=%s is not collecting (%r)",
-                NSYS_LAUNCH_SESSION,
+                name,
                 status_text,
             )
             self._log_sessions(nsys)
             # start already returned 0, so close the collection instead of leaving it open.
-            _exec_nsys([str(nsys), "stop", f"--session={NSYS_LAUNCH_SESSION}"], timeout=300)
+            _exec_nsys([str(nsys), "stop", f"--session={name}"], timeout=300)
             return False
 
     def stop_collection(self, nsys: Path) -> Optional[Path]:
-        """`nsys stop --session=gprofiler-cuda-burn`. The client's workload keeps running."""
+        """`nsys stop` the session this collection opened. The client's workload keeps running."""
         with self._lock:
             if not self.collecting:
                 logger.info("nsys stop with no open collection")
                 return None
             prefix = self.output_prefix
-            proc = _exec_nsys([str(nsys), "stop", f"--session={NSYS_LAUNCH_SESSION}"], timeout=300)
+            name = self.session_name
+            proc = _exec_nsys([str(nsys), "stop", f"--session={name}"], timeout=300)
             self.collecting = False
             if proc is None:
                 return None
@@ -434,8 +543,9 @@ def collect_nsys_launch_html(
     timeline_stacks: bool = False,
     on_rep: Optional[Callable[[Path], None]] = None,
     generate_html_fn: Optional[Callable[[str], Optional[str]]] = None,
+    session_name: Optional[str] = None,
 ) -> Optional[str]:
-    """`nsys start` the client session, hold it for duration_sec, `nsys stop`, build HTML.
+    """`nsys start` the named client session, hold it for duration_sec, `nsys stop`, build HTML.
 
     Stop Profiling sets stop_event and ends the collection early. The configured
     duration is the maximum. The client's `nsys launch` process is not ours and
@@ -450,7 +560,8 @@ def collect_nsys_launch_html(
 
     capture_dir = work_dir / datetime.now().strftime("launch_%Y%m%dT%H%M%S_%f")
     output_prefix = capture_dir / "gprofiler_nsys_capture"
-    if not session.start_collection(nsys, output_prefix, backtraces=timeline_stacks):
+    name = resolve_nsys_session_name(session_name)
+    if not session.start_collection(nsys, output_prefix, backtraces=timeline_stacks, session_name=name):
         return None
 
     duration_sec = max(1, int(duration_sec))
@@ -458,7 +569,7 @@ def collect_nsys_launch_html(
     deadline = started + duration_sec
     logger.info(
         "nsys session %s collecting for up to %ss (Stop Profiling ends it early)",
-        NSYS_LAUNCH_SESSION,
+        name,
         duration_sec,
     )
     while time.monotonic() < deadline:
@@ -466,13 +577,13 @@ def collect_nsys_launch_html(
             logger.info(
                 "Stop Profiling after %.1fs; ending nsys session %s (configured %ss)",
                 time.monotonic() - started,
-                NSYS_LAUNCH_SESSION,
+                name,
                 duration_sec,
             )
             break
         time.sleep(0.2)
     else:
-        logger.info("nsys session %s reached the configured duration %ss", NSYS_LAUNCH_SESSION, duration_sec)
+        logger.info("nsys session %s reached the configured duration %ss", name, duration_sec)
 
     rep = session.stop_collection(nsys)
     if rep is None:
@@ -1618,6 +1729,7 @@ def collect_nsys_adhoc_html(
     timeline_stacks: bool = False,
     on_rep: Optional[Callable[[Path], None]] = None,
     capture_mode: str = "launch",
+    session_name: Optional[str] = None,
 ) -> Optional[str]:
     """End-to-end: find nsys → capture → collapsed → HTML. Returns HTML or None.
 
@@ -1637,17 +1749,18 @@ def collect_nsys_adhoc_html(
         )
         return None
 
+    name = resolve_nsys_session_name(session_name)
     logger.info("Using nsys at %s", nsys)
     if workload:
         logger.info(
             "Ignoring nsys_workload %r; the client owns nsys launch. Attaching to session %s",
             workload,
-            NSYS_LAUNCH_SESSION,
+            name,
         )
     base = Path(work_dir or NSYS_DATA_DIRECTORY)
     base.mkdir(parents=True, exist_ok=True)
     if capture_mode != "launch":
-        logger.warning("nsys capture mode %r is not supported; attaching to session %s", capture_mode, NSYS_LAUNCH_SESSION)
+        logger.warning("nsys capture mode %r is not supported; attaching to session %s", capture_mode, name)
     return collect_nsys_launch_html(
         nsys=nsys,
         duration_sec=duration_sec,
@@ -1657,4 +1770,5 @@ def collect_nsys_adhoc_html(
         timeline_stacks=timeline_stacks,
         on_rep=on_rep,
         generate_html_fn=generate_html_fn,
+        session_name=name,
     )

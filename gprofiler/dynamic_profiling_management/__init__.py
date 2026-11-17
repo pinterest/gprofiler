@@ -124,8 +124,11 @@ def create_profiler_args(
                 logger.warning("nsys_capture_mode %r is not supported; using launch", capture_mode)
                 capture_mode = "launch"
             new_args.nsys_capture_mode = capture_mode
+            from gprofiler.nsys_profiler import resolve_nsys_session_name
+
+            new_args.nsys_session = resolve_nsys_session_name(combined_config.get("nsys_session"))
             logger.info(
-                f"enable_nsys: using nsys at {found}; attaching to session gprofiler-cuda-burn "
+                f"enable_nsys: using nsys at {found}; attaching to session {new_args.nsys_session} "
                 f"(capture_mode={capture_mode})"
             )
         else:
