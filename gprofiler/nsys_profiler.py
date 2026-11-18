@@ -68,6 +68,7 @@ class _NsysLaunchTarget(NamedTuple):
 
     ``exe`` is the binary path inside that process's mount namespace.
     ``foreign_mount`` means the report files are not on the agent's filesystem.
+    ``foreign_ipc`` means the session daemon's shared memory is not in the agent's IPC namespace.
     """
 
     pid: int
@@ -77,6 +78,7 @@ class _NsysLaunchTarget(NamedTuple):
     tmpdir: Optional[str]
     foreign_mount: bool
     foreign_pid: bool
+    foreign_ipc: bool
 
 
 def _in_separate_mount_namespace() -> bool:
@@ -206,6 +208,7 @@ def _launch_target_from_pid(pid: int) -> Optional[_NsysLaunchTarget]:
         tmpdir=_proc_tmpdir(pid),
         foreign_mount=_ns_differs(pid, "mnt"),
         foreign_pid=_ns_differs(pid, "pid"),
+        foreign_ipc=_ns_differs(pid, "ipc"),
     )
 
 
@@ -326,13 +329,13 @@ def _pull_launch_outputs(local_dir: Path) -> None:
 def host_nsys_argv(argv: Sequence[str]) -> List[str]:
     """Leave argv unchanged on the host.
 
-    A live ``nsys launch`` is entered with nsenter (its mount and pid namespaces)
-    and its own binary. Otherwise, in a container, enter the host mount namespace
-    as the owner of the host session directory.
+    A live ``nsys launch`` is entered with nsenter (its mount, IPC, and pid
+    namespaces) and its own binary. Otherwise, in a container, enter the host
+    mount namespace as the owner of the host session directory.
     """
     args = [str(part) for part in argv]
     target = _nsys_launch_target()
-    if target is not None and (target.foreign_mount or target.foreign_pid):
+    if target is not None and (target.foreign_mount or target.foreign_ipc or target.foreign_pid):
         if args:
             args[0] = target.exe
         if shutil.which("nsenter") is None:
@@ -340,6 +343,8 @@ def host_nsys_argv(argv: Sequence[str]) -> List[str]:
         prefix = ["nsenter", f"--target={target.pid}"]
         if target.foreign_mount:
             prefix.append("--mount")
+        if target.foreign_ipc:
+            prefix.append("--ipc")
         if target.foreign_pid:
             prefix.append("--pid")
         # --wd with no path uses the launch process cwd, which exists in that
