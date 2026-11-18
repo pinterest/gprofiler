@@ -499,6 +499,56 @@ perf record -a -g -e stalled-cycles-frontend -c 1000 -o stalls.data
 - **Branch-miss flamegraphs**: Locate unpredictable code branches
 - **Performance debugging**: Separate CPU-bound vs memory-bound bottlenecks
 
+### PMU Events Across Architectures
+
+The UI, the heartbeat and the profile metadata all use generic perf event names (`cycles`, `cache-misses`, ...).
+On startup the agent runs `perf list pmu` and resolves each generic event to the name `perf record -e` should use on
+that host (`detect_pmu_event_translations` in `gprofiler/profilers/perf_events.py`):
+
+- **x86_64 (Intel, AMD)**: the core PMU lists the generic names, which are used as is.
+- **aarch64 (`armv8_pmuv3`, e.g. AWS Graviton)**: the PMU only lists Arm event names, so the generic names are
+  translated using `ARCH_PMU_EVENT_TRANSLATIONS`:
+
+| Generic event | aarch64 event | Counts |
+|---------------|---------------|--------|
+| `cycles` | `cpu_cycles` | CPU cycles |
+| `instructions` | `inst_retired` | Instructions architecturally executed |
+| `cache-references` | `ll_cache_rd` (or `l1d_cache`) | Last-level cache reads |
+| `cache-misses` | `ll_cache_miss_rd` (or `l1d_cache_refill`) | Last-level cache read misses |
+| `branch-instructions` | `br_retired` (or `pc_write_retired`) | Branches architecturally executed |
+| `branch-misses` | `br_mis_pred` (or `br_mis_pred_retired`) | Mispredicted branches |
+| `stalled-cycles-frontend` | `stall_frontend` | Cycles with no operation issued due to the frontend |
+| `stalled-cycles-backend` | `stall_backend` | Cycles with no operation issued due to the backend |
+
+Except for the cache events, the translations follow the kernel's own generic event mapping
+(`drivers/perf/arm_pmuv3.c`), so the counts are the same as those of the generic events. For the cache events the
+kernel uses L1 data cache events, which count about one miss per load whether the data comes from L2 or from memory.
+The last-level cache events only count the loads that go to memory, like `cache-misses` on Intel, and are what the
+kernel uses for `LLC-loads` / `LLC-load-misses` on aarch64. The core's L3 events (`l3d_cache_*`) aren't used because
+they read 0 on Graviton3, whose L3 is the system-level cache outside the core. On CPUs that don't implement the
+last-level cache events, the L1 data cache events are used.
+
+Things to keep in mind when comparing hosts:
+
+- `cache-misses` doesn't count the same misses everywhere: last-level cache misses on Intel and aarch64 (reads only on
+  aarch64), L2 misses on AMD Zen.
+- Not every CPU supports every event, e.g. `stalled-cycles-backend` isn't available on AMD Zen 4.
+- PMUs have few programmable counters (6 on Graviton3). Selecting more events than counters makes perf multiplex
+  them, so each event is only counted for part of the time.
+
+#### Broader PMU event support
+
+Only the generic events above can be selected. Supporting any PMU event a host reports (e.g. `ll_cache_miss_rd` or
+`dtlb_walk` on aarch64, or vendor-specific events on Intel and AMD) requires a bigger refactor:
+
+- **Agent**: report the host's full PMU event inventory (event, PMU, description, CPU model) instead of the fixed
+  list, and accept those events in `validate_and_normalize_events`, which currently drops anything outside
+  `SUPPORTED_PMU_EVENTS`.
+- **Backend**: a table consolidating the PMU events reported per host / CPU model, replacing the
+  `supported_perf_events` array, and used to validate profiling requests.
+- **UI**: an event picker driven by that table, listing the events supported by the selected hosts with their
+  descriptions, and handling selections spanning several architectures.
+
 ## 🤔 Why These Profilers Over Alternatives?
 
 gProfiler chose specific profilers for production readiness and performance over popular alternatives:
