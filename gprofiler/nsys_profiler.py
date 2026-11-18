@@ -16,12 +16,15 @@
 """NVIDIA Nsight Systems (nsys) GPU capture helpers for adhoc flamegraphs.
 
 Host-detect only — nsys is NOT bundled with the agent (same packaging model as
-PerfSpect). See docs/NSYS_GPU_PROFILING.md.
+PerfSpect). A live ``nsys launch`` is preferred over a host install: start,
+stop, and stats run in that process's mount and pid namespace, with its
+binary and TMPDIR. See docs/NSYS_GPU_PROFILING.md.
 """
 
 from __future__ import annotations
 
 import csv
+import errno
 import glob
 import io
 import logging
@@ -32,7 +35,7 @@ import subprocess  # nosec B404
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +58,25 @@ DEFAULT_NSYS_CANDIDATES = (
 # created by `nsys launch`; its owner is the uid start/stop must assume.
 _HOST_NSYS_SESSION_DIR = "/tmp/nvidia/nsight_systems"
 _host_session_owner_cache: Optional[tuple] = None
+_launch_cache_miss = object()
+_launch_cache: tuple = (0.0, _launch_cache_miss)
+_launch_cache_lock = threading.Lock()
+
+
+class _NsysLaunchTarget(NamedTuple):
+    """A running ``nsys launch`` the agent can attach to.
+
+    ``exe`` is the binary path inside that process's mount namespace.
+    ``foreign_mount`` means the report files are not on the agent's filesystem.
+    """
+
+    pid: int
+    exe: str
+    uid: int
+    gid: int
+    tmpdir: Optional[str]
+    foreign_mount: bool
+    foreign_pid: bool
 
 
 def _in_separate_mount_namespace() -> bool:
@@ -89,9 +111,251 @@ def _host_session_owner() -> Optional[tuple]:
     return _host_session_owner_cache
 
 
+def _proc_cmdline(pid: int) -> List[str]:
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return []
+    return [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
+
+
+def _is_nsys_launch_argv(argv: Sequence[str]) -> bool:
+    if len(argv) < 2 or Path(argv[0]).name != "nsys":
+        return False
+    return "launch" in argv[1:]
+
+
+def _proc_cred(pid: int) -> Optional[tuple]:
+    """Real uid/gid of ``pid``."""
+    try:
+        text = Path(f"/proc/{pid}/status").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    uid = gid = None
+    for line in text.splitlines():
+        if line.startswith("Uid:"):
+            fields = line.split()
+            if len(fields) >= 2:
+                uid = int(fields[1])
+        elif line.startswith("Gid:"):
+            fields = line.split()
+            if len(fields) >= 2:
+                gid = int(fields[1])
+    if uid is None or gid is None:
+        return None
+    return uid, gid
+
+
+def _proc_tmpdir(pid: int) -> Optional[str]:
+    try:
+        raw = Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError as exc:
+        if exc.errno in (errno.EACCES, errno.EPERM):
+            logger.warning("cannot read /proc/%s/environ (%s); nsys session temp dir may be wrong", pid, exc)
+        return None
+    for item in raw.split(b"\0"):
+        if item.startswith(b"TMPDIR="):
+            value = item.split(b"=", 1)[1].decode("utf-8", "replace")
+            return value or None
+    return None
+
+
+def _proc_start_ticks(pid: int) -> int:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return 0
+    rest = stat.rsplit(")", 1)[-1].split()
+    # Field 22 (starttime) is the 20th field after comm.
+    if len(rest) < 20:
+        return 0
+    try:
+        return int(rest[19])
+    except ValueError:
+        return 0
+
+
+def _ns_differs(pid: int, kind: str) -> bool:
+    try:
+        return os.readlink(f"/proc/{pid}/ns/{kind}") != os.readlink(f"/proc/self/ns/{kind}")
+    except OSError:
+        return False
+
+
+def _launch_target_from_pid(pid: int) -> Optional[_NsysLaunchTarget]:
+    argv = _proc_cmdline(pid)
+    if not _is_nsys_launch_argv(argv):
+        return None
+    try:
+        exe = os.readlink(f"/proc/{pid}/exe")
+    except OSError:
+        return None
+    if exe.endswith(" (deleted)"):
+        exe = exe[: -len(" (deleted)")]
+    if Path(exe).name != "nsys":
+        return None
+    cred = _proc_cred(pid)
+    if cred is None:
+        return None
+    uid, gid = cred
+    return _NsysLaunchTarget(
+        pid=pid,
+        exe=exe,
+        uid=uid,
+        gid=gid,
+        tmpdir=_proc_tmpdir(pid),
+        foreign_mount=_ns_differs(pid, "mnt"),
+        foreign_pid=_ns_differs(pid, "pid"),
+    )
+
+
+def _scan_nsys_launch() -> Optional[_NsysLaunchTarget]:
+    """Newest ``nsys launch`` visible through the host pid namespace."""
+    best: Optional[_NsysLaunchTarget] = None
+    best_started = -1
+    found = 0
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return None
+    self_pid = os.getpid()
+    for name in entries:
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        if pid == self_pid:
+            continue
+        target = _launch_target_from_pid(pid)
+        if target is None:
+            continue
+        found += 1
+        started = _proc_start_ticks(pid)
+        if best is None or started >= best_started:
+            best = target
+            best_started = started
+    if best is not None:
+        logger.info(
+            "nsys launch pid %s exe %s uid %s tmpdir %s%s",
+            best.pid,
+            best.exe,
+            best.uid,
+            best.tmpdir or "/tmp",
+            f" ({found} launch processes; using the newest)" if found > 1 else "",
+        )
+    return best
+
+
+def _launch_target_alive(target: _NsysLaunchTarget) -> bool:
+    current = _launch_target_from_pid(target.pid)
+    return current is not None and current.exe == target.exe
+
+
+def reset_nsys_launch_target_cache() -> None:
+    """Drop the cached ``nsys launch`` lookup. Tests use this."""
+    global _launch_cache
+    with _launch_cache_lock:
+        _launch_cache = (0.0, _launch_cache_miss)
+
+
+def _nsys_launch_target() -> Optional[_NsysLaunchTarget]:
+    """``nsys launch`` to attach to. Cached briefly, same window as the session list."""
+    global _launch_cache
+    now = time.monotonic()
+    with _launch_cache_lock:
+        cached_at, cached = _launch_cache
+        fresh = cached is not _launch_cache_miss and now - cached_at < _NSYS_SESSIONS_CACHE_SEC
+    if fresh:
+        if cached is None or _launch_target_alive(cached):
+            return cached  # type: ignore[return-value]
+    found = _scan_nsys_launch()
+    with _launch_cache_lock:
+        _launch_cache = (time.monotonic(), found)
+    return found
+
+
+def _launch_fs_root() -> Optional[Path]:
+    """``/proc/<pid>/root`` when the launch process is in another mount namespace."""
+    target = _nsys_launch_target()
+    if target is None or not target.foreign_mount:
+        return None
+    root = Path(f"/proc/{target.pid}/root")
+    try:
+        if root.is_dir():
+            return root
+    except OSError:
+        return None
+    return None
+
+
+def _remote_path(local: Path) -> Optional[Path]:
+    root = _launch_fs_root()
+    if root is None or not local.is_absolute():
+        return None
+    return Path(str(root) + str(local))
+
+
+def _mkdir_in_launch_namespace(local_dir: Path) -> None:
+    """Create ``local_dir`` inside the launch mount namespace so ``nsys -o`` can write it."""
+    remote = _remote_path(local_dir)
+    if remote is None:
+        return
+    try:
+        remote.mkdir(parents=True, exist_ok=True)
+        os.chmod(remote, 0o1777)
+    except OSError:
+        logger.debug("could not create %s in the nsys launch namespace", local_dir, exc_info=True)
+
+
+def _pull_launch_outputs(local_dir: Path) -> None:
+    """Copy files nsys wrote in the launch namespace back onto the agent's filesystem."""
+    remote = _remote_path(local_dir)
+    if remote is None:
+        return
+    try:
+        if not remote.is_dir():
+            return
+        local_dir.mkdir(parents=True, exist_ok=True)
+        for src in remote.iterdir():
+            if not src.is_file():
+                continue
+            shutil.copyfile(src, local_dir / src.name)
+    except OSError:
+        logger.debug("could not copy nsys outputs from the launch namespace", exc_info=True)
+
+
 def host_nsys_argv(argv: Sequence[str]) -> List[str]:
-    """Leave argv unchanged on the host. In a container, enter the host mount namespace as the launch user."""
+    """Leave argv unchanged on the host.
+
+    A live ``nsys launch`` is entered with nsenter (its mount and pid namespaces)
+    and its own binary. Otherwise, in a container, enter the host mount namespace
+    as the owner of the host session directory.
+    """
     args = [str(part) for part in argv]
+    target = _nsys_launch_target()
+    if target is not None and (target.foreign_mount or target.foreign_pid):
+        if args:
+            args[0] = target.exe
+        if shutil.which("nsenter") is None:
+            return args
+        prefix = ["nsenter", f"--target={target.pid}"]
+        if target.foreign_mount:
+            prefix.append("--mount")
+        if target.foreign_pid:
+            prefix.append("--pid")
+        # --wd with no path uses the launch process cwd, which exists in that
+        # mount namespace. --wd=/ is opened in the agent's namespace first, so
+        # nsys then dies with current_path: No such file or directory and
+        # `sessions list` never prints the launches.
+        prefix += ["--wd", "--"]
+        if (target.uid != 0 or target.gid != 0) and shutil.which("setpriv") is not None:
+            prefix += ["setpriv", f"--reuid={target.uid}", f"--regid={target.gid}", "--clear-groups", "--"]
+        return prefix + args
+    if target is not None:
+        if args:
+            args[0] = target.exe
+        if (target.uid != 0 or target.gid != 0) and shutil.which("setpriv") is not None:
+            return ["setpriv", f"--reuid={target.uid}", f"--regid={target.gid}", "--clear-groups", "--", *args]
+        return args
     if not _in_separate_mount_namespace() or shutil.which("nsenter") is None:
         return args
     prefix = ["nsenter", "--mount=/proc/1/ns/mnt", "--"]
@@ -106,13 +370,16 @@ def _nsys_env() -> dict:
     """Environment for nsys commands that act on the client's session.
 
     nsys looks sessions up under its temp directory (boost temp_directory_path:
-    TMPDIR, TMP, TEMP, TEMPDIR, else /tmp). The client runs `nsys launch` with the
-    default /tmp, while the agent's environment may point these at its own scratch
-    dir (e.g. /tmp/gprofiler_tmp) or hold unrelated values, so none may leak into nsys.
+    TMPDIR, TMP, TEMP, TEMPDIR, else /tmp). The client's ``nsys launch`` temp dir
+    is passed through when we attach to that process. The agent's own values
+    (e.g. /tmp/gprofiler_tmp, or an unrelated TEMP) are never forwarded.
     """
     env = _workload_env()
     for var in ("TMPDIR", "TMP", "TEMP", "TEMPDIR"):
         env.pop(var, None)
+    target = _nsys_launch_target()
+    if target is not None and target.tmpdir:
+        env["TMPDIR"] = target.tmpdir
     return env
 
 
@@ -162,17 +429,35 @@ def _workload_env() -> dict:
     return env
 
 
-def find_nsys(explicit_path: Optional[str] = None) -> Optional[Path]:
-    """Locate an executable nsys binary.
+def _local_executable(raw: str) -> Optional[Path]:
+    path = Path(raw)
+    try:
+        if path.is_file() and os.access(path, os.X_OK):
+            return path.resolve() if path.exists() else path
+    except OSError:
+        return None
+    return None
 
-    Search order: explicit_path → NSYS_PATH env → PATH → common install paths.
+
+def find_nsys(explicit_path: Optional[str] = None) -> Optional[Path]:
+    """Locate an nsys binary.
+
+    Search order: explicit_path and NSYS_PATH when they exist on this filesystem,
+    then a live ``nsys launch`` (its path may exist only in that mount namespace),
+    then PATH and the usual host install directories.
     """
+    for raw in (explicit_path, os.environ.get("NSYS_PATH")):
+        if not raw:
+            continue
+        found = _local_executable(raw)
+        if found is not None:
+            return found
+
+    target = _nsys_launch_target()
+    if target is not None:
+        return Path(target.exe)
+
     candidates: List[str] = []
-    if explicit_path:
-        candidates.append(explicit_path)
-    env_path = os.environ.get("NSYS_PATH")
-    if env_path:
-        candidates.append(env_path)
     which = shutil.which("nsys")
     if which:
         candidates.append(which)
@@ -187,13 +472,9 @@ def find_nsys(explicit_path: Optional[str] = None) -> Optional[Path]:
         if not raw or raw in seen:
             continue
         seen.add(raw)
-        path = Path(raw)
-        try:
-            if path.is_file() and os.access(path, os.X_OK):
-                # Resolve symlinks for logging, but return the usable path.
-                return path.resolve() if path.exists() else path
-        except OSError:
-            continue
+        found = _local_executable(raw)
+        if found is not None:
+            return found
     return None
 
 
@@ -449,6 +730,9 @@ class NsysLaunchSession:
                 os.chmod(output_prefix.parent, 0o1777)  # launch user writes the report via nsenter
             except OSError:
                 pass
+            # The same path has to exist in the launch mount namespace: nsys -o
+            # resolves there, not on the agent's filesystem.
+            _mkdir_in_launch_namespace(output_prefix.parent)
             cmd = [
                 str(nsys),
                 "start",
@@ -519,6 +803,7 @@ class NsysLaunchSession:
                 return None
             if prefix is None:
                 return None
+            _pull_launch_outputs(prefix.parent)
             rep = _find_nsys_rep(prefix)
             if rep is None:
                 logger.error("nsys stop completed but .nsys-rep not found at %s", prefix)
@@ -733,6 +1018,8 @@ def _export_stats_csv(nsys: Path, nsys_rep: Path, work_dir: Path, report: str, o
     proc = _exec_nsys(cmd, timeout=120)
     if proc is None:
         return None
+    _pull_launch_outputs(work_dir)
+    _pull_launch_outputs(nsys_rep.parent)
     if proc.returncode != 0:
         logger.warning(
             "nsys stats %s failed (rc=%s): %s",
@@ -967,6 +1254,7 @@ def nsys_export_sqlite(nsys: Path, nsys_rep: Path, work_dir: Path) -> Optional[P
         str(nsys_rep),
     ]
     proc = _exec_nsys(cmd, timeout=300)
+    _pull_launch_outputs(work_dir)
     if proc is None or proc.returncode != 0:
         if proc is not None:
             logger.warning(

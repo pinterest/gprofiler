@@ -24,9 +24,11 @@ from unittest import mock
 import pytest
 
 from gprofiler.nsys_profiler import (
+    _NsysLaunchTarget,
     _csv_to_collapsed,
     _export_stats_csv,
     _parse_trace_csv,
+    _pull_launch_outputs,
     _workload_env,
     callchains_to_collapsed,
     collect_nsys_adhoc_html,
@@ -695,11 +697,13 @@ def test_idle_status_text_is_not_collecting():
 
 def test_host_nsys_argv_unchanged_when_mount_namespace_matches(monkeypatch):
     monkeypatch.setattr("gprofiler.nsys_profiler._in_separate_mount_namespace", lambda: False)
+    monkeypatch.setattr("gprofiler.nsys_profiler._nsys_launch_target", lambda: None)
     assert host_nsys_argv(["/usr/bin/nsys", "sessions", "list"]) == ["/usr/bin/nsys", "sessions", "list"]
 
 
 def test_host_nsys_argv_enters_host_mount_namespace_as_session_owner(monkeypatch):
     monkeypatch.setattr("gprofiler.nsys_profiler._in_separate_mount_namespace", lambda: True)
+    monkeypatch.setattr("gprofiler.nsys_profiler._nsys_launch_target", lambda: None)
     monkeypatch.setattr("gprofiler.nsys_profiler._host_session_owner", lambda: (24394, 100))
     monkeypatch.setattr("gprofiler.nsys_profiler.shutil.which", lambda name: f"/usr/bin/{name}")
     argv = host_nsys_argv(["/opt/nvidia/nsys", "start", "--session=gprofiler-cuda-burn"])
@@ -727,11 +731,117 @@ def test_exec_nsys_drops_agent_temp_dir_vars(monkeypatch):
     monkeypatch.setenv("TMP", "/tmp/gprofiler_tmp")
     monkeypatch.setenv("TEMPDIR", "/tmp/gprofiler_tmp")
     monkeypatch.setattr("gprofiler.nsys_profiler._in_separate_mount_namespace", lambda: False)
+    monkeypatch.setattr("gprofiler.nsys_profiler._nsys_launch_target", lambda: None)
     with mock.patch("gprofiler.nsys_profiler.subprocess.run") as run:
         _exec_nsys(["/usr/bin/nsys", "sessions", "list"], timeout=5)
     env = run.call_args.kwargs["env"]
     assert not {"TMPDIR", "TMP", "TEMP", "TEMPDIR"} & env.keys()
     assert env["PATH"] == os.environ["PATH"]
+
+
+def _launch_target(**overrides) -> _NsysLaunchTarget:
+    fields = dict(
+        pid=4242,
+        exe="/nsys/nsys",
+        uid=0,
+        gid=0,
+        tmpdir="/nsys/tmp",
+        foreign_mount=True,
+        foreign_pid=True,
+    )
+    fields.update(overrides)
+    return _NsysLaunchTarget(**fields)
+
+
+def test_is_nsys_launch_argv_matches_launch_only():
+    from gprofiler.nsys_profiler import _is_nsys_launch_argv
+
+    assert _is_nsys_launch_argv(["/nsys/pkg/opt/nvidia/nsight-systems/2026.3.2/bin/nsys", "launch", "--session-new=p2p"])
+    assert not _is_nsys_launch_argv(["/usr/bin/nsys", "profile", "-t", "cuda"])
+    assert not _is_nsys_launch_argv(["/bin/bash", "-c", "nsys launch"])
+    assert not _is_nsys_launch_argv(["nsys"])
+
+
+def test_host_nsys_argv_enters_launch_namespace(monkeypatch):
+    monkeypatch.setattr("gprofiler.nsys_profiler._nsys_launch_target", lambda: _launch_target())
+    monkeypatch.setattr("gprofiler.nsys_profiler.shutil.which", lambda name: f"/usr/bin/{name}")
+    argv = host_nsys_argv(["/opt/nvidia/nsys", "sessions", "list"])
+    assert argv == [
+        "nsenter",
+        "--target=4242",
+        "--mount",
+        "--pid",
+        "--wd",
+        "--",
+        "/nsys/nsys",
+        "sessions",
+        "list",
+    ]
+
+
+def test_host_nsys_argv_setpriv_inside_launch_namespace(monkeypatch):
+    monkeypatch.setattr(
+        "gprofiler.nsys_profiler._nsys_launch_target",
+        lambda: _launch_target(uid=1000, gid=1000),
+    )
+    monkeypatch.setattr("gprofiler.nsys_profiler.shutil.which", lambda name: f"/usr/bin/{name}")
+    argv = host_nsys_argv(["/opt/nvidia/nsys", "start", "--session=p2p"])
+    assert argv[:6] == ["nsenter", "--target=4242", "--mount", "--pid", "--wd", "--"]
+    assert argv[6:] == [
+        "setpriv",
+        "--reuid=1000",
+        "--regid=1000",
+        "--clear-groups",
+        "--",
+        "/nsys/nsys",
+        "start",
+        "--session=p2p",
+    ]
+
+
+def test_exec_nsys_passes_launch_tmpdir(monkeypatch):
+    from gprofiler.nsys_profiler import _exec_nsys
+
+    monkeypatch.setenv("TMPDIR", "/tmp/gprofiler_tmp")
+    monkeypatch.setenv("TEMP", '{"ip": "10.1.33.0", "port": 9192}')
+    monkeypatch.setattr(
+        "gprofiler.nsys_profiler._nsys_launch_target",
+        lambda: _launch_target(foreign_mount=False, foreign_pid=False),
+    )
+    with mock.patch("gprofiler.nsys_profiler.subprocess.run") as run:
+        _exec_nsys(["/usr/bin/nsys", "sessions", "list"], timeout=5)
+    env = run.call_args.kwargs["env"]
+    assert env["TMPDIR"] == "/nsys/tmp"
+    assert "TEMP" not in env
+    assert run.call_args.args[0][0] == "/nsys/nsys"
+
+
+def test_find_nsys_prefers_explicit_over_launch_process(monkeypatch, tmp_path: Path):
+    fake = tmp_path / "nsys"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+    monkeypatch.delenv("NSYS_PATH", raising=False)
+    monkeypatch.setattr("gprofiler.nsys_profiler._nsys_launch_target", lambda: _launch_target())
+    found = find_nsys(str(fake))
+    assert found == fake.resolve()
+
+
+def test_find_nsys_uses_launch_exe_when_host_binary_missing(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.delenv("NSYS_PATH", raising=False)
+    monkeypatch.setattr("gprofiler.nsys_profiler._nsys_launch_target", lambda: _launch_target())
+    assert find_nsys(None) == Path("/nsys/nsys")
+
+
+def test_pull_launch_outputs_copies_report(tmp_path: Path, monkeypatch):
+    local_dir = tmp_path / "agent" / "launch_1"
+    root = tmp_path / "root"
+    remote = Path(str(root) + str(local_dir))
+    remote.mkdir(parents=True)
+    (remote / "gprofiler_nsys_capture.nsys-rep").write_bytes(b"rep")
+    monkeypatch.setattr("gprofiler.nsys_profiler._launch_fs_root", lambda: root)
+    _pull_launch_outputs(local_dir)
+    assert (local_dir / "gprofiler_nsys_capture.nsys-rep").read_bytes() == b"rep"
 
 
 def test_parse_nsys_sessions_list_table_and_name_blocks():
