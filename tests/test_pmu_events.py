@@ -52,6 +52,7 @@ ARM_PERF_LIST_PMU = """\
   l1d_cache OR armv8_pmuv3_0/l1d_cache/              [Kernel PMU event]
   l1d_cache_refill OR armv8_pmuv3_0/l1d_cache_refill/[Kernel PMU event]
   ll_cache_miss_rd OR armv8_pmuv3_0/ll_cache_miss_rd/[Kernel PMU event]
+  ll_cache_rd OR armv8_pmuv3_0/ll_cache_rd/          [Kernel PMU event]
   stall_backend OR armv8_pmuv3_0/stall_backend/      [Kernel PMU event]
   stall_frontend OR armv8_pmuv3_0/stall_frontend/    [Kernel PMU event]
 """
@@ -75,8 +76,8 @@ retired:
 ARM_TRANSLATIONS = {
     "cycles": "cpu_cycles",
     "instructions": "inst_retired",
-    "cache-references": "l1d_cache",
-    "cache-misses": "l1d_cache_refill",
+    "cache-references": "ll_cache_rd",
+    "cache-misses": "ll_cache_miss_rd",
     "branch-instructions": "br_retired",
     "branch-misses": "br_mis_pred",
     "stalled-cycles-frontend": "stall_frontend",
@@ -113,6 +114,18 @@ def test_aarch64_translates_to_arch_names(monkeypatch: pytest.MonkeyPatch) -> No
 
     assert perf_events.detect_pmu_event_translations("perf") == ARM_TRANSLATIONS
     assert perf_events.detect_supported_pmu_events("perf") == sorted(ARM_TRANSLATIONS)
+
+
+def test_aarch64_cache_events_fall_back_to_l1(monkeypatch: pytest.MonkeyPatch) -> None:
+    without_ll_cache = "".join(
+        line for line in ARM_PERF_LIST_PMU.splitlines(keepends=True) if not line.strip().startswith("ll_cache")
+    )
+    _mock_perf_list(monkeypatch, "aarch64", without_ll_cache)
+
+    translations = perf_events.detect_pmu_event_translations("perf")
+
+    assert translations["cache-references"] == "l1d_cache"
+    assert translations["cache-misses"] == "l1d_cache_refill"
 
 
 def test_aarch64_parses_categorized_output(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -63,13 +63,15 @@ CANONICAL_PMU_EVENTS = [event for event in SUPPORTED_PMU_EVENTS if event not in 
 # exposes its own event names (cpu_cycles, inst_retired, ...).
 # Candidates are in order of preference and follow the kernel's generic event mapping
 # (drivers/perf/arm_pmuv3.c), so counts are identical to those of the generic event.
-# Note that on aarch64 the cache events count L1 data cache activity, not last-level cache.
+# The exception is the cache events: the kernel maps them to L1 data cache events, which count
+# L2 hits as misses. They use the last-level cache events instead (which the kernel uses for
+# LLC-loads / LLC-load-misses), as on Intel, falling back to L1 on CPUs that don't implement them.
 ARCH_PMU_EVENT_TRANSLATIONS: Dict[str, Dict[str, List[str]]] = {
     "aarch64": {
         "cycles": ["cpu_cycles"],
         "instructions": ["inst_retired"],
-        "cache-references": ["l1d_cache"],
-        "cache-misses": ["l1d_cache_refill"],
+        "cache-references": ["ll_cache_rd", "l1d_cache"],
+        "cache-misses": ["ll_cache_miss_rd", "l1d_cache_refill"],
         "branch-instructions": ["br_retired", "pc_write_retired"],
         "branch-misses": ["br_mis_pred", "br_mis_pred_retired"],
         "stalled-cycles-frontend": ["stall_frontend"],

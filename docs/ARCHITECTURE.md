@@ -513,17 +513,25 @@ that host (`detect_pmu_event_translations` in `gprofiler/profilers/perf_events.p
 |---------------|---------------|--------|
 | `cycles` | `cpu_cycles` | CPU cycles |
 | `instructions` | `inst_retired` | Instructions architecturally executed |
-| `cache-references` | `l1d_cache` | L1 data cache accesses |
-| `cache-misses` | `l1d_cache_refill` | L1 data cache refills |
+| `cache-references` | `ll_cache_rd` (or `l1d_cache`) | Last-level cache reads |
+| `cache-misses` | `ll_cache_miss_rd` (or `l1d_cache_refill`) | Last-level cache read misses |
 | `branch-instructions` | `br_retired` (or `pc_write_retired`) | Branches architecturally executed |
 | `branch-misses` | `br_mis_pred` (or `br_mis_pred_retired`) | Mispredicted branches |
 | `stalled-cycles-frontend` | `stall_frontend` | Cycles with no operation issued due to the frontend |
 | `stalled-cycles-backend` | `stall_backend` | Cycles with no operation issued due to the backend |
 
-The translations follow the kernel's own generic event mapping (`drivers/perf/arm_pmuv3.c`), so the counts are the
-same as those of the generic events. Things to keep in mind when comparing hosts:
+Except for the cache events, the translations follow the kernel's own generic event mapping
+(`drivers/perf/arm_pmuv3.c`), so the counts are the same as those of the generic events. For the cache events the
+kernel uses L1 data cache events, which count about one miss per load whether the data comes from L2 or from memory.
+The last-level cache events only count the loads that go to memory, like `cache-misses` on Intel, and are what the
+kernel uses for `LLC-loads` / `LLC-load-misses` on aarch64. The core's L3 events (`l3d_cache_*`) aren't used because
+they read 0 on Graviton3, whose L3 is the system-level cache outside the core. On CPUs that don't implement the
+last-level cache events, the L1 data cache events are used.
 
-- On aarch64 the cache events count L1 data cache activity, while on Intel they count last-level cache activity.
+Things to keep in mind when comparing hosts:
+
+- `cache-misses` doesn't count the same misses everywhere: last-level cache misses on Intel and aarch64 (reads only on
+  aarch64), L2 misses on AMD Zen.
 - Not every CPU supports every event, e.g. `stalled-cycles-backend` isn't available on AMD Zen 4.
 - PMUs have few programmable counters (6 on Graviton3). Selecting more events than counters makes perf multiplex
   them, so each event is only counted for part of the time.
