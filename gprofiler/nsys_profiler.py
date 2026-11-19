@@ -16,12 +16,15 @@
 """NVIDIA Nsight Systems (nsys) GPU capture helpers for adhoc flamegraphs.
 
 Host-detect only — nsys is NOT bundled with the agent (same packaging model as
-PerfSpect). See docs/NSYS_GPU_PROFILING.md.
+PerfSpect). A live ``nsys launch`` is preferred over a host install: start,
+stop, and stats run in that process's mount and pid namespace, with its
+binary and TMPDIR. See docs/NSYS_GPU_PROFILING.md.
 """
 
 from __future__ import annotations
 
 import csv
+import errno
 import glob
 import io
 import logging
@@ -29,18 +32,389 @@ import os
 import shlex
 import shutil
 import subprocess  # nosec B404
+import threading
+import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
 NSYS_DATA_DIRECTORY = "/tmp/gprofiler_nsys"
+# Fallback when the Performance Studio request does not name a session.
+# The client creates sessions with `nsys launch`; the agent only attaches.
+NSYS_LAUNCH_SESSION = "gprofiler-cuda-burn"
+# `nsys stats --force-export` and `nsys export` convert the whole report to SQLite.
+# A 5s capture of a busy model server (78 MB, 2.8M events) takes over 3 minutes.
+NSYS_EXPORT_TIMEOUT_SEC = 900
+# How long a successful `nsys sessions list` may be reused across heartbeats.
+_NSYS_SESSIONS_CACHE_SEC = 30.0
+_sessions_cache_miss = object()
+_sessions_cache: tuple = (0.0, _sessions_cache_miss)
+_sessions_cache_lock = threading.Lock()
 DEFAULT_NSYS_CANDIDATES = (
     "/usr/local/bin/nsys",
     "/opt/nvidia/nsight-systems/2025.6.1/bin/nsys",
     "/opt/nvidia/nsight-systems/2025.5.1/bin/nsys",
     "/opt/nvidia/nsight-systems/2024.6.2/bin/nsys",
 )
+# Host nsys sessions are per mount-namespace and per uid. The session dir is
+# created by `nsys launch`; its owner is the uid start/stop must assume.
+_HOST_NSYS_SESSION_DIR = "/tmp/nvidia/nsight_systems"
+_host_session_owner_cache: Optional[tuple] = None
+_launch_cache_miss = object()
+_launch_cache: tuple = (0.0, _launch_cache_miss)
+_launch_cache_lock = threading.Lock()
+
+
+class _NsysLaunchTarget(NamedTuple):
+    """A running ``nsys launch`` the agent can attach to.
+
+    ``exe`` is the binary path inside that process's mount namespace.
+    ``foreign_mount`` means the report files are not on the agent's filesystem.
+    ``foreign_ipc`` means the session daemon's shared memory is not in the agent's IPC namespace.
+    ``foreign_net`` means the session agent's TCP listener is not on the agent's localhost.
+    """
+
+    pid: int
+    exe: str
+    uid: int
+    gid: int
+    tmpdir: Optional[str]
+    foreign_mount: bool
+    foreign_pid: bool
+    foreign_ipc: bool
+    foreign_net: bool = False
+
+
+def _in_separate_mount_namespace() -> bool:
+    try:
+        return os.readlink("/proc/self/ns/mnt") != os.readlink("/proc/1/ns/mnt")
+    except OSError:
+        return False
+
+
+def _host_session_owner() -> Optional[tuple]:
+    """Uid/gid of the host nsys session dir. Successful lookups are cached."""
+    global _host_session_owner_cache
+    if _host_session_owner_cache is not None:
+        return _host_session_owner_cache
+    try:
+        proc = subprocess.run(  # nosec B603
+            ["nsenter", "--mount=/proc/1/ns/mnt", "--", "stat", "-c", "%u %g", _HOST_NSYS_SESSION_DIR],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    parts = (proc.stdout or b"").split()
+    if proc.returncode != 0 or len(parts) != 2:
+        return None
+    try:
+        _host_session_owner_cache = (int(parts[0]), int(parts[1]))
+    except ValueError:
+        return None
+    return _host_session_owner_cache
+
+
+def _proc_cmdline(pid: int) -> List[str]:
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return []
+    return [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
+
+
+def _is_nsys_launch_argv(argv: Sequence[str]) -> bool:
+    if len(argv) < 2 or Path(argv[0]).name != "nsys":
+        return False
+    return "launch" in argv[1:]
+
+
+def _proc_cred(pid: int) -> Optional[tuple]:
+    """Real uid/gid of ``pid``."""
+    try:
+        text = Path(f"/proc/{pid}/status").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    uid = gid = None
+    for line in text.splitlines():
+        if line.startswith("Uid:"):
+            fields = line.split()
+            if len(fields) >= 2:
+                uid = int(fields[1])
+        elif line.startswith("Gid:"):
+            fields = line.split()
+            if len(fields) >= 2:
+                gid = int(fields[1])
+    if uid is None or gid is None:
+        return None
+    return uid, gid
+
+
+def _proc_tmpdir(pid: int) -> Optional[str]:
+    try:
+        raw = Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError as exc:
+        if exc.errno in (errno.EACCES, errno.EPERM):
+            logger.warning("cannot read /proc/%s/environ (%s); nsys session temp dir may be wrong", pid, exc)
+        return None
+    for item in raw.split(b"\0"):
+        if item.startswith(b"TMPDIR="):
+            value = item.split(b"=", 1)[1].decode("utf-8", "replace")
+            return value or None
+    return None
+
+
+def _proc_start_ticks(pid: int) -> int:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return 0
+    rest = stat.rsplit(")", 1)[-1].split()
+    # Field 22 (starttime) is the 20th field after comm.
+    if len(rest) < 20:
+        return 0
+    try:
+        return int(rest[19])
+    except ValueError:
+        return 0
+
+
+def _ns_differs(pid: int, kind: str) -> bool:
+    try:
+        return os.readlink(f"/proc/{pid}/ns/{kind}") != os.readlink(f"/proc/self/ns/{kind}")
+    except OSError:
+        return False
+
+
+def _launch_target_from_pid(pid: int) -> Optional[_NsysLaunchTarget]:
+    argv = _proc_cmdline(pid)
+    if not _is_nsys_launch_argv(argv):
+        return None
+    try:
+        exe = os.readlink(f"/proc/{pid}/exe")
+    except OSError:
+        return None
+    if exe.endswith(" (deleted)"):
+        exe = exe[: -len(" (deleted)")]
+    if Path(exe).name != "nsys":
+        return None
+    cred = _proc_cred(pid)
+    if cred is None:
+        return None
+    uid, gid = cred
+    return _NsysLaunchTarget(
+        pid=pid,
+        exe=exe,
+        uid=uid,
+        gid=gid,
+        tmpdir=_proc_tmpdir(pid),
+        foreign_mount=_ns_differs(pid, "mnt"),
+        foreign_pid=_ns_differs(pid, "pid"),
+        foreign_ipc=_ns_differs(pid, "ipc"),
+        foreign_net=_ns_differs(pid, "net"),
+    )
+
+
+def _scan_nsys_launch() -> Optional[_NsysLaunchTarget]:
+    """Newest ``nsys launch`` visible through the host pid namespace."""
+    best: Optional[_NsysLaunchTarget] = None
+    best_started = -1
+    found = 0
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return None
+    self_pid = os.getpid()
+    for name in entries:
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        if pid == self_pid:
+            continue
+        target = _launch_target_from_pid(pid)
+        if target is None:
+            continue
+        found += 1
+        started = _proc_start_ticks(pid)
+        if best is None or started >= best_started:
+            best = target
+            best_started = started
+    if best is not None:
+        logger.info(
+            "nsys launch pid %s exe %s uid %s tmpdir %s%s",
+            best.pid,
+            best.exe,
+            best.uid,
+            best.tmpdir or "/tmp",
+            f" ({found} launch processes; using the newest)" if found > 1 else "",
+        )
+    return best
+
+
+def _launch_target_alive(target: _NsysLaunchTarget) -> bool:
+    current = _launch_target_from_pid(target.pid)
+    return current is not None and current.exe == target.exe
+
+
+def reset_nsys_launch_target_cache() -> None:
+    """Drop the cached ``nsys launch`` lookup. Tests use this."""
+    global _launch_cache
+    with _launch_cache_lock:
+        _launch_cache = (0.0, _launch_cache_miss)
+
+
+def _nsys_launch_target() -> Optional[_NsysLaunchTarget]:
+    """``nsys launch`` to attach to. Cached briefly, same window as the session list."""
+    global _launch_cache
+    now = time.monotonic()
+    with _launch_cache_lock:
+        cached_at, cached = _launch_cache
+        fresh = cached is not _launch_cache_miss and now - cached_at < _NSYS_SESSIONS_CACHE_SEC
+    if fresh:
+        if cached is None or _launch_target_alive(cached):
+            return cached  # type: ignore[return-value]
+    found = _scan_nsys_launch()
+    with _launch_cache_lock:
+        _launch_cache = (time.monotonic(), found)
+    return found
+
+
+def _launch_fs_root() -> Optional[Path]:
+    """``/proc/<pid>/root`` when the launch process is in another mount namespace."""
+    target = _nsys_launch_target()
+    if target is None or not target.foreign_mount:
+        return None
+    root = Path(f"/proc/{target.pid}/root")
+    try:
+        if root.is_dir():
+            return root
+    except OSError:
+        return None
+    return None
+
+
+def _remote_path(local: Path) -> Optional[Path]:
+    root = _launch_fs_root()
+    if root is None or not local.is_absolute():
+        return None
+    return Path(str(root) + str(local))
+
+
+def _mkdir_in_launch_namespace(local_dir: Path) -> None:
+    """Create ``local_dir`` inside the launch mount namespace so ``nsys -o`` can write it."""
+    remote = _remote_path(local_dir)
+    if remote is None:
+        return
+    try:
+        remote.mkdir(parents=True, exist_ok=True)
+        os.chmod(remote, 0o1777)
+    except OSError:
+        logger.debug("could not create %s in the nsys launch namespace", local_dir, exc_info=True)
+
+
+def _pull_launch_outputs(local_dir: Path) -> None:
+    """Copy files nsys wrote in the launch namespace back onto the agent's filesystem."""
+    remote = _remote_path(local_dir)
+    if remote is None:
+        return
+    try:
+        if not remote.is_dir():
+            return
+        local_dir.mkdir(parents=True, exist_ok=True)
+        for src in remote.iterdir():
+            if not src.is_file():
+                continue
+            shutil.copyfile(src, local_dir / src.name)
+    except OSError:
+        logger.debug("could not copy nsys outputs from the launch namespace", exc_info=True)
+
+
+def host_nsys_argv(argv: Sequence[str]) -> List[str]:
+    """Leave argv unchanged on the host.
+
+    A live ``nsys launch`` is entered with nsenter (its mount, IPC, network, and
+    pid namespaces) and its own binary. Otherwise, in a container, enter the host
+    mount namespace as the owner of the host session directory.
+    """
+    args = [str(part) for part in argv]
+    target = _nsys_launch_target()
+    if target is not None and (
+        target.foreign_mount or target.foreign_ipc or target.foreign_net or target.foreign_pid
+    ):
+        if args:
+            args[0] = target.exe
+        if shutil.which("nsenter") is None:
+            return args
+        prefix = ["nsenter", f"--target={target.pid}"]
+        if target.foreign_mount:
+            prefix.append("--mount")
+        if target.foreign_ipc:
+            prefix.append("--ipc")
+        # `nsys start` connects to the session agent over TCP on localhost; from
+        # the host network namespace that is refused.
+        if target.foreign_net:
+            prefix.append("--net")
+        if target.foreign_pid:
+            prefix.append("--pid")
+        # --wd with no path uses the launch process cwd, which exists in that
+        # mount namespace. --wd=/ is opened in the agent's namespace first, so
+        # nsys then dies with current_path: No such file or directory and
+        # `sessions list` never prints the launches.
+        prefix += ["--wd", "--"]
+        if (target.uid != 0 or target.gid != 0) and shutil.which("setpriv") is not None:
+            prefix += ["setpriv", f"--reuid={target.uid}", f"--regid={target.gid}", "--clear-groups", "--"]
+        return prefix + args
+    if target is not None:
+        if args:
+            args[0] = target.exe
+        if (target.uid != 0 or target.gid != 0) and shutil.which("setpriv") is not None:
+            return ["setpriv", f"--reuid={target.uid}", f"--regid={target.gid}", "--clear-groups", "--", *args]
+        return args
+    if not _in_separate_mount_namespace() or shutil.which("nsenter") is None:
+        return args
+    prefix = ["nsenter", "--mount=/proc/1/ns/mnt", "--"]
+    owner = _host_session_owner() if shutil.which("setpriv") else None
+    if owner is not None:
+        uid, gid = owner
+        prefix += ["setpriv", f"--reuid={uid}", f"--regid={gid}", "--clear-groups", "--"]
+    return prefix + args
+
+
+def _nsys_env() -> dict:
+    """Environment for nsys commands that act on the client's session.
+
+    nsys looks sessions up under its temp directory (boost temp_directory_path:
+    TMPDIR, TMP, TEMP, TEMPDIR, else /tmp). The client's ``nsys launch`` temp dir
+    is passed through when we attach to that process. The agent's own values
+    (e.g. /tmp/gprofiler_tmp, or an unrelated TEMP) are never forwarded.
+    """
+    env = _workload_env()
+    for var in ("TMPDIR", "TMP", "TEMP", "TEMPDIR"):
+        env.pop(var, None)
+    target = _nsys_launch_target()
+    if target is not None and target.tmpdir:
+        env["TMPDIR"] = target.tmpdir
+    return env
+
+
+def _exec_nsys(cmd: Sequence[str], timeout: int) -> Optional[subprocess.CompletedProcess]:
+    argv = host_nsys_argv(cmd)
+    logger.info("Running %s", " ".join(argv))
+    try:
+        return subprocess.run(  # nosec B603
+            argv,
+            env=_nsys_env(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        logger.error("%s failed: %s", cmd[1] if len(cmd) > 1 else cmd, exc)
+        return None
 
 
 def _workload_env() -> dict:
@@ -72,17 +446,35 @@ def _workload_env() -> dict:
     return env
 
 
-def find_nsys(explicit_path: Optional[str] = None) -> Optional[Path]:
-    """Locate an executable nsys binary.
+def _local_executable(raw: str) -> Optional[Path]:
+    path = Path(raw)
+    try:
+        if path.is_file() and os.access(path, os.X_OK):
+            return path.resolve() if path.exists() else path
+    except OSError:
+        return None
+    return None
 
-    Search order: explicit_path → NSYS_PATH env → PATH → common install paths.
+
+def find_nsys(explicit_path: Optional[str] = None) -> Optional[Path]:
+    """Locate an nsys binary.
+
+    Search order: explicit_path and NSYS_PATH when they exist on this filesystem,
+    then a live ``nsys launch`` (its path may exist only in that mount namespace),
+    then PATH and the usual host install directories.
     """
+    for raw in (explicit_path, os.environ.get("NSYS_PATH")):
+        if not raw:
+            continue
+        found = _local_executable(raw)
+        if found is not None:
+            return found
+
+    target = _nsys_launch_target()
+    if target is not None:
+        return Path(target.exe)
+
     candidates: List[str] = []
-    if explicit_path:
-        candidates.append(explicit_path)
-    env_path = os.environ.get("NSYS_PATH")
-    if env_path:
-        candidates.append(env_path)
     which = shutil.which("nsys")
     if which:
         candidates.append(which)
@@ -97,13 +489,9 @@ def find_nsys(explicit_path: Optional[str] = None) -> Optional[Path]:
         if not raw or raw in seen:
             continue
         seen.add(raw)
-        path = Path(raw)
-        try:
-            if path.is_file() and os.access(path, os.X_OK):
-                # Resolve symlinks for logging, but return the usable path.
-                return path.resolve() if path.exists() else path
-        except OSError:
-            continue
+        found = _local_executable(raw)
+        if found is not None:
+            return found
     return None
 
 
@@ -200,6 +588,369 @@ def run_nsys_capture(
     return rep
 
 
+def _find_nsys_rep(output_prefix: Path) -> Optional[Path]:
+    rep = Path(str(output_prefix) + ".nsys-rep")
+    if rep.is_file():
+        return rep
+    matches = sorted(output_prefix.parent.glob(output_prefix.name + "*.nsys-rep"))
+    return matches[0] if matches else None
+
+
+def _nsys_text(proc: subprocess.CompletedProcess) -> str:
+    return (proc.stdout or b"").decode("utf-8", "replace").strip()
+
+
+def resolve_nsys_session_name(requested: Optional[str]) -> str:
+    """Session name for `nsys start` / `nsys stop`. Empty falls back to the default."""
+    name = (requested or "").strip()
+    if not name:
+        return NSYS_LAUNCH_SESSION
+    if name.startswith("-") or any(char in name for char in "\n\r\x00"):
+        logger.error("Refusing nsys session name %r; using %s", name, NSYS_LAUNCH_SESSION)
+        return NSYS_LAUNCH_SESSION
+    return name
+
+
+def parse_nsys_sessions_list(text: str) -> List[Dict[str, str]]:
+    """Parse `nsys sessions list` into ``[{name, state}, ...]``.
+
+    The table form is ``ID TIME STATE LAUNCH NAME`` with the session name in the
+    last column (it may contain spaces). A ``Name:`` / ``State:`` dump is also
+    accepted. Lines that do not name a session are ignored.
+    """
+    sessions: List[Dict[str, str]] = []
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    if not lines:
+        return sessions
+
+    header = lines[0].split()
+    header_upper = [col.upper() for col in header]
+    if "NAME" in header_upper:
+        name_idx = header_upper.index("NAME")
+        state_idx = header_upper.index("STATE") if "STATE" in header_upper else None
+        for line in lines[1:]:
+            parts = line.split()
+            if len(parts) <= name_idx:
+                continue
+            name = " ".join(parts[name_idx:]).strip()
+            state = parts[state_idx] if state_idx is not None and len(parts) > state_idx else ""
+            if name:
+                sessions.append({"name": name, "state": state})
+        return sessions
+
+    current: Dict[str, str] = {}
+    for line in lines:
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip().lower()
+        value = value.strip()
+        if key == "name" and value:
+            if current.get("name"):
+                sessions.append({"name": current["name"], "state": current.get("state", "")})
+            current = {"name": value, "state": ""}
+        elif key == "state" and current.get("name"):
+            current["state"] = value.split()[0] if value else ""
+    if current.get("name"):
+        sessions.append({"name": current["name"], "state": current.get("state", "")})
+    return sessions
+
+
+def reset_nsys_sessions_cache() -> None:
+    """Drop the cached `nsys sessions list`. Tests use this."""
+    global _sessions_cache
+    with _sessions_cache_lock:
+        _sessions_cache = (0.0, _sessions_cache_miss)
+
+
+def list_nsys_sessions() -> Optional[List[Dict[str, str]]]:
+    """Sessions from `nsys sessions list`.
+
+    ``None`` when nsys is not installed or the list command failed — callers
+    omit the field so a previous report is kept. A list (possibly empty) means
+    nsys ran. Results are cached briefly so heartbeats do not spawn nsys every time.
+    """
+    global _sessions_cache
+    now = time.monotonic()
+    with _sessions_cache_lock:
+        cached_at, cached = _sessions_cache
+        if cached is not _sessions_cache_miss and now - cached_at < _NSYS_SESSIONS_CACHE_SEC:
+            return cached  # type: ignore[return-value]
+
+    nsys = find_nsys()
+    if nsys is None:
+        result: Optional[List[Dict[str, str]]] = None
+    else:
+        listed = _exec_nsys([str(nsys), "sessions", "list"], timeout=10)
+        if listed is None or listed.returncode != 0:
+            result = None
+        else:
+            result = parse_nsys_sessions_list(_nsys_text(listed))
+
+    with _sessions_cache_lock:
+        _sessions_cache = (time.monotonic(), result)
+    return result
+
+
+def _status_is_collecting(text: str) -> bool:
+    # "collecting data" is the live state. The idle line
+    # "use the 'launch' command to start the collection" must not match.
+    return "collecting" in text.lower()
+
+
+class NsysLaunchSession:
+    """Collection open on a client-created nsys session.
+
+    The client runs `nsys launch`. Start Profiling runs `nsys start` on the
+    session named by the request and holds the collection open for the requested
+    duration. Stop Profiling, or the duration elapsing, runs `nsys stop`. The
+    agent does not launch the workload.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.collecting = False
+        self.output_prefix: Optional[Path] = None
+        self.backtraces = False
+        self.session_name = NSYS_LAUNCH_SESSION
+
+    def reset(self) -> None:
+        with self._lock:
+            self.collecting = False
+            self.output_prefix = None
+            self.backtraces = False
+            self.session_name = NSYS_LAUNCH_SESSION
+
+    def _log_sessions(self, nsys: Path) -> None:
+        listed = _exec_nsys([str(nsys), "sessions", "list"], timeout=30)
+        if listed is None:
+            return
+        logger.error("nsys sessions list (exit %s):\n%s", listed.returncode, _nsys_text(listed) or "<empty>")
+
+    def start_collection(
+        self,
+        nsys: Path,
+        output_prefix: Path,
+        backtraces: bool = False,
+        session_name: Optional[str] = None,
+    ) -> bool:
+        """`nsys start --session=<name>`, then require status to say collecting."""
+        name = resolve_nsys_session_name(session_name)
+        with self._lock:
+            if self.collecting:
+                logger.warning("nsys collection is already open; not starting another")
+                return False
+            self.backtraces = backtraces
+            self.session_name = name
+            output_prefix.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.chmod(output_prefix.parent, 0o1777)  # launch user writes the report via nsenter
+            except OSError:
+                pass
+            # The same path has to exist in the launch mount namespace: nsys -o
+            # resolves there, not on the agent's filesystem.
+            _mkdir_in_launch_namespace(output_prefix.parent)
+            cmd = [
+                str(nsys),
+                "start",
+                f"--session={name}",
+                "-o",
+                str(output_prefix),
+                "--force-overwrite=true",
+            ]
+            # cudabacktrace is set by the client's `nsys launch`. Sampling has to
+            # be on for nsys to keep those stacks. -s none drops them.
+            if backtraces:
+                cmd.extend(["-s", "process-tree", "-b", "dwarf"])
+            else:
+                cmd.extend(["-s", "none"])
+            proc = _exec_nsys(cmd, timeout=60)
+            if proc is None or proc.returncode != 0:
+                logger.error(
+                    "nsys start --session=%s failed (rc=%s): %s",
+                    name,
+                    None if proc is None else proc.returncode,
+                    "" if proc is None else _nsys_text(proc)[-1000:],
+                )
+                self._log_sessions(nsys)
+                return False
+            status_text = ""
+            for _ in range(25):
+                status = _exec_nsys([str(nsys), "status", f"--session={name}"], timeout=10)
+                if status is not None and status.returncode == 0:
+                    status_text = _nsys_text(status)
+                    if _status_is_collecting(status_text):
+                        logger.info(
+                            "nsys status --session=%s: %s",
+                            name,
+                            status_text,
+                        )
+                        self.collecting = True
+                        self.output_prefix = output_prefix
+                        return True
+                time.sleep(0.2)
+            logger.error(
+                "nsys start returned but status --session=%s is not collecting (%r)",
+                name,
+                status_text,
+            )
+            self._log_sessions(nsys)
+            # start already returned 0, so close the collection instead of leaving it open.
+            _exec_nsys([str(nsys), "stop", f"--session={name}"], timeout=300)
+            return False
+
+    def stop_collection(self, nsys: Path) -> Optional[Path]:
+        """`nsys stop` the session this collection opened. The client's workload keeps running."""
+        with self._lock:
+            if not self.collecting:
+                logger.info("nsys stop with no open collection")
+                return None
+            prefix = self.output_prefix
+            name = self.session_name
+            proc = _exec_nsys([str(nsys), "stop", f"--session={name}"], timeout=300)
+            self.collecting = False
+            if proc is None:
+                return None
+            if proc.returncode != 0:
+                logger.error(
+                    "nsys stop exited with code %s: %s",
+                    proc.returncode,
+                    (proc.stdout or b"")[-1000:].decode("utf-8", "replace"),
+                )
+                return None
+            if prefix is None:
+                return None
+            _pull_launch_outputs(prefix.parent)
+            rep = _find_nsys_rep(prefix)
+            if rep is None:
+                logger.error("nsys stop completed but .nsys-rep not found at %s", prefix)
+            return rep
+
+
+_nsys_launch_session = NsysLaunchSession()
+
+
+def reset_nsys_launch_session() -> None:
+    """Drop session state. Tests use this; the agent process keeps one session."""
+    _nsys_launch_session.reset()
+
+
+def collect_nsys_launch_html(
+    *,
+    nsys: Path,
+    duration_sec: int,
+    work_dir: Path,
+    stop_event=None,
+    timeline: bool = False,
+    timeline_stacks: bool = False,
+    on_rep: Optional[Callable[[Path], None]] = None,
+    generate_html_fn: Optional[Callable[[str], Optional[str]]] = None,
+    session_name: Optional[str] = None,
+) -> Optional[str]:
+    """`nsys start` the named client session, hold it for duration_sec, `nsys stop`, build HTML.
+
+    Stop Profiling sets stop_event and ends the collection early. The configured
+    duration is the maximum. The client's `nsys launch` process is not ours and
+    is not watched.
+
+    Each capture gets its own directory so `nsys stats` cannot skip a leftover
+    CSV from an earlier run.
+    """
+    session = _nsys_launch_session
+
+    from datetime import datetime
+
+    capture_dir = work_dir / datetime.now().strftime("launch_%Y%m%dT%H%M%S_%f")
+    output_prefix = capture_dir / "gprofiler_nsys_capture"
+    name = resolve_nsys_session_name(session_name)
+    if not session.start_collection(nsys, output_prefix, backtraces=timeline_stacks, session_name=name):
+        return None
+
+    duration_sec = max(1, int(duration_sec))
+    started = time.monotonic()
+    deadline = started + duration_sec
+    logger.info(
+        "nsys session %s collecting for up to %ss (Stop Profiling ends it early)",
+        name,
+        duration_sec,
+    )
+    while time.monotonic() < deadline:
+        if stop_event is not None and getattr(stop_event, "is_set", lambda: False)():
+            logger.info(
+                "Stop Profiling after %.1fs; ending nsys session %s (configured %ss)",
+                time.monotonic() - started,
+                name,
+                duration_sec,
+            )
+            break
+        time.sleep(0.2)
+    else:
+        logger.info("nsys session %s reached the configured duration %ss", name, duration_sec)
+
+    rep = session.stop_collection(nsys)
+    if rep is None:
+        return None
+    if on_rep is not None:
+        try:
+            on_rep(rep)
+        except Exception:
+            logger.exception("on_rep callback failed; continuing with HTML generation")
+    return _html_from_rep(
+        nsys,
+        rep,
+        capture_dir,
+        timeline=timeline,
+        timeline_stacks=timeline_stacks,
+        generate_html_fn=generate_html_fn,
+        with_stacks=timeline_stacks,
+    )
+
+
+def _html_from_rep(
+    nsys: Path,
+    rep: Path,
+    work_dir: Path,
+    *,
+    timeline: bool,
+    timeline_stacks: bool,
+    generate_html_fn: Optional[Callable[[str], Optional[str]]],
+    with_stacks: bool = False,
+) -> Optional[str]:
+    if timeline:
+        events = nsys_trace_to_timeline_events(nsys, rep, work_dir, with_stacks=timeline_stacks)
+        if events:
+            html = generate_nsys_timeline_html(events)
+            if html:
+                logger.info("Generated nsys CPU/GPU timeline HTML (%d bytes)", len(html))
+                return html
+        logger.warning("nsys timeline requested but no trace events; falling back to GPU flamegraph")
+
+    collapsed = nsys_stats_to_collapsed(nsys, rep, work_dir, with_stacks=with_stacks)
+    if not collapsed:
+        return None
+
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+
+    def _gen(collapsed_data: str) -> Optional[str]:
+        if generate_html_fn is not None:
+            return generate_html_fn(collapsed_data)
+        return generate_nsys_flamegraph_html(
+            collapsed_data,
+            now.isoformat(),
+            now.isoformat(),
+            generate_html_fn=None,
+        )
+
+    html = _gen(collapsed)
+    if html:
+        logger.info("Generated nsys GPU flamegraph HTML (%d bytes)", len(html))
+    else:
+        logger.error("Failed to generate nsys flamegraph HTML from collapsed stacks")
+    return html
+
+
 def _csv_to_collapsed(csv_text: str, frame_prefix: str) -> Optional[str]:
     """Convert an nsys stats CSV into collapsed stacks.
 
@@ -250,7 +1001,16 @@ def _csv_to_collapsed(csv_text: str, frame_prefix: str) -> Optional[str]:
         # Scale down huge ns values to keep flamegraph samples manageable
         # (1 sample ≈ 1µs of GPU time). Keep at least 1.
         samples = max(1, weight // 1000)
-        safe_name = name.replace(";", ",")
+        # A qualified kernel name is the call stack when CPU sampling is unavailable.
+        # cuda_deep names kernels run_workload::train_step::...::gemm_fma so the
+        # flamegraph shows those frames instead of a single leaf.
+        head, args = (name.split("(", 1) + [""])[:2]
+        parts = [part.strip() for part in head.split("::") if part.strip()]
+        if not parts:
+            parts = [name]
+        if args:
+            parts[-1] = parts[-1] + "(" + args
+        safe_name = ";".join(part.replace(";", ",") for part in parts)
         lines.append(f"{frame_prefix};{safe_name} {samples}")
 
     return "\n".join(lines) if lines else None
@@ -272,24 +1032,18 @@ def _export_stats_csv(nsys: Path, nsys_rep: Path, work_dir: Path, report: str, o
         str(out_prefix),
         str(nsys_rep),
     ]
-    try:
-        proc = subprocess.run(  # nosec B603
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=120,
-            check=False,
-        )
-        if proc.returncode != 0:
-            logger.warning(
-                "nsys stats %s failed (rc=%s): %s",
-                report,
-                proc.returncode,
-                (proc.stdout or b"")[-1000:].decode("utf-8", "replace"),
-            )
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        logger.warning("nsys stats %s error: %s", report, exc)
+    proc = _exec_nsys(cmd, timeout=NSYS_EXPORT_TIMEOUT_SEC)
+    if proc is None:
         return None
+    _pull_launch_outputs(work_dir)
+    _pull_launch_outputs(nsys_rep.parent)
+    if proc.returncode != 0:
+        logger.warning(
+            "nsys stats %s failed (rc=%s): %s",
+            report,
+            proc.returncode,
+            (proc.stdout or b"")[-1000:].decode("utf-8", "replace"),
+        )
 
     matches = sorted(work_dir.glob(out_prefix.name + "*.csv"))
     # Also check CWD-relative names nsys sometimes writes
@@ -309,9 +1063,102 @@ def _export_stats_csv(nsys: Path, nsys_rep: Path, work_dir: Path, report: str, o
     return unique[0].read_text(encoding="utf-8", errors="replace")
 
 
-def nsys_stats_to_collapsed(nsys: Path, nsys_rep: Path, work_dir: Path) -> Optional[str]:
-    """Export cuda_gpu_kern_sum (fallback cuda_api_sum) and convert to collapsed stacks."""
+_SKIP_MODULE_SNIPPETS = (
+    "libcudart",
+    "libcuda.so",
+    "libc.so",
+    "ld-linux",
+    "libpthread",
+    "libdl.so",
+    "libnsight",
+    "linux-vdso",
+    "libstdc++",
+    "libgcc_s",
+    "libm.so",
+)
+
+
+def _host_frame(frame: str) -> Optional[str]:
+    """Keep an application frame. Drop the CUDA runtime and libc frames nsys adds."""
+    symbol = frame
+    module = ""
+    if frame.endswith(")") and " (" in frame:
+        symbol, module = frame[:-1].rsplit(" (", 1)
+    if any(snippet in module.lower() for snippet in _SKIP_MODULE_SNIPPETS):
+        return None
+    low = symbol.lower()
+    if "cuda" in low or low.startswith("cu"):
+        return None
+    symbol = symbol.replace(";", ",").strip()
+    return symbol or None
+
+
+def callchains_to_collapsed(gpu_events: List[dict], corr_to_stack: dict, stacks: List[List[str]]) -> Optional[str]:
+    """Collapsed stacks whose width is GPU kernel time and whose frames are the CPU call chain.
+
+    stacks are innermost-first, as load_callchains_from_sqlite returns them.
+    Collapsed lines are outermost-first, kernel name at the leaf.
+    """
+    weights: dict = {}
+    for ev in gpu_events:
+        dur = int(ev.get("dur") or 0)
+        if dur <= 0:
+            continue
+        frames: List[str] = []
+        corr = ev.get("corr")
+        idx = corr_to_stack.get(corr) if corr is not None else None
+        if idx is not None and 0 <= idx < len(stacks):
+            for raw in reversed(stacks[idx]):
+                kept = _host_frame(raw)
+                if kept:
+                    frames.append(kept)
+        kernel = str(ev.get("name") or "").replace(";", ",").strip()
+        if not kernel:
+            continue
+        frames.append(kernel)
+        key = "gpu;nsys;cuda_kernel;" + ";".join(frames)
+        weights[key] = weights.get(key, 0) + dur
+    if not weights:
+        return None
+    lines = []
+    for key, total_ns in sorted(weights.items(), key=lambda item: (-item[1], item[0])):
+        lines.append(f"{key} {max(1, total_ns // 1000)}")
+    return "\n".join(lines)
+
+
+def _collapsed_from_backtraces(nsys: Path, nsys_rep: Path, work_dir: Path) -> Optional[str]:
+    """Build a deep flamegraph from CUDA launch backtraces, or None if the report has none."""
+    sqlite_path = nsys_export_sqlite(nsys, nsys_rep, work_dir)
+    if sqlite_path is None:
+        return None
+    corr_to_stack, stacks = load_callchains_from_sqlite(sqlite_path)
+    if not stacks:
+        return None
+    gpu_csv = _export_stats_csv(nsys, nsys_rep, work_dir, "cuda_gpu_trace", work_dir / "gpu_trace_stacks")
+    if not gpu_csv:
+        return None
+    events = _parse_trace_csv(gpu_csv, "gpu")
+    collapsed = callchains_to_collapsed(events, corr_to_stack, stacks)
+    if collapsed:
+        logger.info(
+            "Built collapsed stacks from CUDA backtraces (%d lines)", collapsed.count("\n") + 1
+        )
+    return collapsed
+
+
+def nsys_stats_to_collapsed(
+    nsys: Path, nsys_rep: Path, work_dir: Path, with_stacks: bool = False
+) -> Optional[str]:
+    """Export cuda_gpu_kern_sum (fallback cuda_api_sum) and convert to collapsed stacks.
+
+    With with_stacks=True and a capture that used --cudabacktrace, the lines include
+    the CPU call chain above each kernel so the flamegraph is more than one frame deep.
+    """
     work_dir.mkdir(parents=True, exist_ok=True)
+    if with_stacks:
+        deep = _collapsed_from_backtraces(nsys, nsys_rep, work_dir)
+        if deep:
+            return deep
 
     def _export(report: str, out_prefix: Path) -> Optional[str]:
         return _export_stats_csv(nsys, nsys_rep, work_dir, report, out_prefix)
@@ -423,23 +1270,15 @@ def nsys_export_sqlite(nsys: Path, nsys_rep: Path, work_dir: Path) -> Optional[P
         str(out),
         str(nsys_rep),
     ]
-    try:
-        proc = subprocess.run(  # nosec B603
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=300,
-            check=False,
-        )
-        if proc.returncode != 0:
+    proc = _exec_nsys(cmd, timeout=NSYS_EXPORT_TIMEOUT_SEC)
+    _pull_launch_outputs(work_dir)
+    if proc is None or proc.returncode != 0:
+        if proc is not None:
             logger.warning(
                 "nsys export sqlite failed (rc=%s): %s",
                 proc.returncode,
                 (proc.stdout or b"")[-1000:].decode("utf-8", "replace"),
             )
-            return None
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        logger.warning("nsys export sqlite error: %s", exc)
         return None
     if not out.is_file() or out.stat().st_size == 0:
         logger.warning("nsys export sqlite produced no file at %s", out)
@@ -1194,6 +2033,8 @@ def collect_nsys_adhoc_html(
     timeline: bool = False,
     timeline_stacks: bool = False,
     on_rep: Optional[Callable[[Path], None]] = None,
+    capture_mode: str = "launch",
+    session_name: Optional[str] = None,
 ) -> Optional[str]:
     """End-to-end: find nsys → capture → collapsed → HTML. Returns HTML or None.
 
@@ -1213,67 +2054,26 @@ def collect_nsys_adhoc_html(
         )
         return None
 
+    name = resolve_nsys_session_name(session_name)
     logger.info("Using nsys at %s", nsys)
+    if workload:
+        logger.info(
+            "Ignoring nsys_workload %r; the client owns nsys launch. Attaching to session %s",
+            workload,
+            name,
+        )
     base = Path(work_dir or NSYS_DATA_DIRECTORY)
     base.mkdir(parents=True, exist_ok=True)
-    prefix = base / "gprofiler_nsys_capture"
-    workload_cmd = _parse_workload(workload)
-
-    if workload_cmd is None:
-        logger.warning(
-            "No nsys_workload configured; capturing a duration-bounded sleep session. "
-            "Set nsys_workload (e.g. path to cuda_burn) for real CUDA kernel frames."
-        )
-
-    rep = run_nsys_capture(
-        nsys,
-        prefix,
+    if capture_mode != "launch":
+        logger.warning("nsys capture mode %r is not supported; attaching to session %s", capture_mode, name)
+    return collect_nsys_launch_html(
+        nsys=nsys,
         duration_sec=duration_sec,
-        workload_cmd=workload_cmd,
+        work_dir=base,
         stop_event=stop_event,
-        backtraces=timeline and timeline_stacks,
+        timeline=timeline,
+        timeline_stacks=timeline_stacks,
+        on_rep=on_rep,
+        generate_html_fn=generate_html_fn,
+        session_name=name,
     )
-    if rep is None:
-        return None
-
-    if on_rep is not None:
-        try:
-            on_rep(rep)
-        except Exception:
-            logger.exception("on_rep callback failed; continuing with HTML generation")
-
-    if timeline:
-        events = nsys_trace_to_timeline_events(nsys, rep, base, with_stacks=timeline_stacks)
-        if events:
-            html = generate_nsys_timeline_html(events)
-            if html:
-                logger.info("Generated nsys CPU/GPU timeline HTML (%d bytes)", len(html))
-                return html
-        logger.warning("nsys timeline requested but no trace events; falling back to GPU flamegraph")
-
-    collapsed = nsys_stats_to_collapsed(nsys, rep, base)
-    if not collapsed:
-        return None
-
-    from datetime import datetime, timezone
-
-    now = datetime.now(timezone.utc)
-    start = now  # approximate; fine for adhoc labeling
-    end = now
-
-    def _gen(collapsed_data: str) -> Optional[str]:
-        if generate_html_fn is not None:
-            return generate_html_fn(collapsed_data)
-        return generate_nsys_flamegraph_html(
-            collapsed_data,
-            start.isoformat(),
-            end.isoformat(),
-            generate_html_fn=None,
-        )
-
-    html = _gen(collapsed)
-    if html:
-        logger.info("Generated nsys GPU flamegraph HTML (%d bytes)", len(html))
-    else:
-        logger.error("Failed to generate nsys flamegraph HTML from collapsed stacks")
-    return html
