@@ -43,6 +43,9 @@ NSYS_DATA_DIRECTORY = "/tmp/gprofiler_nsys"
 # Fallback when the Performance Studio request does not name a session.
 # The client creates sessions with `nsys launch`; the agent only attaches.
 NSYS_LAUNCH_SESSION = "gprofiler-cuda-burn"
+# `nsys stats --force-export` and `nsys export` convert the whole report to SQLite.
+# A 5s capture of a busy model server (78 MB, 2.8M events) takes over 3 minutes.
+NSYS_EXPORT_TIMEOUT_SEC = 900
 # How long a successful `nsys sessions list` may be reused across heartbeats.
 _NSYS_SESSIONS_CACHE_SEC = 30.0
 _sessions_cache_miss = object()
@@ -1029,7 +1032,7 @@ def _export_stats_csv(nsys: Path, nsys_rep: Path, work_dir: Path, report: str, o
         str(out_prefix),
         str(nsys_rep),
     ]
-    proc = _exec_nsys(cmd, timeout=120)
+    proc = _exec_nsys(cmd, timeout=NSYS_EXPORT_TIMEOUT_SEC)
     if proc is None:
         return None
     _pull_launch_outputs(work_dir)
@@ -1267,7 +1270,7 @@ def nsys_export_sqlite(nsys: Path, nsys_rep: Path, work_dir: Path) -> Optional[P
         str(out),
         str(nsys_rep),
     ]
-    proc = _exec_nsys(cmd, timeout=300)
+    proc = _exec_nsys(cmd, timeout=NSYS_EXPORT_TIMEOUT_SEC)
     _pull_launch_outputs(work_dir)
     if proc is None or proc.returncode != 0:
         if proc is not None:
