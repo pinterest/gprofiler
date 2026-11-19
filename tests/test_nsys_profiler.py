@@ -749,6 +749,7 @@ def _launch_target(**overrides) -> _NsysLaunchTarget:
         foreign_mount=True,
         foreign_pid=True,
         foreign_ipc=True,
+        foreign_net=True,
     )
     fields.update(overrides)
     return _NsysLaunchTarget(**fields)
@@ -772,6 +773,7 @@ def test_host_nsys_argv_enters_launch_namespace(monkeypatch):
         "--target=4242",
         "--mount",
         "--ipc",
+        "--net",
         "--pid",
         "--wd",
         "--",
@@ -784,7 +786,7 @@ def test_host_nsys_argv_enters_launch_namespace(monkeypatch):
 def test_host_nsys_argv_enters_ipc_namespace_alone(monkeypatch):
     monkeypatch.setattr(
         "gprofiler.nsys_profiler._nsys_launch_target",
-        lambda: _launch_target(foreign_mount=False, foreign_pid=False, foreign_ipc=True),
+        lambda: _launch_target(foreign_mount=False, foreign_pid=False, foreign_ipc=True, foreign_net=False),
     )
     monkeypatch.setattr("gprofiler.nsys_profiler.shutil.which", lambda name: f"/usr/bin/{name}")
     argv = host_nsys_argv(["/opt/nvidia/nsys", "start", "--session=p2p"])
@@ -807,8 +809,8 @@ def test_host_nsys_argv_setpriv_inside_launch_namespace(monkeypatch):
     )
     monkeypatch.setattr("gprofiler.nsys_profiler.shutil.which", lambda name: f"/usr/bin/{name}")
     argv = host_nsys_argv(["/opt/nvidia/nsys", "start", "--session=p2p"])
-    assert argv[:7] == ["nsenter", "--target=4242", "--mount", "--ipc", "--pid", "--wd", "--"]
-    assert argv[7:] == [
+    assert argv[:8] == ["nsenter", "--target=4242", "--mount", "--ipc", "--net", "--pid", "--wd", "--"]
+    assert argv[8:] == [
         "setpriv",
         "--reuid=1000",
         "--regid=1000",
@@ -827,7 +829,7 @@ def test_exec_nsys_passes_launch_tmpdir(monkeypatch):
     monkeypatch.setenv("TEMP", '{"ip": "10.1.33.0", "port": 9192}')
     monkeypatch.setattr(
         "gprofiler.nsys_profiler._nsys_launch_target",
-        lambda: _launch_target(foreign_mount=False, foreign_pid=False, foreign_ipc=False),
+        lambda: _launch_target(foreign_mount=False, foreign_pid=False, foreign_ipc=False, foreign_net=False),
     )
     with mock.patch("gprofiler.nsys_profiler.subprocess.run") as run:
         _exec_nsys(["/usr/bin/nsys", "sessions", "list"], timeout=5)
