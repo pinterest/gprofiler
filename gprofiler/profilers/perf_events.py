@@ -20,12 +20,14 @@ PMU (Performance Monitoring Unit) event constants and detection.
 This module provides:
 - Hardware PMU event constants
 - Event detection via 'perf list pmu'
+- Translation of generic event names to architecture-specific PMU event names
 - Event validation and normalization
 """
 
 import logging
+import platform
 import subprocess
-from typing import List, Set
+from typing import Dict, List, Set
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +55,30 @@ PMU_EVENT_ALIASES = {
     "cpu-cycles": "cycles",     # Normalize to canonical name
 }
 
+# Generic events without their aliases
+CANONICAL_PMU_EVENTS = [event for event in SUPPORTED_PMU_EVENTS if event not in PMU_EVENT_ALIASES]
+
+# Architecture-specific PMU event names for each generic event, keyed by platform.machine().
+# Used when 'perf list pmu' doesn't report the generic names, e.g. the armv8_pmuv3 driver only
+# exposes its own event names (cpu_cycles, inst_retired, ...).
+# Candidates are in order of preference and follow the kernel's generic event mapping
+# (drivers/perf/arm_pmuv3.c), so counts are identical to those of the generic event.
+# The exception is the cache events: the kernel maps them to L1 data cache events, which count
+# L2 hits as misses. They use the last-level cache events instead (which the kernel uses for
+# LLC-loads / LLC-load-misses), as on Intel, falling back to L1 on CPUs that don't implement them.
+ARCH_PMU_EVENT_TRANSLATIONS: Dict[str, Dict[str, List[str]]] = {
+    "aarch64": {
+        "cycles": ["cpu_cycles"],
+        "instructions": ["inst_retired"],
+        "cache-references": ["ll_cache_rd", "l1d_cache"],
+        "cache-misses": ["ll_cache_miss_rd", "l1d_cache_refill"],
+        "branch-instructions": ["br_retired", "pc_write_retired"],
+        "branch-misses": ["br_mis_pred", "br_mis_pred_retired"],
+        "stalled-cycles-frontend": ["stall_frontend"],
+        "stalled-cycles-backend": ["stall_backend"],
+    },
+}
+
 # Default event when none specified or all filtered out
 DEFAULT_PMU_EVENT = "cycles"
 
@@ -68,61 +94,75 @@ def detect_supported_pmu_events(perf_path: str) -> List[str]:
     """
     Detect PMU events supported by the host CPU.
     
-    Uses 'perf list pmu' to query hardware capabilities and filters
-    for events that gprofiler can use. This ensures we only request
-    events that the CPU actually supports.
-    
     Args:
         perf_path: Full path to perf executable
         
     Returns:
-        Sorted list of supported event names, e.g. ["cycles", "instructions"]
+        Sorted list of supported generic event names, e.g. ["cycles", "instructions"]
         Returns [DEFAULT_PMU_EVENT] if detection fails
         
     Example:
         >>> detect_supported_pmu_events("/usr/bin/perf")
         ['branch-instructions', 'cache-misses', 'cycles', 'instructions']
     """
+    return sorted(detect_pmu_event_translations(perf_path))
+
+
+def detect_pmu_event_translations(perf_path: str) -> Dict[str, str]:
+    """
+    Detect PMU events supported by the host CPU, along with the event name
+    to pass to 'perf record -e' for each of them.
+
+    Uses 'perf list pmu' to query hardware capabilities. A generic event is
+    supported if perf lists its generic name (e.g. x86), or one of its
+    architecture-specific names from ARCH_PMU_EVENT_TRANSLATIONS (e.g. aarch64).
+
+    Args:
+        perf_path: Full path to perf executable
+        
+    Returns:
+        Mapping of supported generic event name -> perf event name
+        Returns {DEFAULT_PMU_EVENT: DEFAULT_PMU_EVENT} if detection fails
+        
+    Example (aarch64):
+        >>> detect_pmu_event_translations("/usr/bin/perf")
+        {'cycles': 'cpu_cycles', 'instructions': 'inst_retired', ...}
+    """
+    default = {DEFAULT_PMU_EVENT: DEFAULT_PMU_EVENT}
     try:
         logger.info("Detecting supported PMU events on this host...")
         
-        # Query hardware events from perf
-        supported_events = _query_perf_hardware_events(perf_path)
+        available_events = _query_perf_hardware_events(perf_path)
+        translations = _resolve_event_translations(available_events, platform.machine())
         
-        # Filter for events we care about
-        filtered_events = _filter_supported_events(supported_events)
-        
-        # Normalize event names (handle aliases)
-        normalized_events = _normalize_event_names(filtered_events)
-        
-        # Return sorted list for consistency
-        result = sorted(list(normalized_events))
-        
-        if result:
+        if translations:
             logger.info(
-                f"Detected {len(result)} supported PMU events: {result}"
+                f"Detected {len(translations)} supported PMU events: {sorted(translations)}"
             )
-            return result
+            translated = {event: name for event, name in translations.items() if event != name}
+            if translated:
+                logger.info(f"PMU events translated to architecture-specific events: {translated}")
+            return translations
         else:
             logger.warning(
                 f"No PMU events detected, using default: "
                 f"[{DEFAULT_PMU_EVENT}]"
             )
-            return [DEFAULT_PMU_EVENT]
+            return default
             
     except subprocess.TimeoutExpired:
         logger.warning(
             f"Timeout detecting PMU events (>{PERF_DETECTION_TIMEOUT}s), "
             f"using default: [{DEFAULT_PMU_EVENT}]"
         )
-        return [DEFAULT_PMU_EVENT]
+        return default
         
     except Exception as e:
         logger.warning(
             f"Error detecting PMU events: {e}, "
             f"using default: [{DEFAULT_PMU_EVENT}]"
         )
-        return [DEFAULT_PMU_EVENT]
+        return default
 
 
 def _query_perf_hardware_events(perf_path: str) -> Set[str]:
@@ -157,6 +197,7 @@ def _query_perf_hardware_events(perf_path: str) -> Set[str]:
         # Event lines format:
         # "  branch-instructions OR branches    [Hardware event]"
         # "  cache-misses                       [Hardware cache event]"
+        # "  cpu_cycles OR armv8_pmuv3_0/cpu_cycles/   [Kernel PMU event]"
         parts = line.split()
         if not parts:
             continue
@@ -173,38 +214,60 @@ def _query_perf_hardware_events(perf_path: str) -> Set[str]:
     return events
 
 
-def _filter_supported_events(available_events: Set[str]) -> Set[str]:
+def _resolve_event_translations(available_events: Set[str], machine: str) -> Dict[str, str]:
     """
-    Filter for events that gprofiler supports.
+    Map each generic event supported by gprofiler to the perf event name
+    to use on this host.
+
+    The generic name (or one of its aliases) takes precedence, so hosts whose
+    perf lists the generic names keep using them unchanged.
     
     Args:
-        available_events: Set of event names from perf
+        available_events: Set of event names from 'perf list pmu'
+        machine: Host architecture, as returned by platform.machine()
         
     Returns:
-        Subset of available_events that are in SUPPORTED_PMU_EVENTS
-    """
-    return available_events.intersection(SUPPORTED_PMU_EVENTS)
+        Mapping of supported generic event name -> perf event name
 
-
-def _normalize_event_names(events: Set[str]) -> Set[str]:
-    """
-    Normalize event names using PMU_EVENT_ALIASES.
-    
-    Args:
-        events: Set of event names to normalize
-        
-    Returns:
-        Set of normalized event names
-        
     Example:
-        >>> _normalize_event_names({"cpu-cycles", "instructions"})
-        {"cycles", "instructions"}
+        >>> _resolve_event_translations({"cpu-cycles", "instructions"}, "x86_64")
+        {"cycles": "cycles", "instructions": "instructions"}
+        >>> _resolve_event_translations({"cpu_cycles", "inst_retired"}, "aarch64")
+        {"cycles": "cpu_cycles", "instructions": "inst_retired"}
     """
-    normalized = set()
-    for event in events:
-        canonical_name = PMU_EVENT_ALIASES.get(event, event)
-        normalized.add(canonical_name)
-    return normalized
+    arch_translations = ARCH_PMU_EVENT_TRANSLATIONS.get(machine, {})
+    translations = {}
+    for event in CANONICAL_PMU_EVENTS:
+        generic_names = [event] + [alias for alias, canonical in PMU_EVENT_ALIASES.items() if canonical == event]
+        if available_events.intersection(generic_names):
+            translations[event] = event
+            continue
+        for arch_name in arch_translations.get(event, []):
+            if arch_name in available_events:
+                translations[event] = arch_name
+                break
+    return translations
+
+
+def translate_events(events: List[str], translations: Dict[str, str]) -> List[str]:
+    """
+    Translate generic event names to the perf event names to use on this host.
+
+    Events without a translation are passed through unchanged, leaving it to
+    perf and the kernel to resolve them.
+    
+    Args:
+        events: Normalized generic event names, e.g. ["cycles", "cache-misses"]
+        translations: Mapping returned by detect_pmu_event_translations()
+        
+    Returns:
+        List of perf event names, in the same order
+        
+    Example (aarch64):
+        >>> translate_events(["cycles", "cache-misses"], {"cycles": "cpu_cycles", "cache-misses": "l1d_cache_refill"})
+        ['cpu_cycles', 'l1d_cache_refill']
+    """
+    return [translations.get(event, event) for event in events]
 
 
 # =============================================================================

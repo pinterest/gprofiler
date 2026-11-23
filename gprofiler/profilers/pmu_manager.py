@@ -21,21 +21,23 @@ This module provides a singleton class that:
 - Detects supported PMU events once at startup
 - Caches results in memory for the agent lifetime
 - Provides thread-safe access to supported events
+- Translates generic event names to the architecture-specific names perf should use
 
 Usage:
     from gprofiler.profilers.pmu_manager import get_pmu_manager
     
     manager = get_pmu_manager()
     events = manager.get_supported_events("/path/to/perf")
+    perf_events = manager.translate_events(["cycles", "cache-misses"])
 """
 
 import logging
 import threading
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from gprofiler.profilers.perf_events import (
-    detect_supported_pmu_events,
-    DEFAULT_PMU_EVENT,
+    detect_pmu_event_translations,
+    translate_events,
 )
 from gprofiler.utils import resource_path
 
@@ -74,7 +76,7 @@ class PMUEventsManager:
         if self._initialized:
             return
         
-        self._supported_events: List[str] = []
+        self._event_translations: Dict[str, str] = {}
         self._detection_attempted = False
         self._initialized = True
         
@@ -94,19 +96,46 @@ class PMUEventsManager:
                       If not provided, uses resource_path("perf")
         
         Returns:
-            Copy of cached supported events list
+            Sorted list of supported generic event names
             
         Example:
             >>> manager = PMUEventsManager()
             >>> events = manager.get_supported_events()
             >>> print(events)
-            ['cycles', 'instructions', 'cache-misses']
+            ['cache-misses', 'cycles', 'instructions']
         """
         if not self._detection_attempted:
             self._detect_and_cache_events(perf_path)
         
-        # Return copy to prevent external modification
-        return self._supported_events.copy()
+        return sorted(self._event_translations)
+
+    def translate_events(
+        self,
+        events: List[str],
+        perf_path: Optional[str] = None
+    ) -> List[str]:
+        """
+        Translate generic event names to the perf event names for this host.
+
+        Detects events on first call, then uses the cached translations.
+
+        Args:
+            events: Normalized generic event names
+            perf_path: Optional path to perf executable
+                      If not provided, uses resource_path("perf")
+
+        Returns:
+            List of perf event names, in the same order
+
+        Example (aarch64):
+            >>> manager = PMUEventsManager()
+            >>> manager.translate_events(["cycles", "cache-misses"])
+            ['cpu_cycles', 'l1d_cache_refill']
+        """
+        if not self._detection_attempted:
+            self._detect_and_cache_events(perf_path)
+
+        return translate_events(events, self._event_translations)
     
     def refresh_events(self, perf_path: Optional[str] = None):
         """
@@ -119,7 +148,7 @@ class PMUEventsManager:
         """
         logger.info("Forcing PMU events re-detection...")
         self._detection_attempted = False
-        self._supported_events = []
+        self._event_translations = {}
         self.get_supported_events(perf_path)
     
     def _detect_and_cache_events(self, perf_path: Optional[str]):
@@ -140,10 +169,10 @@ class PMUEventsManager:
                 perf_path = self._get_perf_path()
             
             # Detect and cache
-            self._supported_events = detect_supported_pmu_events(perf_path)
+            self._event_translations = detect_pmu_event_translations(perf_path)
             
             logger.info(
-                f"PMU events cached in memory: {self._supported_events}"
+                f"PMU events cached in memory: {self._event_translations}"
             )
     
     def _get_perf_path(self) -> str:
