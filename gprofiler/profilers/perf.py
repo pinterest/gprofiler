@@ -40,6 +40,7 @@ from gprofiler.metadata.application_metadata import ApplicationMetadata
 from gprofiler.profiler_state import ProfilerState
 from gprofiler.profilers.node import clean_up_node_maps, generate_map_for_node_processes, get_node_processes
 from gprofiler.profilers.perf_events import validate_and_normalize_events
+from gprofiler.profilers.pmu_manager import get_pmu_manager
 from gprofiler.profilers.profiler_base import ProfilerBase
 from gprofiler.profilers.registry import ProfilerArgument, register_profiler
 from gprofiler.utils.perf import discover_appropriate_perf_event, parse_perf_script_from_iterator, valid_perf_pid
@@ -155,6 +156,8 @@ def add_highest_avg_depth_stacks_per_process(
             help="PMU events to profile (comma-separated). Options: cycles (default time-based), instructions, "
             "cache-misses, cache-references, branch-misses, branch-instructions, stalled-cycles-frontend, "
             "stalled-cycles-backend. Multiple events will generate separate flamegraphs. "
+            "On architectures whose PMU doesn't expose these generic names (e.g. aarch64), they are translated "
+            "to the equivalent architecture-specific events (e.g. cycles -> cpu_cycles). "
             "Example: --perf-events cycles,cache-misses,branch-misses. Default: %(default)s",
             type=str,
             default="cycles",
@@ -289,6 +292,10 @@ class SystemProfiler(ProfilerBase):
             self._convert_to_noop()
             return
 
+        perf_events = get_pmu_manager().translate_events(self._perf_events)
+        if perf_events != self._perf_events:
+            logger.info("Using architecture-specific PMU events", requested=self._perf_events, perf_events=perf_events)
+
         # Create PerfProcess instances now that we know we're actually starting
         if self._perf_mode in ("fp", "smart"):
             self._perf_fp: Optional[PerfProcess] = PerfProcess(
@@ -303,7 +310,7 @@ class SystemProfiler(ProfilerBase):
                 use_cgroups=self._perf_use_cgroups,
                 max_cgroups=self._perf_max_cgroups,
                 max_docker_containers=self._perf_max_docker_containers,
-                perf_events=self._perf_events,
+                perf_events=perf_events,
             )
             self._perfs.append(self._perf_fp)
         else:
@@ -323,7 +330,7 @@ class SystemProfiler(ProfilerBase):
                 use_cgroups=self._perf_use_cgroups,
                 max_cgroups=self._perf_max_cgroups,
                 max_docker_containers=self._perf_max_docker_containers,
-                perf_events=self._perf_events,
+                perf_events=perf_events,
             )
             self._perfs.append(self._perf_dwarf)
         else:
