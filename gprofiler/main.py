@@ -195,6 +195,7 @@ class GProfiler:
         self._nsys_upload_rep = bool(user_args.get("nsys_upload_rep", False))
         self._nsys_capture_mode = user_args.get("nsys_capture_mode") or "launch"
         self._nsys_session = user_args.get("nsys_session") or None
+        self._frequency = int(user_args.get("frequency") or DEFAULT_SAMPLING_FREQUENCY)
         self._nsys_thread: Optional[threading.Thread] = None
         self._nsys_html: Optional[str] = None
         self._nsys_rep_path: Optional[Path] = None
@@ -446,6 +447,8 @@ class GProfiler:
                 on_rep=_keep_rep if self._nsys_upload_rep else None,
                 capture_mode=self._nsys_capture_mode,
                 session_name=self._nsys_session,
+                frequency=self._frequency,
+                max_processes=self._profiler_state.max_processes_per_profiler,
             )
             self._nsys_html = html
         except Exception:

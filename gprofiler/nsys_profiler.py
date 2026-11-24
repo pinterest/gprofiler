@@ -46,6 +46,9 @@ NSYS_LAUNCH_SESSION = "gprofiler-cuda-burn"
 # `nsys stats --force-export` and `nsys export` convert the whole report to SQLite.
 # A 5s capture of a busy model server (78 MB, 2.8M events) takes over 3 minutes.
 NSYS_EXPORT_TIMEOUT_SEC = 900
+# `nsys start --gpu-metrics-frequency` is in Hz. The tool rejects values outside this range.
+NSYS_GPU_METRICS_MIN_HZ = 10
+NSYS_GPU_METRICS_MAX_HZ = 200_000
 # How long a successful `nsys sessions list` may be reused across heartbeats.
 _NSYS_SESSIONS_CACHE_SEC = 30.0
 _sessions_cache_miss = object()
@@ -64,6 +67,36 @@ _host_session_owner_cache: Optional[tuple] = None
 _launch_cache_miss = object()
 _launch_cache: tuple = (0.0, _launch_cache_miss)
 _launch_cache_lock = threading.Lock()
+
+
+def nsys_gpu_metrics_frequency(frequency: Optional[int]) -> int:
+    """Clamp the console sampling frequency to the Hz range `nsys start` accepts."""
+    try:
+        hz = int(frequency) if frequency is not None else 11
+    except (TypeError, ValueError):
+        hz = 11
+    return min(NSYS_GPU_METRICS_MAX_HZ, max(NSYS_GPU_METRICS_MIN_HZ, hz))
+
+
+def nsys_gpu_metrics_args(frequency: Optional[int] = None, max_processes: Optional[int] = None) -> List[str]:
+    """Map the console frequency and process cap onto `nsys start`.
+
+    `--gpu-metrics-frequency` is the GPU counter sample rate. nsys ignores it
+    unless `--gpu-metrics-devices` is set too. A positive max-process cap keeps
+    those counters on the launched workload's GPUs (`cuda-visible`). Zero or a
+    negative cap matches the CPU profilers and means no limit, so the devices
+    are `all`. nsys has no process-count switch; the capture is already one
+    launched session.
+    """
+    try:
+        cap = int(max_processes) if max_processes is not None else 10
+    except (TypeError, ValueError):
+        cap = 10
+    devices = "all" if cap <= 0 else "cuda-visible"
+    return [
+        f"--gpu-metrics-devices={devices}",
+        f"--gpu-metrics-frequency={nsys_gpu_metrics_frequency(frequency)}",
+    ]
 
 
 class _NsysLaunchTarget(NamedTuple):
@@ -510,6 +543,8 @@ def run_nsys_capture(
     workload_cmd: Optional[Sequence[str]] = None,
     stop_event=None,
     backtraces: bool = False,
+    frequency: Optional[int] = None,
+    max_processes: Optional[int] = None,
 ) -> Optional[Path]:
     """Run `nsys profile` and return the path to the `.nsys-rep` file, or None.
 
@@ -534,6 +569,7 @@ def run_nsys_capture(
     else:
         # CUDA-focused, skip heavy CPU sampling / slow symbol waits where possible.
         cmd.extend(["-s", "none"])
+    cmd.extend(nsys_gpu_metrics_args(frequency, max_processes))
 
     # Bound every session to the requested window; a long-running workload
     # would otherwise outlive the agent's timeout and yield no report.
@@ -733,6 +769,8 @@ class NsysLaunchSession:
         output_prefix: Path,
         backtraces: bool = False,
         session_name: Optional[str] = None,
+        frequency: Optional[int] = None,
+        max_processes: Optional[int] = None,
     ) -> bool:
         """`nsys start --session=<name>`, then require status to say collecting."""
         name = resolve_nsys_session_name(session_name)
@@ -764,6 +802,7 @@ class NsysLaunchSession:
                 cmd.extend(["-s", "process-tree", "-b", "dwarf"])
             else:
                 cmd.extend(["-s", "none"])
+            cmd.extend(nsys_gpu_metrics_args(frequency, max_processes))
             proc = _exec_nsys(cmd, timeout=60)
             if proc is None or proc.returncode != 0:
                 logger.error(
@@ -846,6 +885,8 @@ def collect_nsys_launch_html(
     on_rep: Optional[Callable[[Path], None]] = None,
     generate_html_fn: Optional[Callable[[str], Optional[str]]] = None,
     session_name: Optional[str] = None,
+    frequency: Optional[int] = None,
+    max_processes: Optional[int] = None,
 ) -> Optional[str]:
     """`nsys start` the named client session, hold it for duration_sec, `nsys stop`, build HTML.
 
@@ -863,7 +904,14 @@ def collect_nsys_launch_html(
     capture_dir = work_dir / datetime.now().strftime("launch_%Y%m%dT%H%M%S_%f")
     output_prefix = capture_dir / "gprofiler_nsys_capture"
     name = resolve_nsys_session_name(session_name)
-    if not session.start_collection(nsys, output_prefix, backtraces=timeline_stacks, session_name=name):
+    if not session.start_collection(
+        nsys,
+        output_prefix,
+        backtraces=timeline_stacks,
+        session_name=name,
+        frequency=frequency,
+        max_processes=max_processes,
+    ):
         return None
 
     duration_sec = max(1, int(duration_sec))
@@ -2035,6 +2083,8 @@ def collect_nsys_adhoc_html(
     on_rep: Optional[Callable[[Path], None]] = None,
     capture_mode: str = "launch",
     session_name: Optional[str] = None,
+    frequency: Optional[int] = None,
+    max_processes: Optional[int] = None,
 ) -> Optional[str]:
     """End-to-end: find nsys → capture → collapsed → HTML. Returns HTML or None.
 
@@ -2076,4 +2126,6 @@ def collect_nsys_adhoc_html(
         on_rep=on_rep,
         generate_html_fn=generate_html_fn,
         session_name=name,
+        frequency=frequency,
+        max_processes=max_processes,
     )

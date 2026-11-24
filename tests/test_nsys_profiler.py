@@ -36,6 +36,8 @@ from gprofiler.nsys_profiler import (
     generate_nsys_timeline_html,
     host_nsys_argv,
     load_callchains_from_sqlite,
+    nsys_gpu_metrics_args,
+    nsys_gpu_metrics_frequency,
     nsys_stats_to_collapsed,
     nsys_trace_to_timeline_events,
     list_nsys_sessions,
@@ -604,6 +606,8 @@ def test_start_attaches_to_the_client_session_and_stop_uses_the_same_name(tmp_pa
     start = next(cmd for cmd in seen if cmd[1] == "start")
     assert "--session=gprofiler-cuda-burn" in start
     assert "-s" in start and start[start.index("-s") + 1] == "none"
+    assert "--gpu-metrics-devices=cuda-visible" in start
+    assert "--gpu-metrics-frequency=11" in start
     status = next(cmd for cmd in seen if cmd[1] == "status")
     assert status == [str(nsys), "status", "--session=gprofiler-cuda-burn"]
     stop_cmd = next(cmd for cmd in seen if cmd[1] == "stop")
@@ -920,6 +924,20 @@ def test_list_nsys_sessions_omits_report_when_nsys_is_missing(monkeypatch):
     reset_nsys_sessions_cache()
 
 
+def test_gpu_metrics_use_console_frequency_and_process_cap():
+    assert nsys_gpu_metrics_frequency(11) == 11
+    assert nsys_gpu_metrics_frequency(1) == 10
+    assert nsys_gpu_metrics_frequency(500_000) == 200_000
+    assert nsys_gpu_metrics_args(49, 10) == [
+        "--gpu-metrics-devices=cuda-visible",
+        "--gpu-metrics-frequency=49",
+    ]
+    assert nsys_gpu_metrics_args(11, 0) == [
+        "--gpu-metrics-devices=all",
+        "--gpu-metrics-frequency=11",
+    ]
+
+
 def test_start_uses_the_requested_session_name(tmp_path: Path, monkeypatch):
     reset_nsys_launch_session()
     seen = []
@@ -935,10 +953,14 @@ def test_start_uses_the_requested_session_name(tmp_path: Path, monkeypatch):
         stop_event=stop,
         generate_html_fn=lambda collapsed: "<html>gpu</html>",
         session_name="other-session",
+        frequency=49,
+        max_processes=0,
     )
     assert html == "<html>gpu</html>"
     start = next(cmd for cmd in seen if "start" in cmd)
     assert "--session=other-session" in start
+    assert "--gpu-metrics-devices=all" in start
+    assert "--gpu-metrics-frequency=49" in start
     stop_cmds = [cmd for cmd in seen if "stop" in cmd]
     assert stop_cmds
     assert all("--session=other-session" in cmd for cmd in stop_cmds)
