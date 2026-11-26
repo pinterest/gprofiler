@@ -365,6 +365,30 @@ def _pull_launch_outputs(local_dir: Path) -> None:
         logger.debug("could not copy nsys outputs from the launch namespace", exc_info=True)
 
 
+def _setpriv_as(uid: int, gid: int) -> List[str]:
+    """Switch to the nsys session uid and keep GPU-counter access.
+
+    Sessions are per uid, so start/stop have to be the ``nsys launch`` user.
+    ``--reuid`` from root clears the capability sets. With the datacenter
+    default ``RmProfilingAdminOnly=1``, GPU metrics then fail with
+    ERR_NVGPUCTRPERM: the driver allows those counters only to
+    ``capable(CAP_SYS_ADMIN)``. Ambient ``CAP_SYS_ADMIN`` survives the uid
+    change and the exec of nsys. ``--clear-groups`` stays: group membership
+    is not what that check uses.
+    """
+    return [
+        "setpriv",
+        f"--reuid={uid}",
+        f"--regid={gid}",
+        "--clear-groups",
+        "--inh-caps",
+        "+sys_admin",
+        "--ambient-caps",
+        "+sys_admin",
+        "--",
+    ]
+
+
 def host_nsys_argv(argv: Sequence[str]) -> List[str]:
     """Leave argv unchanged on the host.
 
@@ -398,13 +422,13 @@ def host_nsys_argv(argv: Sequence[str]) -> List[str]:
         # `sessions list` never prints the launches.
         prefix += ["--wd", "--"]
         if (target.uid != 0 or target.gid != 0) and shutil.which("setpriv") is not None:
-            prefix += ["setpriv", f"--reuid={target.uid}", f"--regid={target.gid}", "--clear-groups", "--"]
+            prefix += _setpriv_as(target.uid, target.gid)
         return prefix + args
     if target is not None:
         if args:
             args[0] = target.exe
         if (target.uid != 0 or target.gid != 0) and shutil.which("setpriv") is not None:
-            return ["setpriv", f"--reuid={target.uid}", f"--regid={target.gid}", "--clear-groups", "--", *args]
+            return [*_setpriv_as(target.uid, target.gid), *args]
         return args
     if not _in_separate_mount_namespace() or shutil.which("nsenter") is None:
         return args
@@ -412,7 +436,7 @@ def host_nsys_argv(argv: Sequence[str]) -> List[str]:
     owner = _host_session_owner() if shutil.which("setpriv") else None
     if owner is not None:
         uid, gid = owner
-        prefix += ["setpriv", f"--reuid={uid}", f"--regid={gid}", "--clear-groups", "--"]
+        prefix += _setpriv_as(uid, gid)
     return prefix + args
 
 
