@@ -29,4 +29,10 @@ sed -i 's|vault\.centos\.org/altarch/|archive.kernel.org/centos-vault/altarch/|g
 
 sed -i 's/^#.*baseurl=http/baseurl=http/g' /etc/yum.repos.d/*.repo
 sed -i 's/^mirrorlist=http/#mirrorlist=http/g' /etc/yum.repos.d/*.repo
+# vault.centos.org's CloudFront returns 403 for the *.sqlite.bz2 repodata that
+# yum prefers (repomd.xml itself still returns 200). archive.kernel.org serves
+# the final CentOS 7.9.2009 vault, including that sqlite metadata, over TLS 1.2.
+# Only current-release URLs (…/centos/$releasever/…) are rewritten; disabled
+# historical entries in CentOS-Vault.repo stay as they are.
+sed -i 's|http://vault.centos.org/centos/\$releasever|https://archive.kernel.org/centos-vault/7.9.2009|g' /etc/yum.repos.d/*.repo
 yum clean all
