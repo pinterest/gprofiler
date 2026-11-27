@@ -16,11 +16,16 @@
 #
 set -euo pipefail
 
-# downloading the zip because the git is very large (this is also very large, but still smaller)
-curl -SL --fail --retry 8 --retry-delay 15 https://codeload.github.com/Granulate/linux/zip/5c103bf97fb268e4ea157f5e1c2a5bd6ad8c40dc -o linux.zip
-unzip -qq linux.zip
-rm linux.zip
-cd linux-*/
+# Full history is huge, and codeload zip downloads are rate-limited.
+# Fetch only the pinned commit, with no credentials.
+LINUX_REV=5c103bf97fb268e4ea157f5e1c2a5bd6ad8c40dc
+mkdir "linux-${LINUX_REV}"
+cd "linux-${LINUX_REV}"
+git init
+git remote add origin https://github.com/Granulate/linux.git
+GIT_TERMINAL_PROMPT=0 git fetch --depth 1 origin "$LINUX_REV"
+git checkout FETCH_HEAD
+rm -rf .git
 
 NO_LIBTRACEEVENT=1 NO_JEVENTS=1 make -C tools/perf LDFLAGS=-static -j "$(nproc)" perf
 cp tools/perf/perf /
