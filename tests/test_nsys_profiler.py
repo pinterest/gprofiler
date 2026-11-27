@@ -24,16 +24,27 @@ from unittest import mock
 import pytest
 
 from gprofiler.nsys_profiler import (
+    _NsysLaunchTarget,
     _csv_to_collapsed,
     _export_stats_csv,
     _parse_trace_csv,
+    _pull_launch_outputs,
     _workload_env,
+    callchains_to_collapsed,
     collect_nsys_adhoc_html,
     find_nsys,
     generate_nsys_timeline_html,
+    host_nsys_argv,
     load_callchains_from_sqlite,
+    nsys_gpu_metrics_args,
+    nsys_gpu_metrics_frequency,
     nsys_stats_to_collapsed,
     nsys_trace_to_timeline_events,
+    list_nsys_sessions,
+    parse_nsys_sessions_list,
+    reset_nsys_launch_session,
+    reset_nsys_sessions_cache,
+    resolve_nsys_session_name,
     run_nsys_capture,
     without_nsys_perf_event_tags,
 )
@@ -271,6 +282,22 @@ def _make_callchain_sqlite(path: Path, with_tables: bool = True) -> None:
     conn.close()
 
 
+def test_callchains_to_collapsed_nests_host_frames_over_the_kernel():
+    gpu = [{"name": "gemm_fma", "dur": 5_000_000, "corr": 101}]
+    stacks = [[
+        "cudaLaunchKernel (/usr/lib/libcudart.so)",
+        "launch_gemm_kernel (/opt/cuda_deep)",
+        "gemm_mainloop (/opt/cuda_deep)",
+        "transformer_block (/opt/cuda_deep)",
+        "train_step (/opt/cuda_deep)",
+    ]]
+    text = callchains_to_collapsed(gpu, {101: 0}, stacks)
+    assert text == (
+        "gpu;nsys;cuda_kernel;train_step;transformer_block;gemm_mainloop;"
+        "launch_gemm_kernel;gemm_fma 5000"
+    )
+
+
 def test_load_callchains_from_sqlite(tmp_path: Path):
     db = tmp_path / "cap.sqlite"
     _make_callchain_sqlite(db)
@@ -492,43 +519,468 @@ def test_nsys_trace_to_timeline_events_none_when_empty(tmp_path: Path, monkeypat
     assert nsys_trace_to_timeline_events(nsys, rep, tmp_path / "work") is None
 
 
-def test_collect_adhoc_html_on_rep_callback(tmp_path: Path, monkeypatch):
+def _install_session_nsys(tmp_path: Path, monkeypatch, seen: list):
     nsys = tmp_path / "nsys"
     nsys.write_text("#!/bin/sh\n")
     nsys.chmod(0o755)
 
     def fake_run(cmd, **kwargs):
-        if cmd[1] == "profile":
+        seen.append(list(cmd))
+        if cmd[1] == "status":
+            return mock.Mock(returncode=0, stdout=b"collecting data\n")
+        if cmd[1] == "start":
             Path(str(cmd[cmd.index("-o") + 1]) + ".nsys-rep").write_bytes(b"fake")
-            return mock.Mock(returncode=0, stdout=b"ok")
-        # nsys stats: write the kern CSV where _export_stats_csv looks for it
-        out_prefix = Path(cmd[cmd.index("-o") + 1])
-        out_prefix.parent.mkdir(parents=True, exist_ok=True)
-        (out_prefix.parent / (out_prefix.name + "_cuda_gpu_kern_sum.csv")).write_text(KERN_CSV)
+        elif cmd[1] == "stats":
+            out_prefix = Path(cmd[cmd.index("-o") + 1])
+            out_prefix.parent.mkdir(parents=True, exist_ok=True)
+            (out_prefix.parent / (out_prefix.name + "_cuda_gpu_kern_sum.csv")).write_text(KERN_CSV)
+        elif cmd[1] == "sessions":
+            return mock.Mock(
+                returncode=0,
+                stdout=b"ID TIME STATE LAUNCH NAME\n1 07:51 Collection 1 gprofiler-cuda-burn\n",
+            )
         return mock.Mock(returncode=0, stdout=b"ok")
 
     monkeypatch.setattr("gprofiler.nsys_profiler.subprocess.run", fake_run)
     monkeypatch.setattr("gprofiler.nsys_profiler.find_nsys", lambda explicit_path=None: nsys)
+    return nsys
 
+
+def test_collect_adhoc_html_on_rep_callback(tmp_path: Path, monkeypatch):
+    reset_nsys_launch_session()
+    seen = []
+    _install_session_nsys(tmp_path, monkeypatch, seen)
+
+    import threading
+
+    stop = threading.Event()
+    stop.set()
     seen_reps = []
     html = collect_nsys_adhoc_html(
-        duration_sec=1,
+        duration_sec=30,
+        workload="/tmp/cuda_burn 30",
         work_dir=str(tmp_path / "work"),
+        stop_event=stop,
         generate_html_fn=lambda collapsed: "<html>ok</html>",
         on_rep=seen_reps.append,
     )
     assert html == "<html>ok</html>"
     assert len(seen_reps) == 1
     assert seen_reps[0].name.endswith(".nsys-rep") and seen_reps[0].is_file()
+    assert not any(cmd[1] == "launch" for cmd in seen)
 
     # a failing callback must not break HTML generation
     def boom(rep: Path) -> None:
         raise RuntimeError("boom")
 
     html = collect_nsys_adhoc_html(
-        duration_sec=1,
+        duration_sec=30,
         work_dir=str(tmp_path / "work2"),
+        stop_event=stop,
         generate_html_fn=lambda collapsed: "<html>ok</html>",
         on_rep=boom,
     )
     assert html == "<html>ok</html>"
+    reset_nsys_launch_session()
+
+
+def test_start_attaches_to_the_client_session_and_stop_uses_the_same_name(tmp_path: Path, monkeypatch):
+    reset_nsys_launch_session()
+    seen = []
+    nsys = _install_session_nsys(tmp_path, monkeypatch, seen)
+
+    import threading
+
+    stop = threading.Event()
+    stop.set()
+    html = collect_nsys_adhoc_html(
+        duration_sec=30,
+        workload="/tmp/cuda_deep 3600",
+        work_dir=str(tmp_path / "work"),
+        stop_event=stop,
+        generate_html_fn=lambda collapsed: "<html>gpu</html>",
+        capture_mode="launch",
+    )
+    assert html == "<html>gpu</html>"
+    assert not any(cmd[1] == "launch" for cmd in seen)
+    start = next(cmd for cmd in seen if cmd[1] == "start")
+    assert "--session=gprofiler-cuda-burn" in start
+    assert "-s" in start and start[start.index("-s") + 1] == "none"
+    assert "--gpu-metrics-devices=cuda-visible" in start
+    assert "--gpu-metrics-frequency=11" in start
+    status = next(cmd for cmd in seen if cmd[1] == "status")
+    assert status == [str(nsys), "status", "--session=gprofiler-cuda-burn"]
+    stop_cmd = next(cmd for cmd in seen if cmd[1] == "stop")
+    assert stop_cmd == [str(nsys), "stop", "--session=gprofiler-cuda-burn"]
+
+    prefixes = [cmd[cmd.index("-o") + 1] for cmd in seen if cmd[1] == "start"]
+    html2 = collect_nsys_adhoc_html(
+        duration_sec=30,
+        work_dir=str(tmp_path / "work"),
+        stop_event=stop,
+        generate_html_fn=lambda collapsed: "<html>gpu</html>",
+        capture_mode="launch",
+    )
+    assert html2 == "<html>gpu</html>"
+    prefixes2 = [cmd[cmd.index("-o") + 1] for cmd in seen if cmd[1] == "start"]
+    assert prefixes2[-1] != prefixes[0]
+    reset_nsys_launch_session()
+
+
+def test_collection_waits_out_the_configured_duration(tmp_path: Path, monkeypatch):
+    reset_nsys_launch_session()
+    seen = []
+    _install_session_nsys(tmp_path, monkeypatch, seen)
+    clock = {"t": 0.0}
+    monkeypatch.setattr("gprofiler.nsys_profiler.time.monotonic", lambda: clock["t"])
+
+    def fake_sleep(seconds):
+        clock["t"] += seconds
+
+    monkeypatch.setattr("gprofiler.nsys_profiler.time.sleep", fake_sleep)
+
+    html = collect_nsys_adhoc_html(
+        duration_sec=30,
+        work_dir=str(tmp_path / "work"),
+        generate_html_fn=lambda collapsed: "<html>gpu</html>",
+    )
+    assert html == "<html>gpu</html>"
+    assert clock["t"] >= 30
+    assert not any(cmd[1] == "launch" for cmd in seen)
+    reset_nsys_launch_session()
+
+
+def test_missing_session_lists_sessions_and_does_not_launch(tmp_path: Path, monkeypatch):
+    reset_nsys_launch_session()
+    seen = []
+    nsys = tmp_path / "nsys"
+    nsys.write_text("#!/bin/sh\n")
+    nsys.chmod(0o755)
+
+    def fake_run(cmd, **kwargs):
+        seen.append(list(cmd))
+        if cmd[1] == "sessions":
+            return mock.Mock(returncode=0, stdout=b"ID TIME STATE LAUNCH NAME\n")
+        return mock.Mock(returncode=1, stdout=b"no session named gprofiler-cuda-burn")
+
+    monkeypatch.setattr("gprofiler.nsys_profiler.subprocess.run", fake_run)
+    monkeypatch.setattr("gprofiler.nsys_profiler.find_nsys", lambda explicit_path=None: nsys)
+
+    html = collect_nsys_adhoc_html(
+        duration_sec=30,
+        work_dir=str(tmp_path / "work"),
+        generate_html_fn=lambda collapsed: "<html>gpu</html>",
+    )
+    assert html is None
+    assert not any(cmd[1] == "launch" for cmd in seen)
+    assert any(cmd[1:] == ["sessions", "list"] for cmd in seen)
+    assert not any(cmd[1] == "stop" for cmd in seen)
+    reset_nsys_launch_session()
+
+
+def test_second_start_while_collecting_is_refused(tmp_path: Path, monkeypatch):
+    reset_nsys_launch_session()
+    from gprofiler.nsys_profiler import _nsys_launch_session
+
+    seen = []
+    nsys = _install_session_nsys(tmp_path, monkeypatch, seen)
+    assert _nsys_launch_session.start_collection(nsys, tmp_path / "one" / "cap")
+    assert _nsys_launch_session.start_collection(nsys, tmp_path / "two" / "cap") is False
+    stopped = _nsys_launch_session.stop_collection(nsys)
+    assert stopped is not None and stopped.name.endswith(".nsys-rep")
+    assert _nsys_launch_session.stop_collection(nsys) is None
+    reset_nsys_launch_session()
+
+
+def test_idle_status_text_is_not_collecting():
+    from gprofiler.nsys_profiler import _status_is_collecting
+
+    assert _status_is_collecting("collecting data")
+    assert not _status_is_collecting("start executed. use the 'launch' command to start the collection")
+
+
+def test_host_nsys_argv_unchanged_when_mount_namespace_matches(monkeypatch):
+    monkeypatch.setattr("gprofiler.nsys_profiler._in_separate_mount_namespace", lambda: False)
+    monkeypatch.setattr("gprofiler.nsys_profiler._nsys_launch_target", lambda: None)
+    assert host_nsys_argv(["/usr/bin/nsys", "sessions", "list"]) == ["/usr/bin/nsys", "sessions", "list"]
+
+
+def test_host_nsys_argv_enters_host_mount_namespace_as_session_owner(monkeypatch):
+    monkeypatch.setattr("gprofiler.nsys_profiler._in_separate_mount_namespace", lambda: True)
+    monkeypatch.setattr("gprofiler.nsys_profiler._nsys_launch_target", lambda: None)
+    monkeypatch.setattr("gprofiler.nsys_profiler._host_session_owner", lambda: (24394, 100))
+    monkeypatch.setattr("gprofiler.nsys_profiler.shutil.which", lambda name: f"/usr/bin/{name}")
+    argv = host_nsys_argv(["/opt/nvidia/nsys", "start", "--session=gprofiler-cuda-burn"])
+    assert argv == [
+        "nsenter",
+        "--mount=/proc/1/ns/mnt",
+        "--",
+        "setpriv",
+        "--reuid=24394",
+        "--regid=100",
+        "--clear-groups",
+        "--inh-caps",
+        "+sys_admin",
+        "--ambient-caps",
+        "+sys_admin",
+        "--",
+        "/opt/nvidia/nsys",
+        "start",
+        "--session=gprofiler-cuda-burn",
+    ]
+
+
+def test_exec_nsys_drops_agent_temp_dir_vars(monkeypatch):
+    # nsys finds sessions under its temp dir; the agent's values would hide the client's session.
+    from gprofiler.nsys_profiler import _exec_nsys
+
+    monkeypatch.setenv("TMPDIR", "/tmp/gprofiler_tmp")
+    monkeypatch.setenv("TEMP", '{"ip": "10.1.33.0", "port": 9192}')
+    monkeypatch.setenv("TMP", "/tmp/gprofiler_tmp")
+    monkeypatch.setenv("TEMPDIR", "/tmp/gprofiler_tmp")
+    monkeypatch.setattr("gprofiler.nsys_profiler._in_separate_mount_namespace", lambda: False)
+    monkeypatch.setattr("gprofiler.nsys_profiler._nsys_launch_target", lambda: None)
+    with mock.patch("gprofiler.nsys_profiler.subprocess.run") as run:
+        _exec_nsys(["/usr/bin/nsys", "sessions", "list"], timeout=5)
+    env = run.call_args.kwargs["env"]
+    assert not {"TMPDIR", "TMP", "TEMP", "TEMPDIR"} & env.keys()
+    assert env["PATH"] == os.environ["PATH"]
+
+
+def _launch_target(**overrides) -> _NsysLaunchTarget:
+    fields = dict(
+        pid=4242,
+        exe="/nsys/nsys",
+        uid=0,
+        gid=0,
+        tmpdir="/nsys/tmp",
+        foreign_mount=True,
+        foreign_pid=True,
+        foreign_ipc=True,
+        foreign_net=True,
+    )
+    fields.update(overrides)
+    return _NsysLaunchTarget(**fields)
+
+
+def test_is_nsys_launch_argv_matches_launch_only():
+    from gprofiler.nsys_profiler import _is_nsys_launch_argv
+
+    assert _is_nsys_launch_argv(["/nsys/pkg/opt/nvidia/nsight-systems/2026.3.2/bin/nsys", "launch", "--session-new=p2p"])
+    assert not _is_nsys_launch_argv(["/usr/bin/nsys", "profile", "-t", "cuda"])
+    assert not _is_nsys_launch_argv(["/bin/bash", "-c", "nsys launch"])
+    assert not _is_nsys_launch_argv(["nsys"])
+
+
+def test_host_nsys_argv_enters_launch_namespace(monkeypatch):
+    monkeypatch.setattr("gprofiler.nsys_profiler._nsys_launch_target", lambda: _launch_target())
+    monkeypatch.setattr("gprofiler.nsys_profiler.shutil.which", lambda name: f"/usr/bin/{name}")
+    argv = host_nsys_argv(["/opt/nvidia/nsys", "sessions", "list"])
+    assert argv == [
+        "nsenter",
+        "--target=4242",
+        "--mount",
+        "--ipc",
+        "--net",
+        "--pid",
+        "--wd",
+        "--",
+        "/nsys/nsys",
+        "sessions",
+        "list",
+    ]
+
+
+def test_host_nsys_argv_enters_ipc_namespace_alone(monkeypatch):
+    monkeypatch.setattr(
+        "gprofiler.nsys_profiler._nsys_launch_target",
+        lambda: _launch_target(foreign_mount=False, foreign_pid=False, foreign_ipc=True, foreign_net=False),
+    )
+    monkeypatch.setattr("gprofiler.nsys_profiler.shutil.which", lambda name: f"/usr/bin/{name}")
+    argv = host_nsys_argv(["/opt/nvidia/nsys", "start", "--session=p2p"])
+    assert argv == [
+        "nsenter",
+        "--target=4242",
+        "--ipc",
+        "--wd",
+        "--",
+        "/nsys/nsys",
+        "start",
+        "--session=p2p",
+    ]
+
+
+def test_host_nsys_argv_setpriv_inside_launch_namespace(monkeypatch):
+    monkeypatch.setattr(
+        "gprofiler.nsys_profiler._nsys_launch_target",
+        lambda: _launch_target(uid=1000, gid=1000),
+    )
+    monkeypatch.setattr("gprofiler.nsys_profiler.shutil.which", lambda name: f"/usr/bin/{name}")
+    argv = host_nsys_argv(["/opt/nvidia/nsys", "start", "--session=p2p"])
+    assert argv[:8] == ["nsenter", "--target=4242", "--mount", "--ipc", "--net", "--pid", "--wd", "--"]
+    assert argv[8:] == [
+        "setpriv",
+        "--reuid=1000",
+        "--regid=1000",
+        "--clear-groups",
+        "--inh-caps",
+        "+sys_admin",
+        "--ambient-caps",
+        "+sys_admin",
+        "--",
+        "/nsys/nsys",
+        "start",
+        "--session=p2p",
+    ]
+
+
+def test_exec_nsys_passes_launch_tmpdir(monkeypatch):
+    from gprofiler.nsys_profiler import _exec_nsys
+
+    monkeypatch.setenv("TMPDIR", "/tmp/gprofiler_tmp")
+    monkeypatch.setenv("TEMP", '{"ip": "10.1.33.0", "port": 9192}')
+    monkeypatch.setattr(
+        "gprofiler.nsys_profiler._nsys_launch_target",
+        lambda: _launch_target(foreign_mount=False, foreign_pid=False, foreign_ipc=False, foreign_net=False),
+    )
+    with mock.patch("gprofiler.nsys_profiler.subprocess.run") as run:
+        _exec_nsys(["/usr/bin/nsys", "sessions", "list"], timeout=5)
+    env = run.call_args.kwargs["env"]
+    assert env["TMPDIR"] == "/nsys/tmp"
+    assert "TEMP" not in env
+    assert run.call_args.args[0][0] == "/nsys/nsys"
+
+
+def test_find_nsys_prefers_explicit_over_launch_process(monkeypatch, tmp_path: Path):
+    fake = tmp_path / "nsys"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+    monkeypatch.delenv("NSYS_PATH", raising=False)
+    monkeypatch.setattr("gprofiler.nsys_profiler._nsys_launch_target", lambda: _launch_target())
+    found = find_nsys(str(fake))
+    assert found == fake.resolve()
+
+
+def test_find_nsys_uses_launch_exe_when_host_binary_missing(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.delenv("NSYS_PATH", raising=False)
+    monkeypatch.setattr("gprofiler.nsys_profiler._nsys_launch_target", lambda: _launch_target())
+    assert find_nsys(None) == Path("/nsys/nsys")
+
+
+def test_pull_launch_outputs_copies_report(tmp_path: Path, monkeypatch):
+    local_dir = tmp_path / "agent" / "launch_1"
+    root = tmp_path / "root"
+    remote = Path(str(root) + str(local_dir))
+    remote.mkdir(parents=True)
+    (remote / "gprofiler_nsys_capture.nsys-rep").write_bytes(b"rep")
+    monkeypatch.setattr("gprofiler.nsys_profiler._launch_fs_root", lambda: root)
+    _pull_launch_outputs(local_dir)
+    assert (local_dir / "gprofiler_nsys_capture.nsys-rep").read_bytes() == b"rep"
+
+
+def test_parse_nsys_sessions_list_table_and_name_blocks():
+    table = "ID TIME STATE LAUNCH NAME\n1 07:51 Collection 1 gprofiler-cuda-burn\n2 08:01 Idle 1 other session\n"
+    assert parse_nsys_sessions_list(table) == [
+        {"name": "gprofiler-cuda-burn", "state": "Collection"},
+        {"name": "other session", "state": "Idle"},
+    ]
+    blocks = "Session ID: 1\nName: cuda-burn\nState: Collecting data\nName: second\nState: Idle\n"
+    assert parse_nsys_sessions_list(blocks) == [
+        {"name": "cuda-burn", "state": "Collecting"},
+        {"name": "second", "state": "Idle"},
+    ]
+    assert parse_nsys_sessions_list("") == []
+    # nsys 2025.1.3 on the host: fixed-width header, single-token STATE.
+    real = (
+        "              ID         TIME                       STATE LAUNCH NAME\n"
+        "       101971767        00:00                    Launched      1 gprofiler-dropdown-probe\n"
+    )
+    assert parse_nsys_sessions_list(real) == [{"name": "gprofiler-dropdown-probe", "state": "Launched"}]
+    assert parse_nsys_sessions_list(real.splitlines()[0]) == []
+
+
+def test_resolve_nsys_session_name_rejects_unsafe_values():
+    assert resolve_nsys_session_name(None) == "gprofiler-cuda-burn"
+    assert resolve_nsys_session_name("  cuda-burn  ") == "cuda-burn"
+    assert resolve_nsys_session_name("--session") == "gprofiler-cuda-burn"
+    assert resolve_nsys_session_name("bad\nname") == "gprofiler-cuda-burn"
+
+
+def test_list_nsys_sessions_parses_and_caches(monkeypatch):
+    reset_nsys_sessions_cache()
+    calls = []
+
+    def fake_exec(cmd, timeout):
+        calls.append(list(cmd))
+        text = "ID TIME STATE LAUNCH NAME\n1 07:51 Collection 1 gprofiler-cuda-burn\n"
+        return mock.Mock(returncode=0, stdout=text.encode())
+
+    monkeypatch.setattr("gprofiler.nsys_profiler.find_nsys", lambda explicit_path=None: Path("/usr/bin/nsys"))
+    monkeypatch.setattr("gprofiler.nsys_profiler._exec_nsys", fake_exec)
+    expected = [{"name": "gprofiler-cuda-burn", "state": "Collection"}]
+    assert list_nsys_sessions() == expected
+    assert list_nsys_sessions() == expected
+    assert calls == [["/usr/bin/nsys", "sessions", "list"]]
+    reset_nsys_sessions_cache()
+
+
+def test_list_nsys_sessions_clears_report_when_nsys_is_missing(monkeypatch):
+    reset_nsys_sessions_cache()
+    monkeypatch.setattr("gprofiler.nsys_profiler.find_nsys", lambda explicit_path=None: None)
+    assert list_nsys_sessions() == []
+    reset_nsys_sessions_cache()
+
+
+def test_list_nsys_sessions_clears_report_when_list_fails(monkeypatch):
+    reset_nsys_sessions_cache()
+    monkeypatch.setattr("gprofiler.nsys_profiler.find_nsys", lambda explicit_path=None: Path("/usr/bin/nsys"))
+    monkeypatch.setattr(
+        "gprofiler.nsys_profiler._exec_nsys",
+        lambda cmd, timeout: mock.Mock(returncode=1, stdout=b"nsys: command failed"),
+    )
+    assert list_nsys_sessions() == []
+    reset_nsys_sessions_cache()
+
+
+def test_gpu_metrics_use_console_frequency_and_process_cap():
+    assert nsys_gpu_metrics_frequency(11) == 11
+    assert nsys_gpu_metrics_frequency(1) == 10
+    assert nsys_gpu_metrics_frequency(500_000) == 200_000
+    assert nsys_gpu_metrics_args(49, 10) == [
+        "--gpu-metrics-devices=cuda-visible",
+        "--gpu-metrics-frequency=49",
+    ]
+    assert nsys_gpu_metrics_args(11, 0) == [
+        "--gpu-metrics-devices=all",
+        "--gpu-metrics-frequency=11",
+    ]
+
+
+def test_start_uses_the_requested_session_name(tmp_path: Path, monkeypatch):
+    reset_nsys_launch_session()
+    seen = []
+    _install_session_nsys(tmp_path, monkeypatch, seen)
+
+    import threading
+
+    stop = threading.Event()
+    stop.set()
+    html = collect_nsys_adhoc_html(
+        duration_sec=30,
+        work_dir=str(tmp_path / "work"),
+        stop_event=stop,
+        generate_html_fn=lambda collapsed: "<html>gpu</html>",
+        session_name="other-session",
+        frequency=49,
+        max_processes=0,
+    )
+    assert html == "<html>gpu</html>"
+    start = next(cmd for cmd in seen if "start" in cmd)
+    assert "--session=other-session" in start
+    assert "--gpu-metrics-devices=all" in start
+    assert "--gpu-metrics-frequency=49" in start
+    stop_cmds = [cmd for cmd in seen if "stop" in cmd]
+    assert stop_cmds
+    assert all("--session=other-session" in cmd for cmd in stop_cmds)
+    reset_nsys_launch_session()
