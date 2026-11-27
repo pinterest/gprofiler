@@ -195,8 +195,8 @@ class HeartbeatClient:
             "inventory_digest": digest,
             **metadata,
         }
-        # None means "not reported this beat" (nsys absent or `sessions list` failed).
         # A list, including [], is a fresh report and replaces what the server stored.
+        # [] means no live `nsys launch`, so a finished session leaves the dropdown.
         if nsys_sessions is not None:
             heartbeat_data["nsys_sessions"] = nsys_sessions
         if containers is not None and digest != self._acknowledged_inventory_digest:

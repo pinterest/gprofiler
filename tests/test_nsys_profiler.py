@@ -925,10 +925,21 @@ def test_list_nsys_sessions_parses_and_caches(monkeypatch):
     reset_nsys_sessions_cache()
 
 
-def test_list_nsys_sessions_omits_report_when_nsys_is_missing(monkeypatch):
+def test_list_nsys_sessions_clears_report_when_nsys_is_missing(monkeypatch):
     reset_nsys_sessions_cache()
     monkeypatch.setattr("gprofiler.nsys_profiler.find_nsys", lambda explicit_path=None: None)
-    assert list_nsys_sessions() is None
+    assert list_nsys_sessions() == []
+    reset_nsys_sessions_cache()
+
+
+def test_list_nsys_sessions_clears_report_when_list_fails(monkeypatch):
+    reset_nsys_sessions_cache()
+    monkeypatch.setattr("gprofiler.nsys_profiler.find_nsys", lambda explicit_path=None: Path("/usr/bin/nsys"))
+    monkeypatch.setattr(
+        "gprofiler.nsys_profiler._exec_nsys",
+        lambda cmd, timeout: mock.Mock(returncode=1, stdout=b"nsys: command failed"),
+    )
+    assert list_nsys_sessions() == []
     reset_nsys_sessions_cache()
 
 

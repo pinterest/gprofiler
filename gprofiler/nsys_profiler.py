@@ -723,12 +723,13 @@ def reset_nsys_sessions_cache() -> None:
         _sessions_cache = (0.0, _sessions_cache_miss)
 
 
-def list_nsys_sessions() -> Optional[List[Dict[str, str]]]:
+def list_nsys_sessions() -> List[Dict[str, str]]:
     """Sessions from `nsys sessions list`.
 
-    ``None`` when nsys is not installed or the list command failed — callers
-    omit the field so a previous report is kept. A list (possibly empty) means
-    nsys ran. Results are cached briefly so heartbeats do not spawn nsys every time.
+    An empty list means there is no live session: nsys is not installed, no
+    ``nsys launch`` is running, or the list command failed. Callers send that
+    list so a finished launch does not stay in the dropdown. Results are cached
+    briefly so heartbeats do not spawn nsys every time.
     """
     global _sessions_cache
     now = time.monotonic()
@@ -739,11 +740,11 @@ def list_nsys_sessions() -> Optional[List[Dict[str, str]]]:
 
     nsys = find_nsys()
     if nsys is None:
-        result: Optional[List[Dict[str, str]]] = None
+        result: List[Dict[str, str]] = []
     else:
         listed = _exec_nsys([str(nsys), "sessions", "list"], timeout=10)
         if listed is None or listed.returncode != 0:
-            result = None
+            result = []
         else:
             result = parse_nsys_sessions_list(_nsys_text(listed))
 
