@@ -24,5 +24,5 @@ retry() {
 retry 3 "yum install -y epel-release libmodulemd" && yum clean all
 
 
-retry 3 "yum install -y bzip2-devel libffi-devel perl-core zlib-devel xz-devel ca-certificates wget" && yum clean all
+retry 3 "yum install -y bzip2-devel libffi-devel perl-core zlib-devel xz-devel sqlite-devel ca-certificates wget" && yum clean all
 retry 3 "yum groupinstall -y "Development Tools"" && yum clean all
